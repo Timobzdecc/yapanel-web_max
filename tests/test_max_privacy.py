@@ -211,6 +211,8 @@ def test_distributions_include_privacy_backend():
     root = Path(__file__).resolve().parents[1]
     script = (root / ".github" / "build-windows-zip.sh").read_text(encoding="utf-8")
     assert "max_privacy.py" in script
+    updater_source = (root / "server.py").read_text(encoding="utf-8")
+    assert '"max_profile.py", "max_privacy.py"' in updater_source
     profile_source = (root / "max_profile.py").read_text(encoding="utf-8")
     assert "max_privacy.install(s, P)" in profile_source
     assert "[ ! -f /odm/bin/adbguard.sh ]" in profile_source
