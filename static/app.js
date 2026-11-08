@@ -5461,7 +5461,28 @@ $('#rd-results').onclick = e => {
 
 async function loadPrivacy() {
   let p;
-  try { p = await api('/api/privacy'); } catch { return; }
+  try { p = await api('/api/privacy'); } catch (err) {
+    $('#privacy-on').disabled = true;
+    $('#privacy-state').textContent = 'Не удалось проверить hosts: ' + err.message;
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(p, 'backend')) {
+    $('#privacy-on').checked = !!p.enabled;
+    $('#privacy-purge').hidden = p.backend !== 'panel' || !(p.enabled && p.queued > 16);
+    $('#privacy-on').disabled = !p.managed || !p.applied;
+    if (!p.managed || !p.applied) {
+      $('#privacy-state').textContent = p.error || 'Состояние hosts не подтверждено';
+    } else if (p.backend === 'adbguard-v2') {
+      $('#privacy-state').textContent = p.enabled
+        ? 'Аналитика заблокирована через adbguard v2. OTA защищена независимо от тумблера.'
+        : 'Блокировка аналитики выключена. Защита OTA остаётся включённой.';
+    } else {
+      $('#privacy-state').textContent = p.enabled
+        ? 'Блокировка аналитики включена средствами WEB-панели.'
+        : 'Блокировка аналитики WEB-панели выключена.';
+    }
+    return;
+  }
   $('#privacy-on').checked = p.enabled;
   $('#privacy-purge').hidden = !(p.enabled && p.queued > 16);
   $('#privacy-on').disabled = false;
@@ -5480,9 +5501,13 @@ $('#privacy-on').onchange = e => {
   const on = e.target.checked;
   e.target.disabled = true;
   api('/api/privacy', {enabled: on})
-    .then(() => toast(on ? 'Аналитика заблокирована' : 'Блокировка аналитики снята'))
+    .then(result => {
+      if (result && result.backend === 'adbguard-v2' && (!result.applied || result.enabled !== on))
+        throw new Error(result.error || 'adbguard не подтвердил переключение');
+      toast(on ? 'Аналитика заблокирована' : 'Блокировка аналитики снята');
+    })
     .catch(err => toast(err.message, true))
-    .finally(loadFootprint);
+    .finally(() => { loadPrivacy(); loadFootprint(); });
 };
 $('#fp-reset').onclick = e => {
   if (!confirm('Удалить с колонки всё, что поставила панель?\n\n• своя заставка и звук запуска — вернутся стандартные;\n'
