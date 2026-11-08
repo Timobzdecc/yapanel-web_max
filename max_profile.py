@@ -2467,7 +2467,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             {"key": "always", "name": "Заставка при каждой загрузке", "on": b[4]},
             {"key": "btoff", "name": "Bluetooth выключен", "on": b[13], "detail": "и после перезагрузки"},
             {"key": "privacy", "name": "Блокировка аналитики",
-             "on": self.privacy_status().get("enabled", False),
+             "on": self.privacy_status(migrate=False).get("enabled", False),
              "detail": "управление hosts: WEB-панель или внешний менеджер"},
             {"key": "viz", "name": "Живой спектр с колонки", "on": b[14], "size_kb": n(v[15]),
              "detail": "захват звука усилителя (ALSA/Android)"},
