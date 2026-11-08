@@ -57,6 +57,8 @@ _log = logging.getLogger(__name__)
 
 # Встроенный DEX собирается из device/android_audio/StationAudio.java.
 # Для локальной Android-установки он распаковывается в каталог данных панели.
+_MAX_AUDIO_DEX_PATH = Path("/data/yapanel-state/bin/StationAudio.dex")
+_MAX_AUDIO_TMP_DIR = Path("/data/yapanel-state/tmp")
 _MAX_AUDIO_DEX_SHA256 = "9b8bd5f89cc99b0ad9f8cf4a83d325c0f5e4e4d529d0ba3ab10ac5ec321fc8ea"
 _MAX_AUDIO_DEX_BASE64 = (
     "ZGV4CjAzOQCXuKuA2OU3syyIt2N4tdT7wun0D0e9hrBAEAAAcAAAAHhWNBIAAAAAAAAAAHAPAABT"
@@ -138,7 +140,7 @@ _MAX_SAY_LOCK = threading.Lock()
 
 def _max_audio_player():
     """Установить и проверить наш Android-проигрыватель без доступа к /odm."""
-    target = Path("/data/yapanel-state/bin/StationAudio.dex")
+    target = _MAX_AUDIO_DEX_PATH
     if target.exists() and hashlib.sha256(target.read_bytes()).hexdigest() == _MAX_AUDIO_DEX_SHA256:
         return target
 
@@ -176,7 +178,7 @@ def _max_android_say(text):
         if not content_type.lower().startswith("audio/") or not 256 < len(audio) <= 1_000_000:
             raise RuntimeError("Сервис синтеза речи вернул некорректные аудиоданные")
 
-        temp_dir = Path("/data/yapanel-state/tmp")
+        temp_dir = _MAX_AUDIO_TMP_DIR
         temp_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(prefix="say-", suffix=".mp3", dir=str(temp_dir),
                                          delete=False) as output:
