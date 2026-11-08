@@ -1921,8 +1921,9 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             try:
                 _max_android_say(text)
             except Exception as exc:
-                _log.exception("Не удалось воспроизвести текст на Станции Макс")
-                raise AdbError(f"Озвучивание не удалось: {exc}") from exc
+                # Не записываем текст в журнал: HTTP-ошибка TTS может содержать исходный URL.
+                _log.warning("Не удалось воспроизвести текст на Станции Макс: %s", type(exc).__name__)
+                raise AdbError(f"Озвучивание не удалось: {type(exc).__name__}") from exc
             return {"ok": True, "method": "tts_android"}
 
         # 2. Native TTS fallback
