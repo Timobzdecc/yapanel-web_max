@@ -205,3 +205,12 @@ def test_explicit_backend_requires_profiles(monkeypatch):
     monkeypatch.setenv("YAPANEL_MAX_PRIVACY_BACKEND", "adbguard-v2")
     adb = FakeAdb("missing", profiles=False, guard="")
     assert not panel(adb).privacy_status()["managed"]
+
+
+def test_distributions_include_privacy_backend():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / ".github" / "build-windows-zip.sh").read_text(encoding="utf-8")
+    assert "max_privacy.py" in script
+    profile_source = (root / "max_profile.py").read_text(encoding="utf-8")
+    assert "max_privacy.install(s, P)" in profile_source
+    assert "[ ! -f /odm/bin/adbguard.sh ]" in profile_source
