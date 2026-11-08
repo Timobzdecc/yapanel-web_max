@@ -160,6 +160,8 @@ def update_old_hook(adb, hook, custom):
 
 def install(server, panel_cls):
     """Install Station Max-specific privacy adapter; keep legacy mode available."""
+    if getattr(panel_cls, "_max_privacy_wrapped", False):
+        return
     old_status = panel_cls.privacy_status
     old_set = panel_cls.privacy_set
     old_purge = panel_cls.privacy_purge
@@ -247,3 +249,4 @@ def install(server, panel_cls):
     panel_cls.privacy_status = privacy_status
     panel_cls.privacy_set = privacy_set
     panel_cls.privacy_purge = privacy_purge
+    panel_cls._max_privacy_wrapped = True
