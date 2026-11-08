@@ -161,7 +161,7 @@ def install(server, panel_cls):
     old_set = panel_cls.privacy_set
     old_purge = panel_cls.privacy_purge
 
-    def privacy_status(self):
+    def privacy_status(self, migrate=True):
         with LOCK:
             try:
                 snapshot = probe(self.adb, server.HOSTS_CUSTOM)
@@ -172,7 +172,7 @@ def install(server, panel_cls):
             kind = classify(snapshot, backend_setting())
             if kind == "adbguard-v2":
                 status = external_status(snapshot)
-                if status["applied"]:
+                if migrate and status["applied"]:
                     try:
                         update_old_hook(self.adb, server.BOOT_HOOK, server.HOSTS_CUSTOM)
                     except (OSError, RuntimeError) as exc:
