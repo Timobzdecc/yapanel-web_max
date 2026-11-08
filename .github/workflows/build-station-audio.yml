@@ -1,0 +1,39 @@
+name: Build StationAudio DEX
+
+on:
+  push:
+    branches: [fix/max-android-say]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile first-party Android audio player
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -f "$SDK/platforms/android-34/android.jar"
+          mkdir -p build/station-audio/classes build/station-audio/dex
+          javac --release 8 -cp "$SDK/platforms/android-34/android.jar" \
+            -d build/station-audio/classes device/android_audio/StationAudio.java
+          TOOLS="$(find "$SDK/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          "$TOOLS/d8" --min-api 28 \
+            --lib "$SDK/platforms/android-34/android.jar" \
+            --output build/station-audio/dex \
+            build/station-audio/classes/StationAudio*.class
+          cp build/station-audio/dex/classes.dex build/station-audio/StationAudio.dex
+          sha256sum build/station-audio/StationAudio.dex
+          echo DEX_BASE64_START
+          base64 -w0 build/station-audio/StationAudio.dex
+          echo
+          echo DEX_BASE64_END
+      - uses: actions/upload-artifact@v4
+        with:
+          name: station-audio-dex
+          path: build/station-audio/StationAudio.dex
