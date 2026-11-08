@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import profiles
 import max_profile
@@ -98,8 +98,8 @@ class MaxProfileTests(unittest.TestCase):
     def test_max_android_say_downloads_and_plays_audio(self):
         import tempfile
 
-        audio = b"\\xff\\xf3" + b"0" * 512
-        response = Mock()
+        audio = bytes.fromhex("fff3") + b"0" * 512
+        response = MagicMock()
         response.headers = {"Content-Type": "audio/mpeg"}
         response.read.return_value = audio
         response.__enter__ = Mock(return_value=response)
