@@ -37,10 +37,13 @@ def command(adb, script, timeout=15):
     """Use plain ADB, bypassing an optional privileged file/command agent."""
     context = adb.only_adb() if callable(getattr(adb, "only_adb", None)) else contextlib.nullcontext()
     with context:
-        out, err, rc = adb.shell(script, check=False, timeout=timeout)
+        response = adb.shell(script, check=False, timeout=timeout)
+    if not isinstance(response, (tuple, list)) or len(response) < 3:
+        raise RuntimeError("ADB shell вернул некорректный ответ")
+    out, err, rc = response[:3]
     if rc:
-        raise RuntimeError((err or out or "ADB shell failed").strip()[-300:])
-    return out.replace("\r", "")
+        raise RuntimeError((str(err or out or "ADB shell failed")).strip()[-300:])
+    return str(out or "").replace("\r", "")
 
 
 def probe(adb, panel_hosts):
