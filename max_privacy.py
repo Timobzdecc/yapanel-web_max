@@ -35,7 +35,12 @@ def backend_setting():
 
 def command(adb, script, timeout=15):
     """Use plain ADB, bypassing an optional privileged file/command agent."""
-    context = adb.only_adb() if callable(getattr(adb, "only_adb", None)) else contextlib.nullcontext()
+    factory = getattr(adb, "only_adb", None)
+    context = factory() if callable(factory) else None
+    # Тестовые и некоторые облегчённые ADB-адаптеры могут не иметь
+    # настоящего контекстного менеджера. Не требуем его без необходимости.
+    if not (hasattr(context, "__enter__") and hasattr(context, "__exit__")):
+        context = contextlib.nullcontext()
     with context:
         response = adb.shell(script, check=False, timeout=timeout)
     if not isinstance(response, (tuple, list)) or len(response) < 3:
