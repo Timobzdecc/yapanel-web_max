@@ -837,6 +837,9 @@ class AssistantDaemon:
 
     @staticmethod
     def _opener(proxy: str):
+        if proxy and urllib.parse.urlsplit(proxy).scheme.lower() in ("socks5", "socks5h"):
+            from assistant_socks import build_socks_opener
+            return build_socks_opener(proxy)
         handler_args = {}
         if proxy:
             handler_args["http"] = proxy
