@@ -3299,6 +3299,9 @@ echo @@BLUEZ
         if not max_py.exists():
             max_py = ASSIST_SRC / "assistant_max.py"
         assistd_wrapper = ASSIST_SRC / "assistantd"
+        socks_helper = ROOT / "assistant_socks.py"
+        if not socks_helper.is_file():
+            socks_helper = ASSIST_SRC / "assistant_socks.py"
 
         self.adb.shell(f"mkdir -p {ASSIST_DIR}; start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; true", check=False)
         if max_py.exists() and assistd_wrapper.exists():
@@ -3310,6 +3313,13 @@ echo @@BLUEZ
             binary = self._assist_binary()
             self.adb.push(binary, ASSISTD + ".new", timeout=300)
             self.adb.shell(f"chmod 755 {shlex.quote(ASSISTD + '.new')}; mv {shlex.quote(ASSISTD + '.new')} {shlex.quote(ASSISTD)}")
+        if socks_helper.is_file() and max_py.is_file():
+            self.adb.push(socks_helper, f"{ASSIST_DIR}/assistant_socks.py.new")
+            self.adb.shell(
+                f"chmod 644 {shlex.quote(f'{ASSIST_DIR}/assistant_socks.py.new')}; "
+                f"mv {shlex.quote(f'{ASSIST_DIR}/assistant_socks.py.new')} "
+                f"{shlex.quote(f'{ASSIST_DIR}/assistant_socks.py')}"
+            )
         if not self._assist_config():
             self._assist_write({"enabled": False})
         try:
