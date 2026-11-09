@@ -3504,13 +3504,36 @@ echo @@BLUEZ
 
     def assistant_daemon_stop(self):
         """Останавливает демон помощника. Автозапуск при следующей загрузке остаётся."""
-        self.adb.shell(
-            f"pid=$(cat {ASSIST_SD} 2>/dev/null); "
-            f"if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then "
-            f"kill \"$pid\" 2>/dev/null; "
-            f"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.2; done; "
-            f"kill -0 \"$pid\" 2>/dev/null && kill -9 \"$pid\" 2>/dev/null; fi; "
-            f"rm -f {ASSIST_SD}; true", check=False)
+        if self.adb.is_local is True and Path("/system/bin/sh").is_file():
+            pidfile = Path(ASSIST_SD)
+            if _max_assistant_running(pidfile):
+                try:
+                    pid = int(pidfile.read_text(encoding="ascii").strip())
+                except (OSError, ValueError):
+                    pid = 0
+                if pid > 1:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                    for _ in range(15):
+                        if not _max_assistant_running(pidfile):
+                            break
+                        time.sleep(0.2)
+                    if _max_assistant_running(pidfile):
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+            pidfile.unlink(missing_ok=True)
+        else:
+            self.adb.shell(
+                f"pid=$(cat {ASSIST_SD} 2>/dev/null); "
+                f"if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then "
+                f"kill \"$pid\" 2>/dev/null; "
+                f"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.2; done; "
+                f"kill -0 \"$pid\" 2>/dev/null && kill -9 \"$pid\" 2>/dev/null; fi; "
+                f"rm -f {ASSIST_SD}; true", check=False)
         return self.assistant_status()
 
     def assistant_command(self, cmd):

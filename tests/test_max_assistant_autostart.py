@@ -135,5 +135,44 @@ class TestMaxAssistantAutostart(unittest.TestCase):
         detach.assert_not_called()
 
 
+class TestMaxAssistantLocalStop(unittest.TestCase):
+    def test_stale_pid_is_not_killed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            pidfile = Path(temp) / "assistant.sd"
+            pidfile.write_text("12345\n", encoding="ascii")
+            panel = server.Panel(Mock())
+            panel.adb.is_local = True
+            panel.adb.shell.return_value = ("", "", 0)
+            with patch.object(server, "ASSIST_SD", str(pidfile)):
+                with patch.object(server.Path, "is_file", return_value=True):
+                    with patch.object(server, "_max_assistant_running", return_value=False):
+                        with patch.object(server.os, "kill") as kill:
+                            panel.assistant_daemon_stop()
+            kill.assert_not_called()
+            self.assertFalse(pidfile.exists())
+
+    def test_running_pid_is_terminated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            pidfile = Path(temp) / "assistant.sd"
+            pidfile.write_text("12345\n", encoding="ascii")
+            panel = server.Panel(Mock())
+            panel.adb.is_local = True
+            panel.adb.shell.return_value = ("", "", 0)
+            with patch.object(server, "ASSIST_SD", str(pidfile)):
+                with patch.object(server.Path, "is_file", return_value=True):
+                    with patch.object(server, "_max_assistant_running", side_effect=[True, False, False]):
+                        with patch.object(server.os, "kill") as kill:
+                            with patch.object(server.time, "sleep"):
+                                panel.assistant_daemon_stop()
+            kill.assert_called_once_with(12345, server.signal.SIGTERM)
+            self.assertFalse(pidfile.exists())
+
+    def test_assistantd_wrapper_uses_lf(self):
+        wrapper = Path(server.__file__).resolve().parent / "device" / "assistant" / "assistantd"
+        data = wrapper.read_bytes()
+        self.assertNotIn(b"\r\n", data)
+        self.assertTrue(data.startswith(b"#!/system/bin/sh\n"))
+
+
 if __name__ == "__main__":
     unittest.main()
