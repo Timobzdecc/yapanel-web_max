@@ -82,7 +82,7 @@ class TestMaxAssistantAutostart(unittest.TestCase):
             self.assertIn("WAIT_FILES attempt=1", log)
             self.assertIn("RETRIES_EXHAUSTED", log)
 
-    def test_direct_launcher_writes_pid_without_start_stop_daemon(self):
+    def test_direct_launcher_waits_for_daemon_pid_without_overwriting_it(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             directory = root / "assistant"
@@ -95,9 +95,13 @@ class TestMaxAssistantAutostart(unittest.TestCase):
             child = Mock()
             child.pid = 23456
             child.poll.return_value = None
-            with patch.object(server, "_max_assistant_running", return_value=False):
+            pid_path.write_text("11111\n", encoding="ascii")  # Старый PID от предыдущего запуска.
+            def daemon_writes_pid(_seconds):
+                pid_path.write_text("23456\n", encoding="ascii")
+
+            with patch.object(server, "_max_assistant_running", side_effect=[False, False, True]):
                 with patch.object(server.subprocess, "Popen", return_value=child) as popen:
-                    with patch.object(server.time, "sleep"):
+                    with patch.object(server.time, "sleep", side_effect=daemon_writes_pid):
                         pid = server._max_assistant_launch_local(directory, pid_path)
             self.assertEqual(pid, 23456)
             self.assertEqual(pid_path.read_text(encoding="ascii").strip(), "23456")
