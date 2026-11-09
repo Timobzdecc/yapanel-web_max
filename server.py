@@ -8041,6 +8041,7 @@ def _max_assistant_launch_local(assistant_dir=None, pid_path=None):
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink()
+    threading.Thread(target=child.wait, name="assistant-reaper", daemon=True).start()
     time.sleep(0.25)
     if child.poll() is not None:
         with contextlib.suppress(OSError):
