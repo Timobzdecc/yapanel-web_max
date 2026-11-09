@@ -106,6 +106,30 @@ class TestMaxAssistantAutostart(unittest.TestCase):
             self.assertTrue(kwargs["start_new_session"])
             self.assertEqual(kwargs["stderr"], server.subprocess.STDOUT)
 
+    def test_remote_adb_does_not_launch_process_on_panel_host(self):
+        panel = server.Panel(Mock())
+        panel.adb.is_local = False
+        with patch.object(server.Path, "is_file", return_value=True):
+            with patch.object(panel, "assistant_status", return_value={"running": True}):
+                with patch.object(panel, "detach") as detach:
+                    with patch.object(server, "_max_assistant_launch_local") as launch:
+                        panel.assistant_start()
+        detach.assert_called_once()
+        launch.assert_not_called()
+
+    def test_local_adb_uses_direct_launcher(self):
+        panel = server.Panel(Mock())
+        panel.adb.is_local = True
+        with patch.object(server.Path, "is_file", return_value=True):
+            with patch.object(panel, "assistant_daemon_stop") as stop:
+                with patch.object(panel, "assistant_status", return_value={"running": True}):
+                    with patch.object(server, "_max_assistant_launch_local") as launch:
+                        with patch.object(panel, "detach") as detach:
+                            panel.assistant_start()
+        stop.assert_called_once()
+        launch.assert_called_once()
+        detach.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
