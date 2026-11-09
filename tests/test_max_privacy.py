@@ -37,6 +37,7 @@ class FakeAdb:
             "panel": ["/quasar/webpanel/hosts"],
             "foreign": ["/foreign/hosts"],
             "legacy": ["/etc/hosts-block"],
+            "odm": ["/etc/hosts"],
             "stacked": ["/etc/hosts-ota", "/quasar/webpanel/hosts"],
             "missing": [],
         }[self.mode]
@@ -123,6 +124,56 @@ def test_foreign_or_stacked_mount_never_touched(mode):
     assert not p.changes
 
 
+def test_legacy_odm_hosts_mount_is_conflict_and_never_touched(monkeypatch):
+    """Станция Макс с root-китом: /system/etc/hosts — bind /odm/etc/hosts.
+
+    Панель должна увидеть чужой mount, не снимать его и не трогать тумблер.
+    """
+    monkeypatch.delenv("YAPANEL_MAX_PRIVACY_BACKEND", raising=False)
+    adb = FakeAdb("odm", profiles=False, guard="")
+    original_shell = adb.shell
+
+    def shell(command, check=False, timeout=15):
+        if "PRV_HOSTS_BEGIN" not in command:
+            return original_shell(command, check=check, timeout=timeout)
+        adb.commands.append(command)
+        content = "127.0.0.1 localhost\n::1 localhost\n"
+        # Реальный /odm-кит пишет аналитику на 127.0.0.1, без ::1.
+        content += "".join(f"127.0.0.1\t{host}\n" for host in m.ANALYTICS)
+        content += "".join(f"127.0.0.1\t{host}\n" for host in m.OTA)
+        data = [
+            "PRV_GUARD=", "PRV_SCRIPT=no", "PRV_PROFILES=no", "PRV_FLAG=on",
+            "PRV_MOUNT:/etc/hosts", "PRV_OWN=no",
+            "PRV_HOSTS_BEGIN", content.rstrip("\n"), "PRV_HOSTS_END",
+        ]
+        return ("\n".join(data) + "\n", "", 0)
+
+    adb.shell = shell
+    p = panel(adb)
+    status = p.privacy_status()
+    assert status["backend"] == "conflict"
+    assert status["blocked"] is True
+    assert status["managed"] is False
+    assert "внешним hosts" in status["error"]
+    with pytest.raises(AdbError):
+        p.privacy_set(True)
+    with pytest.raises(AdbError):
+        p.privacy_purge()
+    assert not p.changes
+    assert not any(command.startswith(("mount ", "umount ")) for command in adb.commands)
+
+
+def test_conflict_migrates_old_hook_only_when_requested(monkeypatch):
+    adb = FakeAdb("odm", profiles=False, guard="")
+    p = panel(adb)
+    calls = []
+    monkeypatch.setattr(m, "update_old_hook", lambda *args: calls.append(args))
+    assert p.privacy_status(migrate=False)["backend"] == "conflict"
+    assert not calls
+    assert p.privacy_status()["backend"] == "conflict"
+    assert calls
+
+
 def test_legacy_guard_never_falls_back_to_panel():
     adb = FakeAdb("legacy", profiles=False, guard="running")
     p = panel(adb)
@@ -166,6 +217,7 @@ def test_dry_run_status_does_not_migrate_hook(monkeypatch):
     assert p.privacy_status(migrate=False)["applied"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX sh/sed")
 def test_legacy_hook_migration_preserves_unrelated_lines(tmp_path):
     hook = tmp_path / "boot_hook.sh"
     source = tmp_path / "hosts"
@@ -184,6 +236,7 @@ def test_legacy_hook_migration_preserves_unrelated_lines(tmp_path):
     m.update_old_hook(ShellAdb(), str(hook), str(source))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX sh/sed")
 def test_bad_hook_is_not_overwritten(tmp_path):
     hook = tmp_path / "boot_hook.sh"
     source = tmp_path / "hosts"

@@ -98,6 +98,17 @@ def classify(snap, forced="auto"):
     return "conflict"
 
 
+BLOCK_ADDRESSES = {"0.0.0.0", "127.0.0.1", "::1"}
+
+
+def hosts_blocked(snap, hosts):
+    """True, когда активный hosts уже перенаправляет все указанные домены в localhost."""
+    if not snap.get("hosts_read"):
+        return False
+    rules = snap.get("rules") or {}
+    return all(rules.get(host.lower(), set()) & BLOCK_ADDRESSES for host in hosts)
+
+
 def external_status(snap):
     rules = snap["rules"]
     ota_ok = snap["hosts_read"] and all(
@@ -190,9 +201,22 @@ def install(server, panel_cls):
                                       error="Не удалось обновить старый boot_hook.sh: " + str(exc))
                 return status
             if kind == "conflict":
+                blocked = hosts_blocked(snapshot, server.ANALYTICS_HOSTS)
+                error = ("Аналитика уже блокируется внешним hosts (/odm). "
+                         "Панель не будет его менять; OTA-защита остаётся на внешнем менеджере."
+                         if blocked else
+                         "Обнаружен чужой hosts mount. Панель не будет снимать его")
+                if migrate:
+                    try:
+                        # Убираем только старую строку панели из boot_hook.sh,
+                        # чтобы она не перекрыла внешний hosts при загрузке.
+                        update_old_hook(self.adb, server.BOOT_HOOK, server.HOSTS_CUSTOM)
+                    except (OSError, RuntimeError) as exc:
+                        error += " Не удалось убрать старый bind из boot_hook.sh: " + str(exc)
                 return {"backend": "conflict", "enabled": False, "managed": False,
-                        "applied": False, "hosts": list(server.ANALYTICS_HOSTS), "queued": 0,
-                        "error": "Обнаружен чужой hosts mount. Панель не будет снимать его"}
+                        "applied": False, "blocked": blocked,
+                        "hosts": list(server.ANALYTICS_HOSTS), "queued": 0,
+                        "error": error}
             try:
                 result = old_status(self)
             except (OSError, RuntimeError) as exc:
