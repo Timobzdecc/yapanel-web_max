@@ -3487,7 +3487,7 @@ echo @@BLUEZ
         return {"models": res.get("models") or []}
 
     def assistant_start(self):
-        if Path("/system/bin/sh").is_file() and Path(ASSISTD).is_file():
+        if self.adb.is_local is True and Path("/system/bin/sh").is_file() and Path(ASSISTD).is_file():
             # На локальной Android-установке штатный start-stop-daemon может отсутствовать.
             self.assistant_daemon_stop()
             _max_assistant_launch_local()
@@ -8223,7 +8223,7 @@ def main():
     adb_bin = "local" if device == "local" else find_adb(cfg.device.use_pyadb)
     adb = Adb(adb_bin, device)
     panel = Panel(adb, config=cfg)
-    if model == "max" and Path("/system/bin/sh").is_file() and Path("/data/quasar").is_dir():
+    if model == "max" and adb.is_local is True and Path("/system/bin/sh").is_file() and Path("/data/quasar").is_dir():
         _max_assistant_boot_log("PANEL_STARTED profile=max")
         threading.Thread(target=_max_assistant_autostart_worker,
                          name="assistant-autostart", daemon=True).start()
