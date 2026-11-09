@@ -3287,6 +3287,12 @@ echo @@BLUEZ
         except (ValueError, IndexError):
             state = {}
         cfg = self._assist_keys_migrate(self._assist_config())
+        llm = cfg.get("llm")
+        if not isinstance(llm, dict):
+            llm = cfg["llm"] = {}
+        real_proxy = str(llm.get("proxy") or "")
+        llm["proxy"] = self._mask_proxy(real_proxy)
+        llm["proxy_set"] = bool(real_proxy)
         # ключи наружу не отдаём: только для каких адресов они есть и последние символы
         mask = lambda k: ("…" + k[-4:]) if len(k) > 8 else "задан"
         cfg["keys"] = {url: mask(k) for url, k in (cfg.get("keys") or {}).items() if k}
@@ -3304,6 +3310,33 @@ echo @@BLUEZ
         return {"supported": True, "installed": "installed" in flags, "running": running, "config": cfg,
                 "outdated": outdated,
                 "state": state if running else {}}
+
+    def _assist_proxy_value(self, old, new):
+        """Маска пароля не должна затирать сохранённый прокси при сохранении формы."""
+        old = str(old or "").strip()
+        new = str(new or "").strip()
+        if "•••" in new:
+            if not old or self._mask_proxy(old) != new:
+                raise AdbError("пароль прокси скрыт; введите его заново при смене адреса или логина")
+            return old
+        if new:
+            self._validate_assist_proxy(new)
+        return new
+
+    @staticmethod
+    def _validate_assist_proxy(proxy):
+        """Проверяет SOCKS5/SOCKS5H до записи в config.json."""
+        proxy = str(proxy or "").strip()
+        if urlparse(proxy).scheme.lower() not in ("socks5", "socks5h"):
+            return
+        try:
+            from assistant_socks import SocksProxyError, parse_socks_url
+        except ImportError:
+            raise AdbError("модуль SOCKS5 не установлен — обновите панель") from None
+        try:
+            parse_socks_url(proxy)
+        except SocksProxyError as e:
+            raise AdbError(str(e)) from None
 
     def assistant_install(self):
         arch, _, _ = self.adb.shell("uname -m", check=False)
@@ -3397,7 +3430,10 @@ echo @@BLUEZ
             sec = cfg.setdefault(part, {})
             for k in fields:
                 if k in src:
-                    sec[k] = src[k]
+                    if part == "llm" and k == "proxy":
+                        sec[k] = self._assist_proxy_value(sec.get("proxy", ""), src[k])
+                    else:
+                        sec[k] = src[k]
             key = str(src.get("api_key") or "").strip()
             if key:
                 if not sec.get("base_url"):
@@ -3422,6 +3458,15 @@ echo @@BLUEZ
     def assistant_models(self, d):
         """Список моделей API — запрашивает сама колонка: её сеть и прокси, ключ из настроек или ещё не сохранённый."""
         over = {k: str(d.get(k) or "").strip() for k in ("base_url", "api_key", "proxy")}
+        if "•••" in over["proxy"]:
+            cfg = self._assist_config()
+            llm = cfg.get("llm") if isinstance(cfg, dict) else None
+            stored = str((llm or {}).get("proxy") or "") if isinstance(llm, dict) else ""
+            if not stored or self._mask_proxy(stored) != over["proxy"]:
+                raise AdbError("пароль прокси скрыт; введите его заново при смене адреса или логина")
+            over["proxy"] = stored
+        if over["proxy"]:
+            self._validate_assist_proxy(over["proxy"])
         tmp = "/tmp/webpanel_assistant.models"
         with tempfile.TemporaryDirectory() as td:
             f = Path(td) / "o.json"

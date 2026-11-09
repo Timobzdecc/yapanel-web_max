@@ -4,6 +4,7 @@ import http.server
 import os
 import pathlib
 import select
+import shutil
 import socket
 import socketserver
 import ssl
@@ -154,6 +155,7 @@ class TestSocks(unittest.TestCase):
                 with self.assertRaises(SocksProxyError):
                     parse_socks_url(url)
 
+    @unittest.skipUnless(shutil.which("openssl"), "openssl not installed")
     def test_https_certificate_is_verified(self):
         with tempfile.TemporaryDirectory() as directory:
             cert = pathlib.Path(directory) / "cert.pem"
@@ -184,6 +186,22 @@ class TestSocks(unittest.TestCase):
                     os.environ.pop("SSL_CERT_FILE", None)
                 else:
                     os.environ["SSL_CERT_FILE"] = original
+
+
+class TestDistribution(unittest.TestCase):
+    def test_socks_helper_in_distribution_lists(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        self.assertIn("assistant_socks.py", (root / ".github" / "build-windows-zip.sh").read_text(encoding="utf-8"))
+        self.assertIn("assistant_socks.py", (root / "Dockerfile").read_text(encoding="utf-8"))
+        self.assertIn('"assistant_socks.py"', (root / "server.py").read_text(encoding="utf-8"))
+
+    def test_proxy_credentials_are_redacted(self):
+        import assistant_max
+        proxy = "socks5h://user:secret@proxy.example:1080"
+        secrets = assistant_max._config_secrets({"llm": {"proxy": proxy}})
+        self.assertIn(proxy, secrets)
+        self.assertIn("secret", secrets)
+        self.assertNotIn("secret", assistant_max._redact_secrets(f"failed {proxy}", secrets))
 
 
 if __name__ == "__main__":
