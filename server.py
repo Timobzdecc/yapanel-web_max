@@ -8103,20 +8103,16 @@ def _max_assistant_launch_local(assistant_dir=None, pid_path=None):
             env=env,
         )
 
-    temporary = pidfile.with_name(pidfile.name + ".new." + str(os.getpid()))
-    try:
-        temporary.write_text(str(child.pid) + "\n", encoding="ascii")
-        os.replace(temporary, pidfile)
-    finally:
-        with contextlib.suppress(OSError):
-            temporary.unlink()
+    # PID публикует сам assistant_max.py после захвата межпроцессного lock.
+    # Не перетираем PID процесса, который мог раньше запустить boot_hook.sh.
     threading.Thread(target=child.wait, name="assistant-reaper", daemon=True).start()
-    time.sleep(0.25)
-    if child.poll() is not None:
-        with contextlib.suppress(OSError):
-            pidfile.unlink()
-        raise RuntimeError("процесс ассистента завершился при запуске")
-    return child.pid
+    for _ in range(30):
+        if _max_assistant_running(pidfile):
+            return int(pidfile.read_text(encoding="ascii").strip())
+        if child.poll() is not None:
+            raise RuntimeError("процесс ассистента завершился при запуске")
+        time.sleep(0.1)
+    raise RuntimeError("ассистент не опубликовал PID после запуска")
 
 
 def _max_assistant_autostart_worker(assistant_dir=None, log_path=None, attempts=36,
