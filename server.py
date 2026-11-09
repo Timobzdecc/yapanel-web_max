@@ -3417,8 +3417,13 @@ echo @@BLUEZ
         return {"models": res.get("models") or []}
 
     def assistant_start(self):
-        self.adb.shell(f"start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; sleep 0.5; true", check=False)
-        self.detach("assistant", ASSIST_RUN)
+        if Path("/system/bin/sh").is_file() and Path(ASSISTD).is_file():
+            # На локальной Android-установке штатный start-stop-daemon может отсутствовать.
+            self.assistant_daemon_stop()
+            _max_assistant_launch_local()
+        else:
+            self.adb.shell(f"start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; sleep 0.5; true", check=False)
+            self.detach("assistant", ASSIST_RUN)
         for _ in range(10):
             time.sleep(0.5)
             st = self.assistant_status()
@@ -7975,6 +7980,110 @@ def remove_settings_keys(*keys):
     return update_settings(mutate)
 
 
+
+def _max_assistant_boot_log(message, path=None):
+    """Журнал автозапуска без ключей, текста запросов и учётных данных."""
+    target = Path(path or "/data/yapanel/assistant-autostart.log")
+    try:
+        fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as stream:
+            stream.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + message + "\n")
+    except OSError:
+        pass
+
+
+def _max_assistant_running(pid_path=None):
+    """Проверяем PID и cmdline, исключая повторное использование PID другим процессом."""
+    path = Path(pid_path or ASSIST_SD)
+    try:
+        pid = int(path.read_text(encoding="ascii").strip())
+        if pid <= 1:
+            return False
+        os.kill(pid, 0)
+        cmdline = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+        return b"assistant_max.py" in cmdline
+    except (OSError, ValueError):
+        return False
+
+
+def _max_assistant_launch_local(assistant_dir=None, pid_path=None):
+    """Запуск через Python без зависимости от start-stop-daemon на Android 9."""
+    directory = Path(assistant_dir or ASSIST_DIR)
+    pidfile = Path(pid_path or ASSIST_SD)
+    launcher = directory / "assistantd"
+    config = directory / "config.json"
+    if not config.is_file() or not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise FileNotFoundError("файлы ассистента ещё не готовы")
+    if _max_assistant_running(pidfile):
+        return int(pidfile.read_text(encoding="ascii").strip())
+
+    env = os.environ.copy()
+    ca = Path("/data/yapanel/certs/cacert.pem")
+    if not env.get("SSL_CERT_FILE") and ca.is_file():
+        env["SSL_CERT_FILE"] = str(ca)
+
+    with (directory / "assistant.log").open("ab") as output:
+        child = subprocess.Popen(
+            [str(launcher), "-dir", str(directory)],
+            cwd=str(directory),
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=env,
+        )
+
+    temporary = pidfile.with_name(pidfile.name + ".new." + str(os.getpid()))
+    try:
+        temporary.write_text(str(child.pid) + "\n", encoding="ascii")
+        os.replace(temporary, pidfile)
+    finally:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+    time.sleep(0.25)
+    if child.poll() is not None:
+        with contextlib.suppress(OSError):
+            pidfile.unlink()
+        raise RuntimeError("процесс ассистента завершился при запуске")
+    return child.pid
+
+
+def _max_assistant_autostart_worker(assistant_dir=None, log_path=None, attempts=36,
+                                    delay=5, sleep=None, launch=None):
+    """Ожидаем файлы /data, запускаем ассистента и оставляем диагностический след."""
+    directory = Path(assistant_dir or ASSIST_DIR)
+    pidfile = Path(ASSIST_SD)
+    pause = sleep or time.sleep
+    start = launch or _max_assistant_launch_local
+    record = lambda message: _max_assistant_boot_log(message, log_path)
+    record("WORKER_STARTED")
+    for attempt in range(1, attempts + 1):
+        pause(delay)
+        ready_config = (directory / "config.json").is_file()
+        launcher = directory / "assistantd"
+        ready_launcher = launcher.is_file() and os.access(launcher, os.X_OK)
+        if not (ready_config and ready_launcher):
+            if attempt in (1, 3, 6, 12, 24, 36):
+                record("WAIT_FILES attempt={} config={} launcher={}".format(
+                    attempt, int(ready_config), int(ready_launcher)))
+            continue
+        if _max_assistant_running(pidfile):
+            record("ALREADY_RUNNING")
+            return True
+        record("START_ATTEMPT attempt=" + str(attempt))
+        try:
+            start()
+            if _max_assistant_running(pidfile):
+                record("START_OK")
+                return True
+            record("START_RETURNED_NOT_RUNNING")
+        except Exception as error:
+            record("START_ERROR attempt={} type={}".format(attempt, type(error).__name__))
+    record("RETRIES_EXHAUSTED")
+    return False
+
+
 def main():
     import profiles
     ap = argparse.ArgumentParser(description="Веб-панель для Яндекс Станций")
@@ -8044,6 +8153,10 @@ def main():
     adb_bin = "local" if device == "local" else find_adb(cfg.device.use_pyadb)
     adb = Adb(adb_bin, device)
     panel = Panel(adb, config=cfg)
+    if model == "max" and Path("/system/bin/sh").is_file() and Path("/data/quasar").is_dir():
+        _max_assistant_boot_log("PANEL_STARTED profile=max")
+        threading.Thread(target=_max_assistant_autostart_worker,
+                         name="assistant-autostart", daemon=True).start()
     panel.auth = glagol.YandexAuth(AUTH_FILE)
     host = device.rpartition(":")[0] if device and ":" in device else None
     if adb.is_local and not host:
