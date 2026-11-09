@@ -196,6 +196,21 @@ def _redact_value(value, secrets):
     return value
 
 
+def _proxy_secrets(proxy) -> set:
+    """Пароль и полный URL прокси, которые нельзя показывать в status/логах."""
+    secrets = set()
+    proxy = str(proxy or "")
+    if proxy:
+        secrets.add(proxy)
+        try:
+            password = urllib.parse.urlsplit(proxy).password
+        except (ValueError, TypeError):
+            password = None
+        if password:
+            secrets.add(urllib.parse.unquote(password))
+    return secrets
+
+
 def _config_secrets(cfg: dict) -> set:
     secrets = set()
     if not isinstance(cfg, dict):
@@ -204,6 +219,9 @@ def _config_secrets(cfg: dict) -> set:
         sec = cfg.get(part)
         if isinstance(sec, dict) and isinstance(sec.get("api_key"), str):
             secrets.add(sec["api_key"])
+    llm = cfg.get("llm")
+    if isinstance(llm, dict):
+        secrets |= _proxy_secrets(llm.get("proxy"))
     keys = cfg.get("keys")
     if isinstance(keys, dict):
         for value in keys.values():
@@ -642,6 +660,24 @@ class GlagolClient:
         return self.send_command({"command": "sendText", "text": f"Повтори за мной {speech}"})
 
 
+def _acquire_assistant_lock(path: Path):
+    """Эксклюзивный lock: второй запуск из boot_hook или Yapanel не станет демоном."""
+    if os.name != "posix":
+        return True, None
+    import fcntl
+
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return False, None
+    except BaseException:
+        os.close(fd)
+        raise
+    return True, fd
+
+
 class AssistantDaemon:
     def __init__(self, work_dir: str = "/data/quasar/webpanel/assistant"):
         self.work_dir = Path(work_dir)
@@ -837,6 +873,9 @@ class AssistantDaemon:
 
     @staticmethod
     def _opener(proxy: str):
+        if proxy and urllib.parse.urlsplit(proxy).scheme.lower() in ("socks5", "socks5h"):
+            from assistant_socks import build_socks_opener
+            return build_socks_opener(proxy)
         handler_args = {}
         if proxy:
             handler_args["http"] = proxy
@@ -1093,35 +1132,45 @@ class AssistantDaemon:
                 time.sleep(2)
 
     def run(self):
-        self.sd_path.write_text(str(os.getpid()), encoding="utf-8")
-        self.write_status()
-
-        t = threading.Thread(target=self.run_logcat_listener, daemon=True)
-        t.start()
-
+        claimed, lock_fd = _acquire_assistant_lock(
+            self.sd_path.with_name(self.sd_path.name + ".lock")
+        )
+        if not claimed:
+            return
         try:
-            while self.running:
-                self.reload_config_if_changed()
-                self.check_commands()
-                # Проверка таймаута режима ассистента
-                timed_out = False
-                with self.lock:
-                    if self.mode:
-                        mode_cfg = self.cfg.get("mode") if isinstance(self.cfg.get("mode"), dict) else {}
-                        try:
-                            timeout_min = max(1, min(240, int(mode_cfg.get("timeout_min", 10))))
-                        except (TypeError, ValueError):
-                            timeout_min = 10
-                        if time.time() - self.mode_at > timeout_min * 60:
-                            self.mode = False
-                            timed_out = True
-                if timed_out:
-                    self.write_status()
-                time.sleep(0.3)
+            self.sd_path.write_text(str(os.getpid()), encoding="utf-8")
+            self.write_status()
+
+            t = threading.Thread(target=self.run_logcat_listener, daemon=True)
+            t.start()
+
+            try:
+                while self.running:
+                    self.reload_config_if_changed()
+                    self.check_commands()
+                    # Проверка таймаута режима ассистента
+                    timed_out = False
+                    with self.lock:
+                        if self.mode:
+                            mode_cfg = self.cfg.get("mode") if isinstance(self.cfg.get("mode"), dict) else {}
+                            try:
+                                timeout_min = max(1, min(240, int(mode_cfg.get("timeout_min", 10))))
+                            except (TypeError, ValueError):
+                                timeout_min = 10
+                            if time.time() - self.mode_at > timeout_min * 60:
+                                self.mode = False
+                                timed_out = True
+                    if timed_out:
+                        self.write_status()
+                    time.sleep(0.3)
+            finally:
+                self.running = False
+                self.sd_path.unlink(missing_ok=True)
+                self.status_path.unlink(missing_ok=True)
+
         finally:
-            self.running = False
-            self.sd_path.unlink(missing_ok=True)
-            self.status_path.unlink(missing_ok=True)
+            if lock_fd is not None:
+                os.close(lock_fd)
 
 
 def print_models(config_path: str, override_path: str):
@@ -1180,7 +1229,7 @@ def print_models(config_path: str, override_path: str):
         models.sort()
         print(json.dumps({"models": models}, ensure_ascii=False))
     except Exception as e:
-        safe_error = _redact_secrets(str(e), {api_key})
+        safe_error = _redact_secrets(str(e), {api_key} | _proxy_secrets(proxy))
         print(json.dumps({"error": f"Ошибка запроса моделей: {safe_error}"}, ensure_ascii=False))
 
 

@@ -2150,10 +2150,14 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             f"[ -d {s.OVR_DIR}/sounds ] && (cd {s.OVR_DIR}/sounds && find . -type f) | while read -r f; do "
             f"bind \"{s.OVR_DIR}/sounds/${{f#./}}\" \"{s.SOUNDS_DIR}/${{f#./}}\"; done\n"
             f"[ -f {s.WEB_DIR}/bt_off ] && ( svc bluetooth disable ) >/dev/null 2>&1 &\n"
-            f"[ -f {s.ASSIST_CONF} ] && [ -x {s.ASSISTD} ] && {{ "
+            f"[ -f {s.ASSIST_CONF} ] && [ -x {s.ASSISTD} ] && [ ! -f {s.ASSIST_NO_AUTOSTART} ] && {{ "
             f"if [ ! -f {s.ASSIST_SD} ] || ! kill -0 \"$(cat {s.ASSIST_SD} 2>/dev/null)\" 2>/dev/null; then "
-            f"rm -f {s.ASSIST_SD}; "
-            f"/odm/bin/start-stop-daemon -S -b -m -p {s.ASSIST_SD} -x /bin/sh -- -c {shlex.quote(s.ASSIST_RUN)}; "
+            # PID публикует только Python-демон после получения flock.
+            # start-stop-daemon с -m перезаписывал бы PID при гонке с автозапуском Yapanel.
+            f"if [ -x /odm/bin/start-stop-daemon ]; then "
+            f"/odm/bin/start-stop-daemon -S -b -x /system/bin/sh -- -c {shlex.quote(s.ASSIST_RUN)}; "
+            f"else ( /system/bin/sh -c {shlex.quote(s.ASSIST_RUN)} </dev/null >/dev/null 2>&1 & ); "
+            f"fi; "
             f"fi; }}\n"
             + s.wakeword_boot_lines(android=True)
             + s.frida_boot_lines(android=True)
@@ -2688,7 +2692,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
                 owned.append(path)
 
         for attr in ("BOOT_CUSTOM", "SOUND_CUSTOM", "BOOT_ALWAYS", "BOOT_HOOK", "BT_OFF", "HOSTS_CUSTOM",
-                     "WAKE_AUTOSTART", "WAKE_FRIDA_AUTOSTART"):
+                     "ASSIST_NO_AUTOSTART", "WAKE_AUTOSTART", "WAKE_FRIDA_AUTOSTART"):
             _add_owned(getattr(s, attr, None))
         created = getattr(s, "ROOTKEEPER_CREATED", "")
         if created and posixpath.normpath(str(created)).startswith(web + "/"):

@@ -317,6 +317,7 @@ def analytics_hosts_text(base):
 ASSIST_DIR = _cfg.remote.assist_dir
 ASSISTD = f"{ASSIST_DIR}/assistantd"
 ASSIST_CONF = f"{ASSIST_DIR}/config.json"
+ASSIST_NO_AUTOSTART = f"{WEB_DIR}/assistant_no_autostart"
 ASSIST_STATUS = "/tmp/webpanel_assistant.json"
 ASSIST_CMD = "/tmp/webpanel_assistant.cmd"
 ASSIST_SD = "/tmp/webpanel_assistant.sd"
@@ -612,7 +613,7 @@ BOOT_HOOK_SCRIPT = (
     f"[ -f {YAM_AUTOSTART} ] && [ -x {YAMD} ] && ! pidof yamd >/dev/null && "
     f"start-stop-daemon -S -b -m -p /tmp/webpanel_yamd.sd -x /bin/sh -- -c {shlex.quote(YAMD_CMD)}\n"
     f"[ -f {ALARM_CONF} ] && [ -f {ALARMD} ] && start-stop-daemon -S -b -m -p {ALARM_SD} -x /bin/sh -- {ALARMD}\n"
-    f"[ -f {ASSIST_CONF} ] && [ -x {ASSISTD} ] && start-stop-daemon -S -b -m -p {ASSIST_SD} -x /bin/sh -- -c {shlex.quote(ASSIST_RUN)}\n"
+    f"[ -f {ASSIST_CONF} ] && [ -x {ASSISTD} ] && [ ! -f {ASSIST_NO_AUTOSTART} ] && start-stop-daemon -S -b -m -p {ASSIST_SD} -x /bin/sh -- -c {shlex.quote(ASSIST_RUN)}\n"
     f"[ -f {BTOUT_MAC} ] && [ -f {BTOUT_SH} ] && start-stop-daemon -S -b -m -p {BTOUT_SD} -x /bin/sh -- {BTOUT_SH}\n"
     # свои слова активации: демон из yam-пакета, стартуем из /data (rootfs-init после OTA пропадает)
     + wakeword_boot_lines(android=False) +
@@ -3279,7 +3280,8 @@ echo @@BLUEZ
             f"[ -x {ASSISTD} ] && echo @installed && md5sum {ASSISTD}; "
             f"[ -f {ASSIST_DIR}/assistant_max.py ] && echo @pymd5 && md5sum {ASSIST_DIR}/assistant_max.py; "
             f"[ -f {ASSIST_SD} ] && kill -0 $(cat {ASSIST_SD}) 2>/dev/null "
-            f"&& echo @running; echo @status; cat {ASSIST_STATUS} 2>/dev/null; echo; true", check=False)
+            f"&& echo @running; [ -f {ASSIST_NO_AUTOSTART} ] && echo @noautostart; "
+            f"echo @status; cat {ASSIST_STATUS} 2>/dev/null; echo; true", check=False)
         out = strip_ansi(out)
         flags = set(re.findall(r"^@(\w+)$", out, re.M))
         try:
@@ -3287,6 +3289,12 @@ echo @@BLUEZ
         except (ValueError, IndexError):
             state = {}
         cfg = self._assist_keys_migrate(self._assist_config())
+        llm = cfg.get("llm")
+        if not isinstance(llm, dict):
+            llm = cfg["llm"] = {}
+        real_proxy = str(llm.get("proxy") or "")
+        llm["proxy"] = self._mask_proxy(real_proxy)
+        llm["proxy_set"] = bool(real_proxy)
         # ключи наружу не отдаём: только для каких адресов они есть и последние символы
         mask = lambda k: ("…" + k[-4:]) if len(k) > 8 else "задан"
         cfg["keys"] = {url: mask(k) for url, k in (cfg.get("keys") or {}).items() if k}
@@ -3302,8 +3310,49 @@ echo @@BLUEZ
         if local_py:
             outdated = outdated or not py_md5 or py_md5 != local_py
         return {"supported": True, "installed": "installed" in flags, "running": running, "config": cfg,
+                "autostart": "noautostart" not in flags,
                 "outdated": outdated,
                 "state": state if running else {}}
+
+    def assistant_autostart(self, on):
+        """Включает/выключает только запуск процесса после перезагрузки."""
+        flag = shlex.quote(ASSIST_NO_AUTOSTART)
+        if on:
+            self.adb.shell(f"rm -f {flag}", check=False)
+        else:
+            self.adb.shell(f"mkdir -p {shlex.quote(WEB_DIR)}; touch {flag}; chmod 644 {flag}", check=False)
+        try:
+            self._ensure_hook()
+        except AdbError:
+            pass
+        return self.assistant_status()
+
+    def _assist_proxy_value(self, old, new):
+        """Маска пароля не должна затирать сохранённый прокси при сохранении формы."""
+        old = str(old or "").strip()
+        new = str(new or "").strip()
+        if "•••" in new:
+            if not old or self._mask_proxy(old) != new:
+                raise AdbError("пароль прокси скрыт; введите его заново при смене адреса или логина")
+            return old
+        if new:
+            self._validate_assist_proxy(new)
+        return new
+
+    @staticmethod
+    def _validate_assist_proxy(proxy):
+        """Проверяет SOCKS5/SOCKS5H до записи в config.json."""
+        proxy = str(proxy or "").strip()
+        if urlparse(proxy).scheme.lower() not in ("socks5", "socks5h"):
+            return
+        try:
+            from assistant_socks import SocksProxyError, parse_socks_url
+        except ImportError:
+            raise AdbError("модуль SOCKS5 не установлен — обновите панель") from None
+        try:
+            parse_socks_url(proxy)
+        except SocksProxyError as e:
+            raise AdbError(str(e)) from None
 
     def assistant_install(self):
         arch, _, _ = self.adb.shell("uname -m", check=False)
@@ -3314,6 +3363,9 @@ echo @@BLUEZ
         if not max_py.exists():
             max_py = ASSIST_SRC / "assistant_max.py"
         assistd_wrapper = ASSIST_SRC / "assistantd"
+        socks_helper = ROOT / "assistant_socks.py"
+        if not socks_helper.is_file():
+            socks_helper = ASSIST_SRC / "assistant_socks.py"
 
         self.adb.shell(f"mkdir -p {ASSIST_DIR}; start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; true", check=False)
         if max_py.exists() and assistd_wrapper.exists():
@@ -3325,6 +3377,13 @@ echo @@BLUEZ
             binary = self._assist_binary()
             self.adb.push(binary, ASSISTD + ".new", timeout=300)
             self.adb.shell(f"chmod 755 {shlex.quote(ASSISTD + '.new')}; mv {shlex.quote(ASSISTD + '.new')} {shlex.quote(ASSISTD)}")
+        if socks_helper.is_file() and max_py.is_file():
+            self.adb.push(socks_helper, f"{ASSIST_DIR}/assistant_socks.py.new")
+            self.adb.shell(
+                f"chmod 644 {shlex.quote(f'{ASSIST_DIR}/assistant_socks.py.new')}; "
+                f"mv {shlex.quote(f'{ASSIST_DIR}/assistant_socks.py.new')} "
+                f"{shlex.quote(f'{ASSIST_DIR}/assistant_socks.py')}"
+            )
         if not self._assist_config():
             self._assist_write({"enabled": False})
         try:
@@ -3387,7 +3446,10 @@ echo @@BLUEZ
             sec = cfg.setdefault(part, {})
             for k in fields:
                 if k in src:
-                    sec[k] = src[k]
+                    if part == "llm" and k == "proxy":
+                        sec[k] = self._assist_proxy_value(sec.get("proxy", ""), src[k])
+                    else:
+                        sec[k] = src[k]
             key = str(src.get("api_key") or "").strip()
             if key:
                 if not sec.get("base_url"):
@@ -3412,6 +3474,15 @@ echo @@BLUEZ
     def assistant_models(self, d):
         """Список моделей API — запрашивает сама колонка: её сеть и прокси, ключ из настроек или ещё не сохранённый."""
         over = {k: str(d.get(k) or "").strip() for k in ("base_url", "api_key", "proxy")}
+        if "•••" in over["proxy"]:
+            cfg = self._assist_config()
+            llm = cfg.get("llm") if isinstance(cfg, dict) else None
+            stored = str((llm or {}).get("proxy") or "") if isinstance(llm, dict) else ""
+            if not stored or self._mask_proxy(stored) != over["proxy"]:
+                raise AdbError("пароль прокси скрыт; введите его заново при смене адреса или логина")
+            over["proxy"] = stored
+        if over["proxy"]:
+            self._validate_assist_proxy(over["proxy"])
         tmp = "/tmp/webpanel_assistant.models"
         with tempfile.TemporaryDirectory() as td:
             f = Path(td) / "o.json"
@@ -3432,8 +3503,13 @@ echo @@BLUEZ
         return {"models": res.get("models") or []}
 
     def assistant_start(self):
-        self.adb.shell(f"start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; sleep 0.5; true", check=False)
-        self.detach("assistant", ASSIST_RUN)
+        if self.adb.is_local is True and Path("/system/bin/sh").is_file() and Path(ASSISTD).is_file():
+            # На локальной Android-установке штатный start-stop-daemon может отсутствовать.
+            self.assistant_daemon_stop()
+            _max_assistant_launch_local()
+        else:
+            self.adb.shell(f"start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; sleep 0.5; true", check=False)
+            self.detach("assistant", ASSIST_RUN)
         for _ in range(10):
             time.sleep(0.5)
             st = self.assistant_status()
@@ -3444,13 +3520,36 @@ echo @@BLUEZ
 
     def assistant_daemon_stop(self):
         """Останавливает демон помощника. Автозапуск при следующей загрузке остаётся."""
-        self.adb.shell(
-            f"pid=$(cat {ASSIST_SD} 2>/dev/null); "
-            f"if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then "
-            f"kill \"$pid\" 2>/dev/null; "
-            f"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.2; done; "
-            f"kill -0 \"$pid\" 2>/dev/null && kill -9 \"$pid\" 2>/dev/null; fi; "
-            f"rm -f {ASSIST_SD}; true", check=False)
+        if self.adb.is_local is True and Path("/system/bin/sh").is_file():
+            pidfile = Path(ASSIST_SD)
+            if _max_assistant_running(pidfile):
+                try:
+                    pid = int(pidfile.read_text(encoding="ascii").strip())
+                except (OSError, ValueError):
+                    pid = 0
+                if pid > 1:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                    for _ in range(15):
+                        if not _max_assistant_running(pidfile):
+                            break
+                        time.sleep(0.2)
+                    if _max_assistant_running(pidfile):
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+            pidfile.unlink(missing_ok=True)
+        else:
+            self.adb.shell(
+                f"pid=$(cat {ASSIST_SD} 2>/dev/null); "
+                f"if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then "
+                f"kill \"$pid\" 2>/dev/null; "
+                f"for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.2; done; "
+                f"kill -0 \"$pid\" 2>/dev/null && kill -9 \"$pid\" 2>/dev/null; fi; "
+                f"rm -f {ASSIST_SD}; true", check=False)
         return self.assistant_status()
 
     def assistant_command(self, cmd):
@@ -7504,6 +7603,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/privacy": lambda: p.privacy_set(bool(d.get("enabled"))),
             "/api/privacy/purge": p.privacy_purge,
             "/api/assistant": lambda: p.assistant_set(d),
+            "/api/assistant/autostart": lambda: p.assistant_autostart(bool(d.get("on"))),
             "/api/assistant/install": p.assistant_install,
             "/api/assistant/start": p.assistant_start,
             "/api/assistant/daemon/stop": p.assistant_daemon_stop,
@@ -7529,7 +7629,7 @@ class PanelUpdater:
     """Проверка новых релизов панели на GitHub и обновление — в зависимости от того, как панель установлена:
     zip (Windows-сборка, Download ZIP) — скачать релиз и заменить файлы панели; git — git pull --ff-only;
     docker — только подсказать команду (образ изнутри не обновить)."""
-    FILES = ("server.py", "config.py", "access.py", "agent.py", "glagol.py", "profiles.py", "max_profile.py", "max_privacy.py", "dsp_max.py", "assistant_max.py", "party.py", "party_store.py", "party_audio.py", "multi.py", "pyadb.py", "speakers.example.json", "VERSION", "LICENSE", "README.md", "CONTRIBUTION.md", "start.bat", "start.sh", "start.command",
+    FILES = ("server.py", "config.py", "access.py", "agent.py", "glagol.py", "profiles.py", "max_profile.py", "max_privacy.py", "dsp_max.py", "assistant_max.py", "assistant_socks.py", "party.py", "party_store.py", "party_audio.py", "multi.py", "pyadb.py", "speakers.example.json", "VERSION", "LICENSE", "README.md", "CONTRIBUTION.md", "start.bat", "start.sh", "start.command",
              "Dockerfile", "docker-compose.yml")
     DIRS = ("api", "static", "device")
     OBSOLETE = ("3d", "tools", "docs")  # папки прежних версий: модель переехала в static/models, остальное не нужно
@@ -7990,6 +8090,113 @@ def remove_settings_keys(*keys):
     return update_settings(mutate)
 
 
+def _max_assistant_boot_log(message, path=None):
+    """Журнал автозапуска без ключей, текста запросов и учётных данных."""
+    target = Path(path or "/data/yapanel/assistant-autostart.log")
+    try:
+        fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as stream:
+            stream.write(time.strftime("%Y-%m-%d %H:%M:%S") + " " + message + "\n")
+    except OSError:
+        pass
+
+
+def _max_assistant_running(pid_path=None):
+    """Проверяем PID и cmdline, исключая повторное использование PID другим процессом."""
+    path = Path(pid_path or ASSIST_SD)
+    try:
+        pid = int(path.read_text(encoding="ascii").strip())
+        if pid <= 1:
+            return False
+        os.kill(pid, 0)
+        cmdline = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+        return b"assistant_max.py" in cmdline
+    except (OSError, ValueError):
+        return False
+
+
+def _max_assistant_launch_local(assistant_dir=None, pid_path=None):
+    """Запуск через Python без зависимости от start-stop-daemon на Android 9."""
+    directory = Path(assistant_dir or ASSIST_DIR)
+    pidfile = Path(pid_path or ASSIST_SD)
+    launcher = directory / "assistantd"
+    config = directory / "config.json"
+    if not config.is_file() or not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise FileNotFoundError("файлы ассистента ещё не готовы")
+    if _max_assistant_running(pidfile):
+        return int(pidfile.read_text(encoding="ascii").strip())
+
+    env = os.environ.copy()
+    ca = Path("/data/yapanel/certs/cacert.pem")
+    if not env.get("SSL_CERT_FILE") and ca.is_file():
+        env["SSL_CERT_FILE"] = str(ca)
+
+    with (directory / "assistant.log").open("ab") as output:
+        child = subprocess.Popen(
+            [str(launcher), "-dir", str(directory)],
+            cwd=str(directory),
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            env=env,
+        )
+
+    # PID публикует сам assistant_max.py после захвата межпроцессного lock.
+    # Не перетираем PID процесса, который мог раньше запустить boot_hook.sh.
+    threading.Thread(target=child.wait, name="assistant-reaper", daemon=True).start()
+    for _ in range(30):
+        if _max_assistant_running(pidfile):
+            return int(pidfile.read_text(encoding="ascii").strip())
+        if child.poll() is not None:
+            raise RuntimeError("процесс ассистента завершился при запуске")
+        time.sleep(0.1)
+    raise RuntimeError("ассистент не опубликовал PID после запуска")
+
+
+def _max_assistant_autostart_worker(assistant_dir=None, log_path=None, attempts=36,
+                                    delay=5, sleep=None, launch=None, autostart_path=None):
+    """Ожидаем файлы /data, запускаем ассистента и оставляем диагностический след."""
+    directory = Path(assistant_dir or ASSIST_DIR)
+    pidfile = Path(ASSIST_SD)
+    disabled = Path(autostart_path or ASSIST_NO_AUTOSTART)
+    pause = sleep or time.sleep
+    start = launch or _max_assistant_launch_local
+    record = lambda message: _max_assistant_boot_log(message, log_path)
+    record("WORKER_STARTED")
+    if disabled.exists():
+        record("AUTOSTART_DISABLED")
+        return False
+    for attempt in range(1, attempts + 1):
+        pause(delay)
+        if disabled.exists():
+            record("AUTOSTART_DISABLED")
+            return False
+        ready_config = (directory / "config.json").is_file()
+        launcher = directory / "assistantd"
+        ready_launcher = launcher.is_file() and os.access(launcher, os.X_OK)
+        if not (ready_config and ready_launcher):
+            if attempt in (1, 3, 6, 12, 24, 36):
+                record("WAIT_FILES attempt={} config={} launcher={}".format(
+                    attempt, int(ready_config), int(ready_launcher)))
+            continue
+        if _max_assistant_running(pidfile):
+            record("ALREADY_RUNNING")
+            return True
+        record("START_ATTEMPT attempt=" + str(attempt))
+        try:
+            start()
+            if _max_assistant_running(pidfile):
+                record("START_OK")
+                return True
+            record("START_RETURNED_NOT_RUNNING")
+        except Exception as error:
+            record("START_ERROR attempt={} type={}".format(attempt, type(error).__name__))
+    record("RETRIES_EXHAUSTED")
+    return False
+
+
 def main():
     import profiles
     ap = argparse.ArgumentParser(description="Веб-панель для Яндекс Станций")
@@ -8059,6 +8266,10 @@ def main():
     adb_bin = "local" if device == "local" else find_adb(cfg.device.use_pyadb)
     adb = Adb(adb_bin, device)
     panel = Panel(adb, config=cfg)
+    if model == "max" and adb.is_local is True and Path("/system/bin/sh").is_file() and Path("/data/quasar").is_dir():
+        _max_assistant_boot_log("PANEL_STARTED profile=max")
+        threading.Thread(target=_max_assistant_autostart_worker,
+                         name="assistant-autostart", daemon=True).start()
     panel.auth = glagol.YandexAuth(AUTH_FILE)
     host = device.rpartition(":")[0] if device and ":" in device else None
     if adb.is_local and not host:

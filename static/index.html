@@ -2651,6 +2651,8 @@
               <button class="btn sm" id="as-restart">Перезапустить</button></div></div>
           <label class="toggle"><span>Отвечать на фразу <span class="meta" style="font-weight:500">— иначе Алиса работает как обычно</span></span>
             <input type="checkbox" id="as-enabled"></label>
+          <label class="toggle"><span>Запускать после перезагрузки <span class="meta" style="font-weight:500">— иначе демон сам не поднимется; кнопка «Запустить» работает</span></span>
+            <input type="checkbox" id="as-autostart"></label>
           <label class="toggle"><span>Подсвечивать кольцо, пока думает <span class="meta" style="font-weight:500">— видно, что вопрос ушёл ассистенту</span></span>
             <span class="row" style="gap:10px;flex-wrap:nowrap"><input type="color" id="as-led-color" value="#ff8a00" aria-label="Цвет подсветки"><input type="checkbox" id="as-led"></span></label>
           <div class="as-form" style="margin-top:12px">
@@ -2718,8 +2720,8 @@
           <label for="as-tokens">Длина ответа</label><input class="field" id="as-tokens" type="number" min="50" max="4000" step="50" style="max-width:140px">
           <label for="as-history">Помнить реплик</label><input class="field" id="as-history" type="number" min="0" max="20" style="max-width:140px">
           <p class="hint">Пар «вопрос — ответ». Через 10 минут тишины разговор начинается заново.</p>
-          <label for="as-proxy">Прокси</label><input class="field" id="as-proxy" placeholder="socks5://адрес:порт или http://адрес:порт">
-          <p class="hint">Для запросов к модели и озвучке; остальной трафик колонки не меняется.</p>
+          <label for="as-proxy">Прокси</label><input class="field" id="as-proxy" placeholder="socks5h://логин:пароль@хост:порт или http://хост:порт">
+          <p class="hint">HTTP-прокси или SOCKS5/SOCKS5H с логином и паролем. Пароль в интерфейсе скрывается; при смене хоста или логина введите его заново. Остальной трафик колонки не меняется.</p>
         </div>
       </section>
 
