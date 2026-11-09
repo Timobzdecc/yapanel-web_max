@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -112,7 +113,8 @@ class TestSocks(unittest.TestCase):
     def request(self, scheme="socks5h", credentials=""):
         port = self.proxy.server_address[1]
         proxy_url = f"{scheme}://{credentials}127.0.0.1:{port}"
-        endpoint = f"http://localhost:{self.http.server_address[1]}/models"
+        host = "127.0.0.1" if scheme == "socks5" else "localhost"
+        endpoint = f"http://{host}:{self.http.server_address[1]}/models"
         with build_socks_opener(proxy_url).open(endpoint, timeout=5) as response:
             self.assertEqual(response.status, 200)
             self.assertIn(b"gemini-test", response.read())
@@ -168,8 +170,9 @@ class TestSocks(unittest.TestCase):
             self.http.socket = context.wrap_socket(self.http.socket, server_side=True)
             proxy = f"socks5h://127.0.0.1:{self.proxy.server_address[1]}"
             endpoint = f"https://localhost:{self.http.server_address[1]}/models"
-            with self.assertRaises(ssl.SSLError):
+            with self.assertRaises(urllib.error.URLError) as failure:
                 build_socks_opener(proxy).open(endpoint, timeout=5)
+            self.assertIsInstance(failure.exception.reason, ssl.SSLError)
 
             original = os.environ.get("SSL_CERT_FILE")
             os.environ["SSL_CERT_FILE"] = str(cert)
