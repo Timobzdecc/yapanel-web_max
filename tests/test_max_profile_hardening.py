@@ -286,9 +286,9 @@ def test_footprint_reset_removes_only_known_panel_paths(caplog):
     known = {
         s.BOOT_CUSTOM, s.SOUND_CUSTOM, s.BOOT_ALWAYS, s.BOOT_HOOK, s.BT_OFF,
         s.HOSTS_CUSTOM, s.ROOTKEEPER_CREATED, s.ASSIST_NO_AUTOSTART,
-        s.WAKE_AUTOSTART, s.WAKE_FRIDA_AUTOSTART,
+        s.BT_MEMES_AUTOSTART, s.WAKE_AUTOSTART, s.WAKE_FRIDA_AUTOSTART,
         f"{s.WEB_DIR}/override", f"{s.WEB_DIR}/patterns", f"{s.WEB_DIR}/viz",
-        f"{s.WEB_DIR}/bt_off", f"{s.WEB_DIR}/hosts",
+        f"{s.WEB_DIR}/bt_off", f"{s.WEB_DIR}/hosts", f"{s.WEB_DIR}/bt-memes",
     }
     removed = []
     for match in re.finditer(r"rm -rf ('(?:[^']*)'|\S+)", cmd):
@@ -370,6 +370,25 @@ def test_android_cmd_retries_without_preexec_when_platform_rejects_it(monkeypatc
     assert len(calls) == 2
     assert "preexec_fn" in calls[0]
     assert "preexec_fn" not in calls[1]
+
+
+def test_android_cmd_uses_shell_context_on_android(monkeypatch):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout="Bluetooth Status\n  enabled: true")
+
+    monkeypatch.setattr(max_profile, "_android_shell_available", lambda: True)
+    monkeypatch.setattr(max_profile.subprocess, "run", fake_run)
+
+    out = max_profile.max_android_cmd(local_adb(), ["dumpsys", "bluetooth_manager"])
+    assert out.startswith("Bluetooth")
+    assert len(calls) == 1
+    args, _ = calls[0]
+    assert args[:2] == ["/system/bin/sh", "-c"]
+    assert "u:r:shell:s0" in args[2]
+    assert "dumpsys bluetooth_manager" in args[2]
 
 
 # ---------------------------------------------------------------------------

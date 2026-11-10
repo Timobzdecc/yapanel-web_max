@@ -1237,6 +1237,8 @@ async function loadBoot() {
     renderBootStatus();
     await loadClockAnim();
     if (!ra.name && $('#anim-ring').value) loadRingAnim();
+    mountPresetGallery('matrix');
+    mountPresetGallery('ring');
   } catch (e) { if (!e.offline) $('#boot-status').innerHTML = `<span class="badge bad">${esc(e.message)}</span>`; }
 }
 async function loadClockAnim() {
@@ -1259,6 +1261,7 @@ async function loadClockAnim() {
 $('#anim-clock').onchange = e => {
   if (e.target.value === '__new') return myNewFromSelect('clock', () => ({ frames: bootFull() }), loadClockAnim);
   e.target.dataset.cur = e.target.value;
+  markPresetSelected('matrix', null);
   loadClockAnim().catch(err => err.offline || toast(err.message, true));
 };
 // Кисть яркости: щелчок зажигает сегмент её яркостью, повторный по такому же — гасит; правый — пипетка.
@@ -1395,7 +1398,7 @@ $$('[data-anim-restart]').forEach(b => b.onclick = e => confirm('Перезап�
 
 // ---------- анимации кольца ----------
 // Файл .led — текст; простые (только кадры и loop) правим и визуально, остальные — текстом.
-const ra = { name: null, frames: [], loop: false, simple: true, def: null, timer: 0 };
+const ra = { name: null, frames: [], loop: false, simple: true, def: null, timer: 0, sel: 0, led: 0 };
 const rgbHex = c => c.map(x => clamp(x | 0, 0, 255).toString(16).padStart(2, '0')).join('');
 function parseLedJS(text) {
   const res = { frames: [], loop: false, simple: true };
@@ -1416,21 +1419,85 @@ function parseLedJS(text) {
 const raText = () => (ra.loop ? 'loop\n' : '') + ra.frames.map(f => f.c.map(rgbHex).join(' ') + ' ' + f.ms).join('\n') + '\n';
 const raPixels = () => ra.frames[0]?.c.length || 3;
 function raShow(c) {
+  const many = raPixels() > 8;
   const spans = $$('#ra-preview span');
-  spans.forEach((s, i) => { const v = c?.[i] || [0, 0, 0]; s.style.background = `rgb(${v})`; s.style.setProperty('--glow', v.some(x => x > 20) ? `rgba(${v},.6)` : 'transparent'); });
+  spans.forEach((s, i) => {
+    const v = c?.[i] || [0, 0, 0];
+    s.dataset.i = i;
+    s.style.background = `rgb(${v})`;
+    s.style.setProperty('--glow', v.some(x => x > 20) ? `rgba(${v},.6)` : 'transparent');
+    s.classList.toggle('sel', many && i === ra.led);
+  });
+}
+function drawRingThumb(canvas, colors) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const n = colors.length, cx = canvas.width / 2, cy = canvas.height / 2;
+  const radius = Math.min(cx, cy) - 4;
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + i / n * Math.PI * 2;
+    const v = colors[i] || [0, 0, 0];
+    ctx.beginPath();
+    ctx.fillStyle = `rgb(${v})`;
+    ctx.arc(cx + Math.cos(a) * radius, cy + Math.sin(a) * radius, 2.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+function syncRaEdit() {
+  const edit = $('#ra-led-edit');
+  if (!edit) return;
+  const many = raPixels() > 8;
+  const frame = ra.frames[ra.sel];
+  edit.hidden = !many || !frame;
+  if (!many || !frame) return;
+  $('#ra-led-label').textContent = `Точка ${ra.led + 1} из ${raPixels()} · кадр ${ra.sel + 1}`;
+  $('#ra-led-color').value = '#' + rgbHex(frame.c[ra.led] || [0, 0, 0]);
 }
 function renderRa() {
-  $('#ra-preview').innerHTML = '<span></span>'.repeat(raPixels());
-  raShow(ra.frames[0]?.c);
+  const n = raPixels();
+  const host = $('#ra-preview');
+  const many = n > 8;
+  ra.sel = clamp(ra.sel | 0, 0, Math.max(0, ra.frames.length - 1));
+  ra.led = clamp(ra.led | 0, 0, Math.max(0, n - 1));
+  host.classList.toggle('many', many);
+  host.innerHTML = '<span></span>'.repeat(n);
+  if (many) {
+    // 24 LED Макса: раскладываем точки по кругу, иначе они сжимаются в полоски.
+    [...host.children].forEach((span, i) => {
+      const angle = -Math.PI / 2 + i / n * Math.PI * 2;
+      span.style.left = `${50 + 40 * Math.cos(angle)}%`;
+      span.style.top = `${50 + 40 * Math.sin(angle)}%`;
+    });
+  }
+  raShow(ra.frames[ra.sel]?.c);
   $('#ra-loop').checked = ra.loop;
   $('#ra-loop').disabled = !ra.simple;
   $('#ra-complex').hidden = ra.simple;
   $('#ra-frames').hidden = $('#ra-visual-btns').hidden = !ra.simple;
-  $('#ra-frames').innerHTML = ra.frames.map((f, i) => `<div class="ra-frame" data-i="${i}"><span class="n">${i + 1}</span>
-    ${f.c.map((c, k) => `<input type="color" data-k="${k}" value="#${rgbHex(c)}" aria-label="Кадр ${i + 1}, точка ${k + 1}">`).join('')}
-    <input type="number" class="field mono" min="10" max="600000" step="10" value="${f.ms}" aria-label="Длительность кадра ${i + 1}, мс"><span class="meta">мс</span>
-    <button class="btn sm icon ghost" data-a="dup" title="Дублировать кадр" aria-label="Дублировать кадр ${i + 1}">${icon('i-plus', 14)}</button>
-    <button class="btn sm icon ghost" data-a="del" title="Удалить кадр" aria-label="Удалить кадр ${i + 1}">${icon('i-trash', 14)}</button></div>`).join('');
+  const framesHost = $('#ra-frames');
+  if (many) {
+    // Для 24 LED цветные input'ы не помещаются: показываем мини-кольца кадров,
+    // а цвет выбранной точки правим одним пикером под большим превью.
+    framesHost.classList.add('compact');    framesHost.innerHTML = ra.frames.map((f, i) => `<div class="ra-frame many${i === ra.sel ? ' sel' : ''}" data-i="${i}">
+      <span class="n">${i + 1}</span><canvas class="ra-mini" width="44" height="44" aria-hidden="true"></canvas>
+      <span class="ra-ms"><input type="number" class="field mono" min="10" max="600000" step="10" value="${f.ms}" aria-label="Длительность кадра ${i + 1}, мс"><span class="meta">мс</span></span>
+      <button class="btn sm icon ghost" data-a="dup" title="Дублировать кадр" aria-label="Дублировать кадр ${i + 1}">${icon('i-plus', 14)}</button>
+      <button class="btn sm icon ghost" data-a="del" title="Удалить кадр" aria-label="Удалить кадр ${i + 1}">${icon('i-trash', 14)}</button></div>`).join('');
+    $$('#ra-frames .ra-frame.many canvas').forEach(canvas => {
+      const frame = ra.frames[+canvas.closest('.ra-frame').dataset.i];
+      drawRingThumb(canvas, frame.c);
+    });
+  } else {
+    framesHost.classList.remove('compact');
+    framesHost.innerHTML = ra.frames.map((f, i) => `<div class="ra-frame" data-i="${i}"><span class="n">${i + 1}</span>
+      ${f.c.map((c, k) => `<input type="color" data-k="${k}" value="#${rgbHex(c)}" aria-label="Кадр ${i + 1}, точка ${k + 1}">`).join('')}
+      <input type="number" class="field mono" min="10" max="600000" step="10" value="${f.ms}" aria-label="Длительность кадра ${i + 1}, мс"><span class="meta">мс</span>
+      <button class="btn sm icon ghost" data-a="dup" title="Дублировать кадр" aria-label="Дублировать кадр ${i + 1}">${icon('i-plus', 14)}</button>
+      <button class="btn sm icon ghost" data-a="del" title="Удалить кадр" aria-label="Удалить кадр ${i + 1}">${icon('i-trash', 14)}</button></div>`).join('');
+  }
+  syncRaEdit();
+  $('#ra-many-hint').hidden = !many;
   const s = $('#ra-status');
   const my = isMy(ra.name);
   s.innerHTML = my ? '<span class="badge ok">своя анимация</span>' : animCustom.ring.includes(ra.name) ? '<span class="badge ok">изменена</span>' : '<span class="badge">стандартная</span>';
@@ -1441,24 +1508,64 @@ function renderRa() {
 function raSetText(text) {
   $('#ra-text').value = text;
   Object.assign(ra, parseLedJS(text));
+  ra.sel = 0; ra.led = 0;
   renderRa();
+  $('#ra-frames').scrollTop = 0;
 }
 function raChanged() { $('#ra-text').value = raText(); }
 $('#ra-frames').oninput = e => {
   const row = e.target.closest('.ra-frame'); if (!row) return;
   const f = ra.frames[+row.dataset.i];
-  if (e.target.type === 'color') { f.c[+e.target.dataset.k] = hex2rgb(e.target.value); raShow(f.c); }
-  else f.ms = clamp(+e.target.value || 100, 10, 600000);
+  if (!f) return;
+  if (e.target.type === 'color') {
+    f.c[+e.target.dataset.k] = hex2rgb(e.target.value);
+    ra.sel = +row.dataset.i;
+    raShow(f.c);
+    syncRaEdit();
+  } else {
+    f.ms = clamp(+e.target.value || 100, 10, 600000);
+  }
   raChanged();
 };
 $('#ra-frames').onclick = e => {
-  const b = e.target.closest('[data-a]'); if (!b) return;
-  const i = +b.closest('.ra-frame').dataset.i;
-  if (b.dataset.a === 'dup') ra.frames.splice(i + 1, 0, structuredClone(ra.frames[i]));
-  else ra.frames.splice(i, 1);
+  const b = e.target.closest('[data-a]');
+  if (b) {
+    const i = +b.closest('.ra-frame').dataset.i;
+    if (b.dataset.a === 'dup') ra.frames.splice(i + 1, 0, structuredClone(ra.frames[i]));
+    else ra.frames.splice(i, 1);
+    ra.sel = clamp(ra.sel, 0, Math.max(0, ra.frames.length - 1));
+    raChanged(); renderRa();
+    return;
+  }
+  if (e.target.closest('input')) return;
+  const row = e.target.closest('.ra-frame');
+  if (!row) return;
+  ra.sel = +row.dataset.i;
+  renderRa();
+};
+$('#ra-preview').onclick = e => {
+  const span = e.target.closest('span[data-i]');
+  if (!span || raPixels() <= 8) return;
+  ra.led = +span.dataset.i;
+  renderRa();
+};
+$('#ra-led-color').oninput = e => {
+  const f = ra.frames[ra.sel];
+  if (!f) return;
+  f.c[ra.led] = hex2rgb(e.target.value);
+  raChanged();
+  raShow(f.c);
+  const canvas = $(`#ra-frames .ra-frame.many[data-i="${ra.sel}"] canvas`);
+  if (canvas) drawRingThumb(canvas, f.c);
+};
+$('#ra-led-fill').onclick = () => {
+  const f = ra.frames[ra.sel];
+  if (!f) return;
+  const color = hex2rgb($('#ra-led-color').value);
+  f.c = f.c.map(() => color.slice());
   raChanged(); renderRa();
 };
-$('#ra-add').onclick = () => { ra.frames.push({ c: Array.from({ length: raPixels() }, () => hex2rgb(ringHex)), ms: 200 }); raChanged(); renderRa(); };
+$('#ra-add').onclick = () => { ra.frames.push({ c: Array.from({ length: raPixels() }, () => hex2rgb(ringHex)), ms: 200 }); ra.sel = ra.frames.length - 1; raChanged(); renderRa(); };
 $('#ra-loop').onchange = e => { ra.loop = e.target.checked; raChanged(); };
 $('#ra-text').oninput = e => { Object.assign(ra, parseLedJS(e.target.value)); renderRa(); };
 const raSeconds = () => {
@@ -1471,7 +1578,7 @@ $('#ra-preview-btn').onclick = () => {
   const until = Date.now() + raSeconds() * 1000;
   let i = 0;
   const step = () => {
-    if (Date.now() > until || (i >= ra.frames.length && !ra.loop)) return raShow(ra.frames[0]?.c);
+    if (Date.now() > until || (i >= ra.frames.length && !ra.loop)) return raShow(ra.frames[ra.sel]?.c);
     if (i >= ra.frames.length) i = 0;
     raShow(ra.frames[i].c);
     ra.timer = setTimeout(step, Math.max(16, ra.frames[i++].ms));
@@ -1486,6 +1593,7 @@ async function loadRingAnim() {
 $('#anim-ring').onchange = e => {
   if (e.target.value === '__new') return myNewFromSelect('ring', () => ({ text: $('#ra-text').value }), loadRingAnim);
   e.target.dataset.cur = e.target.value;
+  markPresetSelected('ring', null);
   loadRingAnim().catch(err => err.offline || toast(err.message, true));
 };
 $('#ra-load-default').onclick = e => act(e.currentTarget, async () => {
@@ -1510,6 +1618,151 @@ $('#ra-reset').onclick = e => confirm(`Вернуть стандартную а�
   fillAnimSelect('ring'); renderBootStatus(); animPending(true); await loadRingAnim();
 }, 'Стандартная анимация восстановлена');
 
+// ---------- готовые анимации ----------
+// Кадры генерирует static/anim-presets.js. Галерея только показывает пресеты
+// и кладёт выбранный в текущий редактор: дальше работают обычные кнопки.
+const presetBuilt = new Map();
+const presetSelected = { matrix: null, ring: null };
+let presetTicker = 0;
+
+const presetList = kind => (window.AnimPresets?.[kind]) || [];
+
+function presetData(kind, id) {
+  const key = kind + ':' + id;
+  if (!presetBuilt.has(key)) {
+    const spec = presetList(kind).find(p => p.id === id);
+    if (!spec) return null;
+    const built = spec.build();
+    built.duration = built.frames.reduce((sum, f) => sum + f.ms, 0);
+    presetBuilt.set(key, built);
+  }
+  return presetBuilt.get(key);
+}
+
+function drawMatrixPreset(canvas, pixels) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.fillStyle = '#0d0e11';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const cell = canvas.width / 25;
+  for (let i = 0; i < Math.min(pixels.length, 400); i++) {
+    const b = pixels[i];
+    if (!b) continue;
+    const x = (i % 25) * cell, y = Math.floor(i / 25) * cell;
+    ctx.fillStyle = `rgba(255,255,255,${(0.12 + 0.88 * b / 255).toFixed(3)})`;
+    ctx.fillRect(x + 0.5, y + 0.5, cell - 1, cell - 1);
+  }
+}
+
+function drawRingPreset(canvas, colors) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.fillStyle = '#0d0e11';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  const radius = Math.min(canvas.width, canvas.height) / 2 - 9;
+  const leds = colors || [];
+  for (let i = 0; i < leds.length; i++) {
+    const a = -Math.PI / 2 + i / leds.length * Math.PI * 2;
+    const x = cx + Math.cos(a) * radius, y = cy + Math.sin(a) * radius;
+    const [r, g, b] = leds[i];
+    ctx.beginPath();
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.shadowColor = `rgba(${r},${g},${b},.8)`;
+    ctx.shadowBlur = 5;
+    ctx.arc(x, y, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+}
+
+function drawPresetCard(card) {
+  const st = card._preset;
+  if (!st) return;
+  if (st.kind === 'matrix') drawMatrixPreset(card._canvas, st.built.frames[st.index].v);
+  else drawRingPreset(card._canvas, st.built.frames[st.index].c);
+}
+
+function startPresetTicker() {
+  if (presetTicker) return;
+  presetTicker = setInterval(() => {
+    if (document.hidden || $('#tab-boot').hidden) return;
+    $$('.preset-card').forEach(card => {
+      if (!card._preset) return;
+      const active = card.classList.contains('sel') || card.matches(':hover') || card === document.activeElement;
+      if (!active) return;
+      card._preset.index = (card._preset.index + 1) % card._preset.built.frames.length;
+      drawPresetCard(card);
+    });
+  }, 90);
+}
+
+function markPresetSelected(kind, id) {
+  presetSelected[kind] = id;
+  $$(`#${kind}-preset-strip .preset-card`).forEach(card => {
+    const on = card.dataset.preset === id;
+    card.classList.toggle('sel', on);
+    card.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+function mountPresetGallery(kind) {
+  const box = $(kind === 'matrix' ? '#matrix-library' : '#ring-library');
+  const host = $(kind === 'matrix' ? '#matrix-preset-strip' : '#ring-preset-strip');
+  if (!box || !host || !window.AnimPresets) return;
+  if (!window.__isMatrix) { box.hidden = true; return; }
+  box.hidden = false;
+  if (!host._mounted) {
+    host._mounted = true;
+    host.innerHTML = presetList(kind).map(p => {
+      const data = presetData(kind, p.id);
+      const secs = data ? (data.duration / 1000).toFixed(1) : '';
+      return `<button type="button" class="preset-card" data-preset="${esc(p.id)}"
+        aria-pressed="false" title="${esc(p.desc)} — ${data ? data.frames.length : 0} кадров, ${secs} с">
+        <canvas width="100" height="64" aria-hidden="true"></canvas>
+        <b>${esc(p.title)}</b><span>${esc(p.desc)}</span></button>`;
+    }).join('');
+    $$(`#${kind}-preset-strip .preset-card`).forEach(card => {
+      const id = card.dataset.preset;
+      const built = presetData(kind, id);
+      if (!built) return;
+      card._canvas = card.querySelector('canvas');
+      card._preset = { kind, id, built, index: Math.floor(built.frames.length * 0.35) };
+      drawPresetCard(card);
+      card.onclick = () => {
+        if (kind === 'matrix') applyMatrixPreset(id);
+        else applyRingPreset(id);
+      };
+      card.onmouseenter = startPresetTicker;
+      card.onfocus = startPresetTicker;
+    });
+    startPresetTicker();
+  }
+  markPresetSelected(kind, presetSelected[kind]);
+}
+
+function applyMatrixPreset(id) {
+  const data = presetData('matrix', id);
+  if (!data) return;
+  const pause = +$('#boot-pause').value || 0;
+  setBootFrames(structuredClone(data.frames));
+  if (isBootAnim()) $('#boot-pause').value = pause || 3300;
+  checkPause();
+  renderBoot();
+  markPresetSelected('matrix', id);
+  const title = presetList('matrix').find(p => p.id === id)?.title || 'Анимация';
+  toast(`«${title}» открыта в редакторе`);
+}
+
+function applyRingPreset(id) {
+  const data = presetData('ring', id);
+  if (!data) return;
+  raSetText(data.text);
+  markPresetSelected('ring', id);
+  const title = presetList('ring').find(p => p.id === id)?.title || 'Анимация';
+  toast(`«${title}» открыта в редакторе`);
+}
+
 // ---------- bluetooth ----------
 
 // Виджет Bluetooth: сопряжённые устройства, видимость с таймером. Опрашиваем, только пока виден «Обзор».
@@ -1519,7 +1772,30 @@ async function loadBt() {
   if (!online || document.hidden || $('#tab-overview').hidden || $('[data-widget="bt"]').closest('#wz-hidden')) return;
   try { btData = await api('/api/bt'); renderBt(); } catch (e) { if (!e.offline) setListHtml($('#bt-list'), `<div class="empty">${esc(e.message)}</div>`); }
   Scheduler.setInterval(btTask, btData?.pair_until ? 2000 : 5000);
+  if (!btMemes) loadBtMemes();
 }
+let btMemes = null;
+async function loadBtMemes() {
+  let st;
+  try { st = await api('/api/bt/memes'); } catch { return; }
+  btMemes = st;
+  const row = $('#bt-memes-row');
+  row.hidden = !st.supported;
+  if (!st.supported) return;
+  $('#bt-memes-on').checked = !!(st.running || st.autostart);
+  const sounds = st.sounds || {};
+  const info = kind => {
+    const s = sounds[kind] || {};
+    return s.present && s.size ? `Свой звук · ${fmtSize(s.size)}` : 'Стандартный звук Quasar';
+  };
+  $('#bt-memes-on-info').textContent = info('on');
+  $('#bt-memes-off-info').textContent = info('off');
+  $('#bt-memes-silent-info').textContent = info('silent');
+  $('#bt-memes-hint').textContent = !st.installed ? 'Нажмите, чтобы установить'
+    : st.running ? 'Демон запущен — фраза Алисы заглушается'
+    : st.autostart ? 'Демон остановлен, автозапуск включён' : 'Демон остановлен';
+}
+
 btTask = every(3000, loadBt);
 function btLeft() {
   const left = btData?.pair_until ? Math.max(0, Math.round(btData.pair_until - Date.now() / 1000)) : 0;
@@ -1566,6 +1842,32 @@ $('#bt-power').onchange = e => {
   btDo(e.target, { action: on ? 'power_on' : 'power_off' }, on ? 'Bluetooth включён' : 'Bluetooth выключен')
     .then(() => { if (btData) $('#bt-power').checked = btData.powered; });
 };
+$('#bt-memes-setup').onclick = () => {
+  const panel = $('#bt-memes-panel');
+  panel.hidden = !panel.hidden;
+};
+$('#bt-memes-on').onchange = e => act(null, async () => {
+  btMemes = await api('/api/bt/memes', { enabled: e.target.checked });
+  await loadBtMemes();
+}, e.target.checked ? 'Звуки Bluetooth включены' : 'Звуки Bluetooth выключены');
+async function btMemesUpload(kind, input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  await act(null, async () => {
+    btMemes = await api(`/api/bt/memes/upload?kind=${kind}`, file,
+      { raw: true, headers: { 'Content-Type': 'application/octet-stream' } });
+    await loadBtMemes();
+  }, 'Звук загружен');
+  input.value = '';
+}
+['on', 'off', 'silent'].forEach(kind => {
+  $(`#bt-memes-${kind}-file`).onchange = e => btMemesUpload(kind, e.target);
+  $(`[data-bt-memes-upload="${kind}"]`).onclick = () => $(`#bt-memes-${kind}-file`).click();
+  $(`[data-bt-memes-reset="${kind}"]`).onclick = e => act(e.currentTarget, async () => {
+    btMemes = await api('/api/bt/memes/reset', { kind });
+    await loadBtMemes();
+  }, 'Звук сброшен');
+});
 // ---- звук через Bluetooth-колонку ----
 let btEq = null;
 function renderBtOut() {
