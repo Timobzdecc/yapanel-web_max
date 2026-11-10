@@ -1,9 +1,9 @@
 services:
   panel:
-    image: ghcr.io/dimap/yapanel-web:latest
+    image: ghcr.io/timobzdecc/yapanel-web_max:latest
     # или собрать самому из исходников:
     # build: .
-    container_name: yapanel-web
+    container_name: yapanel-web-max
     # host — чтобы сертификат HTTPS выписался на адрес сервера в локальной сети
     network_mode: host
     environment:
