@@ -1146,6 +1146,8 @@ class Adb:
         self.adb = adb_path
         self.serial = serial
         self._needs_su = needs_su
+        self._root_mode = None       # direct | su | su0 | sudo | rootd | none
+        self._root_argv = None       # например ['/odm/bin/su'] или ['su', '0', 'sh']
         self._probing = False
         self.lock = threading.Lock()
         self.conn = None  # Connection; сообщаем ему, когда связь пропала посреди команды
@@ -1195,22 +1197,144 @@ class Adb:
     # Поэтому команда идёт в подоболочке, а её код печатается меткой в конце вывода (exit внутри тоже ловится).
     RC_MARK = "@@webpanel-rc="
 
+    def _raw_shell(self, args, timeout=15, input=None):
+        """Один adb shell без su/агента — для диагностики и очереди rootd."""
+        return subprocess.run(self._base() + ["shell"] + list(args),
+                              input=input, capture_output=True, timeout=timeout)
+
+    def _probe_root_mode(self):
+        """Определить, как на станции получают uid=0.
+
+        Max умеет direct/su/rootd, Lite 2 — direct. Один adb-shell опрос,
+        чтобы не тратить десятки round-trip на каждый запуск.
+        """
+        script = r'''
+if [ "$(id -u 2>/dev/null)" = "0" ]; then echo WP_MODE=direct; exit 0; fi
+for c in /odm/bin/su su /system/xbin/su /system/bin/su; do
+  if [ -x "$c" ] || command -v "$c" >/dev/null 2>&1; then
+    if printf 'id\n' | "$c" 2>/dev/null | grep -q 'uid=0'; then
+      echo "WP_MODE=su $c"; exit 0
+    fi
+  fi
+done
+if printf 'id\n' | su 0 sh 2>/dev/null | grep -q 'uid=0'; then echo WP_MODE=su0; exit 0; fi
+if printf 'id\n' | sudo sh 2>/dev/null | grep -q 'uid=0'; then echo WP_MODE=sudo; exit 0; fi
+if pidof rootd >/dev/null 2>&1; then echo WP_MODE=rootd; exit 0; fi
+echo WP_MODE=none
+'''
+        try:
+            p = self._raw_shell([script], timeout=10)
+        except Exception:
+            return "none", None
+        out = (p.stdout or b"").decode("utf-8", "replace")
+        match = re.search(r"WP_MODE=(direct|su0|sudo|rootd|su)\s*(\S*)", out)
+        if match:
+            mode, path = match.group(1), match.group(2).strip()
+            if mode == "direct":
+                return "direct", None
+            if mode == "su0":
+                return "su0", ["su", "0", "sh"]
+            if mode == "sudo":
+                return "sudo", ["sudo", "sh"]
+            if mode == "su":
+                return "su", [path or "su"]
+            return "rootd", None
+        # Совместимость со старыми adbd/тестами: id без WP_MODE.
+        if "uid=0(root)" in out:
+            return "direct", None
+        if "uid=" in out:
+            return "su", ["su"]
+        return "none", None
+
+    def _rootd_exec(self, cmd, timeout=30):
+        """Выполнить команду через очередь Hybrid rootd (без su)."""
+        queue = "/data/local/tmp"
+        rid = f"yp-{int(time.time())}-{os.getpid()}-{os.urandom(3).hex()}"
+        req_name = f"{queue}/rootcmd-{rid}"
+        res_name = f"{queue}/rootres.{rid}"
+        out_name = f"{queue}/rootout"
+        q = shlex.quote
+
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / "req"
+            local.write_text(cmd + "\n", encoding="utf-8")
+            p = subprocess.run(self._base() + ["push", str(local), f"{queue}/.rootcmd-{rid}.tmp"],
+                               capture_output=True, timeout=timeout)
+            if p.returncode != 0:
+                raise AdbError(p.stderr.decode("utf-8", "replace").strip() or "rootd: не удалось отправить команду")
+        publish = (f"chmod 0660 {q(queue)}/.rootcmd-{rid}.tmp && "
+                   f"mv -f {q(queue)}/.rootcmd-{rid}.tmp {q(req_name)}")
+        p = self._raw_shell([publish], timeout=min(timeout, 20))
+        if p.returncode != 0:
+            raise AdbError("rootd: не удалось опубликовать команду")
+
+        deadline = time.time() + max(5, timeout)
+        while time.time() < deadline:
+            p = self._raw_shell([f"[ -f {q(res_name)} ]"], timeout=min(10, max(1, timeout)))
+            if p.returncode == 0 and (p.stdout or b"").strip():
+                break
+            time.sleep(0.4)
+        else:
+            self._raw_shell([f"rm -f {q(queue)}/.rootcmd-{rid}.tmp"], timeout=5)
+            raise AdbError("rootd: команда не ответила вовремя")
+
+        p = self._raw_shell([f"cat {q(res_name)}"], timeout=min(20, max(2, timeout)))
+        if p.returncode != 0:
+            raise AdbError("rootd: не удалось прочитать результат")
+        meta = {}
+        for line in (p.stdout or b"").decode("utf-8", "replace").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                meta[key.strip()] = value.strip()
+        if meta.get("id") not in (None, rid):
+            raise AdbError("rootd: чужой ответ")
+        if meta.get("status") != "executed" or meta.get("result") != "exited":
+            reason = meta.get("reason") or meta.get("status") or "unknown"
+            raise AdbError(f"rootd: {reason}")
+        try:
+            rc = int(meta.get("exit", "0"))
+        except ValueError:
+            self._raw_shell([f"rm -f {q(res_name)}"], timeout=5)
+            raise AdbError("rootd: некорректный код возврата")
+
+        block = (
+            f'_b=$(grep -nF -e "--- rootd request={rid} begin ---" {q(out_name)} | head -n 1 | cut -d: -f1)\n'
+            f'_e=$(grep -nF -e "--- rootd request={rid} " {q(out_name)} | grep " exit=" | head -n 1 | cut -d: -f1)\n'
+            f'[ -n "$_b" ] && [ -n "$_e" ] && [ "$_e" -gt "$_b" ] || exit 3\n'
+            f'sed -n "$((_b+1)),$((_e-1))p" {q(out_name)}'
+        )
+        p = self._raw_shell([block], timeout=min(20, max(2, timeout)))
+        self._raw_shell([f"rm -f {q(res_name)}"], timeout=5)
+        if p.returncode != 0:
+            raise AdbError("rootd: блок вывода потерян")
+        return ((p.stdout or b"").decode("utf-8", "replace"), "", rc)
+
     def probe_needs_su(self, force=False):
-        """Explicitly probe if shell commands require su (root elevation).
-        Cached after first invocation to guarantee idempotency.
-        Does not interfere with standard command execution or mock fidelity."""
+        """Проверить, нужен ли su/rootd для команд, и запомнить транспорт."""
         if getattr(self, "is_local", False):
             self._needs_su = False
+            self._root_mode = "direct"
             return False
         if self._needs_su is not None and not force:
             return self._needs_su
         if getattr(self, "_probing", False):
-            return False
+            return bool(self._needs_su)
         self._probing = True
         try:
-            chk = subprocess.run(self._base() + ["shell", "id"], capture_output=True, timeout=5)
-            self._needs_su = bool(chk.stdout and b"uid=0(root)" not in chk.stdout)
+            mode, argv = self._probe_root_mode()
+            self._root_mode = mode
+            self._root_argv = argv
+            if mode == "rootd":
+                try:
+                    out, _, rc = self._rootd_exec("id -u", timeout=10)
+                    if rc != 0 or out.strip() != "0":
+                        mode = "none"
+                except Exception:
+                    mode = "none"
+                self._root_mode = mode
+            self._needs_su = mode in ("su", "su0", "sudo", "rootd")
         except Exception:
+            self._root_mode = "none"
             self._needs_su = False
         finally:
             self._probing = False
@@ -1247,8 +1371,14 @@ class Adb:
             if getattr(self, "_needs_su", None) is None:
                 self.probe_needs_su()
 
+            if self._root_mode == "rootd":
+                out, err, rc = self._rootd_exec(cmd, timeout=timeout)
+                if check and rc != 0 and not out and err:
+                    raise AdbError(err.strip() or "rootd: команда завершилась с ошибкой")
+                return normalize_adb_output(out), normalize_adb_output(err), rc
             if self._needs_su:
-                p = subprocess.run(self._base() + ["shell", "su"],
+                root_argv = self._root_argv or ["su"]
+                p = subprocess.run(self._base() + ["shell"] + root_argv,
                                    input=f"(\n{cmd}\n); printf '\\n{self.RC_MARK}%d\\n' $?\n".encode("utf-8"),
                                    capture_output=True, timeout=timeout)
             else:
@@ -1438,7 +1568,12 @@ class Adb:
             except agentlink.AgentError as e:
                 self._agent_down(e)
         if getattr(self, "_needs_su", False):
-            cmd_args = ["su", "-c", cmd] if cmd else ["su"]
+            if self._root_mode in (None, "su"):
+                cmd_args = (self._root_argv or ["su"]) + (["-c", cmd] if cmd else [])
+            elif self._root_mode == "rootd":
+                cmd_args = ["sh", "-c", cmd] if cmd else ["sh"]
+            else:
+                cmd_args = (self._root_argv or ["su"]) + ([cmd] if cmd else [])
             return subprocess.Popen(self._base() + ["shell"] + cmd_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, bufsize=0 if not text else -1, text=text)
         return subprocess.Popen(self._base() + ["shell", cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -8285,7 +8420,7 @@ def main():
     # pyadb включается явно (PANEL_PYADB / device.use_pyadb): install() подменяет
     # subprocess.run/Popen на весь процесс, поэтому только по запросу владельца.
     adb_bin = "local" if device == "local" else find_adb(cfg.device.use_pyadb)
-    adb = Adb(adb_bin, device)
+    adb = Adb(adb_bin, device, needs_su=None)   # авто: direct/su/rootd/agent
     panel = Panel(adb, config=cfg)
     if model == "max" and adb.is_local is True and Path("/system/bin/sh").is_file() and Path("/data/quasar").is_dir():
         _max_assistant_boot_log("PANEL_STARTED profile=max")

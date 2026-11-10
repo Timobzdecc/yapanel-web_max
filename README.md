@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="static/icons/icon-192.png" width="76" alt="Иконка yapanel">
+<img src="static/icons/icon-192.png" width="76" alt="Иконка yapanel-web_max">
 
-# yapanel
+# yapanel-web_max
 
 **Панель управления Яндекс Станцией Макс**
 
@@ -10,6 +10,7 @@
 Работает на самой колонке или на компьютере в той же Wi-Fi-сети.
 
 [![Release](https://img.shields.io/github/v/release/Timobzdecc/yapanel-web_max?style=for-the-badge&logo=github&label=release)](https://github.com/Timobzdecc/yapanel-web_max/releases/latest)
+[![Status: beta](https://img.shields.io/badge/status-beta-orange?style=for-the-badge)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Station%20Max-ff6a00?style=for-the-badge)](https://github.com/Timobzdecc/yapanel-web_max)
 
@@ -20,16 +21,20 @@
 > [!WARNING]
 > Неофициальный проект, не связан с Яндексом и не одобрен им. Панель работает только на колонке, где **уже получен root-доступ по adb**, и сама колонку не рутирует. Консоль и файловый менеджер дают полный root-доступ к системе — используйте осознанно.
 
-## 🎉 Что нового в 0.3.10
+> [!NOTE]
+> Проект находится в стадии **beta**: функции и установка могут меняться, возможны ошибки. Если что-то не работает — [откройте issue](https://github.com/Timobzdecc/yapanel-web_max/issues), приложив версию, модель станции и лог.
 
-**Звуки Bluetooth, галерея анимаций и кольцо, которое снова светится.**
+## 🎉 Что нового в 0.3.11
 
-- **Звуки Bluetooth** — свой звук включения и выключения, «тишина вместо фразы», загрузка через панель и автозапуск после перезагрузки.
-- **Галерея анимаций** — 10 пресетов для LED-экрана 25×16 и 6 цветных для кольца. Живые превью, установка на загрузку и системные анимации.
-- **Кольцо починено** — «На колонке» больше не падает, установка показывает «изменена», после ребута ничего не откатывается.
-- **Компактный редактор кольца** — кадры с мини-кольцами, выбор точки кликом, пикер цвета и «Залить все».
+**Авто-детект root и правильное имя проекта.**
 
-**[Скачать 0.3.10](https://github.com/Timobzdecc/yapanel-web_max/releases/tag/v0.3.10)** · **[Полный чейнжлог](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.3.10.md)**
+- **Панель сама находит root-транспорт:** `direct`, `su`, `su 0`, `sudo`, `/odm/bin/su` и другие абсолютные пути, а также очередь Hybrid `rootd`. Больше не нужно вручную объяснять панели, как на этой станции получают `uid=0`.
+- **Установщик ищет `su` не только в `PATH`:** добавлены `/odm/bin/su`, `/system/xbin/su`, `/system/bin/su`.
+- **Брендинг:** проект везде называется **yapanel-web_max**, а не просто «yapanel».
+
+**Важно:** авто-детект `su`/`direct` проверен на живой станции, а `rootd` и fallback без `su` — только unit-тестами. На реальной rootd-only станции не проверялось. Если что-то не работает — **[откройте issue](https://github.com/Timobzdecc/yapanel-web_max/issues)**.
+
+**[Скачать 0.3.11](https://github.com/Timobzdecc/yapanel-web_max/releases/tag/v0.3.11)** · **[Полный чейнжлог](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.3.11.md)** · [Что было в 0.3.10](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.3.10.md)
 
 ## 📸 Скриншоты
 
@@ -83,8 +88,8 @@
 
 Python на компьютер ставить не нужно.
 
-[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Timobzdecc/yapanel-web_max/releases/download/v0.3.10/yapanel-web-0.3.10-windows-x64.zip)
-[![Windows arm64](https://img.shields.io/badge/Windows-arm64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Timobzdecc/yapanel-web_max/releases/download/v0.3.10/yapanel-web-0.3.10-windows-arm64.zip)
+[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Timobzdecc/yapanel-web_max/releases/download/v0.3.11/yapanel-web-0.3.11-windows-x64.zip)
+[![Windows arm64](https://img.shields.io/badge/Windows-arm64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Timobzdecc/yapanel-web_max/releases/download/v0.3.11/yapanel-web-0.3.11-windows-arm64.zip)
 
 1. Скачайте архив и распакуйте его.
 2. Запустите **`install_to_max.bat`**.
