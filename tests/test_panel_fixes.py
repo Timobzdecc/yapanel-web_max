@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from test_profiles import fresh_server
+from tests.test_profiles import fresh_server
 import profiles
 import server
 import multi

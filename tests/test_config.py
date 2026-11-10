@@ -192,13 +192,14 @@ def test_path_resolution_and_derivation():
         cfg.resolve_paths()
 
         assert custom_dir.is_dir()
-        assert cfg.server.auth_file == custom_dir / ".yandex_auth.json"
-        assert cfg.server.panel_auth_file == custom_dir / ".panel_auth.json"
-        assert cfg.server.metrics_file == custom_dir / ".metrics.json"
-        assert cfg.server.tls_dir == custom_dir / ".tls"
-        assert cfg.server.settings_file == custom_dir / ".panel_settings.json"
-        assert cfg.server.agent_file == custom_dir / ".agent.json"
-        assert cfg.server.journal_file == custom_dir / ".panel_journal.jsonl"
+        resolved_dir = custom_dir.resolve()
+        assert cfg.server.auth_file == resolved_dir / ".yandex_auth.json"
+        assert cfg.server.panel_auth_file == resolved_dir / ".panel_auth.json"
+        assert cfg.server.metrics_file == resolved_dir / ".metrics.json"
+        assert cfg.server.tls_dir == resolved_dir / ".tls"
+        assert cfg.server.settings_file == resolved_dir / ".panel_settings.json"
+        assert cfg.server.agent_file == resolved_dir / ".agent.json"
+        assert cfg.server.journal_file == resolved_dir / ".panel_journal.jsonl"
 
 
 def test_malformed_json_handling():
