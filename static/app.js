@@ -6814,10 +6814,16 @@ function renderPanelVersion() {
   const checked = v.checked ? ' · проверено ' + new Date(v.checked * 1000).toLocaleTimeString('ru-RU') : '';
   const us = $('#upd-state');
   if (us) {
-    us.textContent = v.error ? 'Не удалось проверить: ' + v.error
+    const updateState = v.update_status?.state;
+    const updateText = updateState === 'activated_pending_health' ? 'Проверяем работоспособность после обновления…'
+      : updateState === 'blocked' ? 'Обновление заблокировано: ' + (v.update_status.error || 'обнаружен конфликт')
+      : updateState === 'rolled_back' ? 'Выполнен автоматический откат: ' + (v.update_status.error || 'проверка не пройдена')
+      : updateState === 'healthy' ? 'Последнее обновление прошло проверку работоспособности'
+      : '';
+    us.textContent = updateText || (v.error ? 'Не удалось проверить: ' + v.error
       : v.update ? 'Доступна версия ' + v.latest + checked
-      : v.latest ? 'Установлена последняя версия' + checked : 'Нет данных о релизе';
-    if (us.classList && us.classList.toggle) us.classList.toggle('warn', !!v.update || !!v.error);
+      : v.latest ? 'Установлена последняя версия' + checked : 'Нет данных о релизе');
+    if (us.classList && us.classList.toggle) us.classList.toggle('warn', !!v.update || !!v.error || ['blocked', 'rolled_back'].includes(updateState));
   }
   const row = $('#upd-row'); if (row) row.hidden = !v.update;
   if (v.update) {
@@ -6847,11 +6853,24 @@ if ($('#upd-go')) $('#upd-go').onclick = e => {
     btn.textContent = 'Обновляем…';
     try {
       const updated = await api('/api/panel/update', {});
-      toast('Обновлено, перезапускаемся…');
+      toast('Обновление подготовлено, проверяем запуск…');
       const until = Date.now() + 60000;
       await new Promise(r => setTimeout(r, 2500));
       while (Date.now() < until) {
-        try { const r = await PanelContext.fetch('/api/panel/version'); if (r.status === 401 || (r.ok && (await r.json()).version === updated.version)) { location.reload(); return; } } catch {}
+        try {
+          const r = await PanelContext.fetch('/api/panel/update/status');
+          if (r.ok) {
+            const status = await r.json();
+            if (status.state === 'healthy' && status.version === updated.version) { location.reload(); return; }
+            if (['blocked', 'rolled_back'].includes(status.state)) throw new Error(status.error || 'проверка обновления не пройдена');
+            if (!status.state) {
+              const versionResponse = await PanelContext.fetch('/api/panel/version');
+              if (versionResponse.ok && (await versionResponse.json()).version === updated.version) { location.reload(); return; }
+            }
+          }
+        } catch (error) {
+          if (/проверка обновления/.test(error.message)) throw error;
+        }
         await new Promise(r => setTimeout(r, 1000));
       }
       throw new Error('Сервер не поднялся за минуту — запустите панель вручную');

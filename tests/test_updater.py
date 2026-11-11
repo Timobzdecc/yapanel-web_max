@@ -120,3 +120,50 @@ def test_check_keeps_last_successful_release_on_refresh_error(monkeypatch):
     assert second["latest"] == "0.4.0"
     assert second["update"] is True
     assert "error" in second
+
+
+def test_web_ui_update_records_pending_transaction_and_uses_restart_hook(monkeypatch):
+    events = []
+
+    class ImmediateTimer:
+        def __init__(self, delay, callback):
+            events.append(("schedule", delay))
+            self.callback = callback
+
+        def start(self):
+            events.append("restart")
+            self.callback()
+
+    updater = server.PanelUpdater(restart=lambda: events.append("supervisor-restart"))
+    monkeypatch.setattr(server.threading, "Timer", ImmediateTimer)
+    monkeypatch.setattr(updater, "check", lambda refresh=False: {
+        "latest": "0.3.11", "update": True, "install": "zip"
+    })
+    monkeypatch.setattr(updater, "_from_zip", lambda version: events.append(("activate", version)))
+
+    result = updater.update()
+
+    assert result == {"ok": True, "version": "0.3.11", "install": "zip"}
+    assert events == [("activate", "0.3.11"), ("schedule", 1.0), "restart", "supervisor-restart"]
+
+
+def test_startup_errors_are_reflected_by_strict_health_contract():
+    previous_errors = server.Handler.startup_errors
+    previous_critical = server.Handler.critical_errors
+    try:
+        server.Handler.startup_errors = []
+        server.Handler.critical_errors = ()
+        server.Handler.record_startup_error("assistant", RuntimeError("секрет не должен попасть в health"))
+        assert server.Handler.critical_errors == ("assistant: RuntimeError",)
+    finally:
+        server.Handler.startup_errors = previous_errors
+        server.Handler.critical_errors = previous_critical
+
+
+def test_supervised_restart_uses_external_bootstrap(monkeypatch):
+    codes = []
+    monkeypatch.setattr(server.os, "_exit", lambda code: codes.append(code))
+
+    server._supervised_restart([])
+
+    assert codes == [75]
