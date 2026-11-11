@@ -245,6 +245,8 @@ MEDIA_BODY_LIMIT = 200 * 1024 * 1024
 BACKUP_BODY_LIMIT = 200 * 1024 * 1024
 FS_UPLOAD_BODY_LIMIT = 512 * 1024 * 1024
 SOUND_BODY_LIMIT = 50 * 1024 * 1024
+# Отклонённый запрос не должен бесконечно удерживать поток при неполном теле.
+REJECT_BODY_TIMEOUT = 1.0
 # Команды Glagol, которые можно отправить из панели, и разрешённые для них поля.
 # Громкость: у Quasar своя шкала 0–20; колонка показывает её ×5 (0–100 с шагом 5), Glagol — /20 (0–1).
 # В ALSA она переводится по volume_manager_settings.platformToAlsaMap из quasar.cfg: 0 → 0, 1 → 49, 20 → 255.
@@ -7136,6 +7138,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("Referrer-Policy", "no-referrer")
+        if getattr(self, "close_connection", False):
+            self.send_header("Connection", "close")
         for k, v in headers:
             self.send_header(k, v)
         try:
@@ -7245,9 +7249,48 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("неверный Content-Length")
         return int(raw)
 
+    def _discard_request_body(self):
+        if not hasattr(self, "headers") or not hasattr(self, "rfile"):
+            return
+        connection = getattr(self, "connection", None)
+        if connection is None or not hasattr(connection, "gettimeout") or not hasattr(connection, "settimeout"):
+            return
+        try:
+            remaining = self._content_length()
+        except ValueError:
+            return
+        try:
+            previous_timeout = connection.gettimeout()
+            connection.settimeout(REJECT_BODY_TIMEOUT)
+        except OSError:
+            return
+        try:
+            while remaining:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+        except (OSError, ValueError):
+            return
+        finally:
+            try:
+                connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+
+    def _reject(self, code, body, discard_body=True):
+        self.close_connection = True
+        self._send(code, body)
+        if discard_body:
+            self._discard_request_body()
+        return True
+
     def _guard(self, path):
         """True — запрос уже отклонён. POST с чужого сайта (CSRF) режем всегда, даже без пароля:
         иначе любая открытая вкладка могла бы дёрнуть /api/shell на localhost."""
+        def reject(code, body):
+            return self._reject(code, body)
+
         # Optional private worker: local listener + per-run key, never a LAN bypass.
         gateway_key = os.environ.get("PANEL_GATEWAY_SECRET")
         if gateway_key:
@@ -7255,37 +7298,30 @@ class Handler(BaseHTTPRequestHandler):
             local = ipaddress.ip_address(self.connection.getsockname()[0])
             if local.is_loopback and hmac.compare_digest(self.headers.get("X-Panel-Gateway", ""), gateway_key):
                 return False
-            self._send(403, {"error": "private worker"})
-            return True
+            return reject(403, {"error": "private worker"})
         if not self._client_net_allowed():
-            self._send(403, {"error": "этот клиент не входит в разрешённые сети"})
-            return True
+            return reject(403, {"error": "этот клиент не входит в разрешённые сети"})
         if self.command == "POST":
             origin = self.headers.get("Origin")
             if origin:
                 # «null» шлют изолированные iframe и т. п. — с панели такого не бывает, а чужая страница так обошла бы проверку
                 if not self._same_origin(origin):
-                    self._send(403, {"error": "запрос с чужого сайта"})
-                    return True
+                    return reject(403, {"error": "запрос с чужого сайта"})
             else:
                 # Браузеры с Sec-Fetch-Site: same-origin/none — свой запрос или переход
                 # по адресу; cross-site/same-site — чужая страница. Без заголовка
                 # (curl, старые клиенты, API) не блокируем.
                 site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
                 if site and site not in ("same-origin", "none"):
-                    self._send(403, {"error": "запрос с чужого сайта"})
-                    return True
+                    return reject(403, {"error": "запрос с чужого сайта"})
             # Панель шлёт тело только как JSON или файл. «Простые» типы (форма, text/plain) браузер отправит
             # с чужого сайта без предварительного запроса — их не принимаем, даже если Origin не пришёл.
             ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
             if self._content_length() and ctype not in ("application/json", "application/octet-stream"):
-                self.close_connection = True
-                self._send(415, {"error": "тело запроса — только JSON или файл"})
-                return True
+                return reject(415, {"error": "тело запроса — только JSON или файл"})
         if path in PUBLIC_PATHS or path.startswith("/static/") or self.access.session_ok(self._token()):
             return False
-        self._send(401, {"error": "Нужен вход", "auth": True})
-        return True
+        return reject(401, {"error": "Нужен вход", "auth": True})
 
     def _panel_auth_get(self):
         return {**self.access.info(self._token()), "secure": self.https, "ports": self.ports,

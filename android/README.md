@@ -8,13 +8,13 @@
 
 ## Сборка
 
-Нужны JDK (проверено на 25) и Android SDK (platform 34), Gradle 9.1+:
+Нужен JDK 17 или новее (проверено на 25) и Android SDK (platform 34). Версия Gradle берётся из Wrapper:
 
 ```sh
 cd android
 export JAVA_HOME=/usr/lib/jvm/java-25-openjdk
 echo "sdk.dir=$HOME/Android/Sdk" > local.properties
-gradle assembleRelease          # → app/build/outputs/apk/release/app-release.apk
+./gradlew assembleRelease        # → app/build/outputs/apk/release/app-release.apk
 ```
 
 Без `keystore.properties` релиз подписывается отладочным ключом. Свой ключ:

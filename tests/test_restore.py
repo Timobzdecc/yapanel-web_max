@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock,patch
 import profiles
-from test_profiles import fresh_server
+from tests.test_profiles import fresh_server
 
 
 @unittest.skip('Legacy Mini 3 Pro profile test (Station Max specialized)')

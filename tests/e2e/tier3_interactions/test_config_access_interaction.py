@@ -18,7 +18,7 @@ def test_config_data_dir_determines_access_auth_path(temp_data_dir):
     """Verify ServerConfig.data_dir correctly determines .panel_auth.json location."""
     cfg = load_config(env={"PANEL_DATA_DIR": str(temp_data_dir)})
     auth_file = cfg.server.panel_auth_file
-    assert auth_file == temp_data_dir / ".panel_auth.json"
+    assert auth_file == temp_data_dir.resolve() / ".panel_auth.json"
 
     # PanelAccess initialized at configured path
     mgr = access.PanelAccess(auth_file)

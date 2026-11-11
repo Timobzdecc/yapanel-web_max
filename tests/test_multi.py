@@ -75,6 +75,10 @@ class GatewayTests(unittest.TestCase):
                 self.assertEqual(status,200);value=json.loads(data);self.assertEqual(value['model'],model);self.assertEqual(value['path'],'/api/shell');self.assertEqual(value['body'],'read-only-test')
     def test_csrf_denied(self):
         self.assertEqual(self.request('/speaker/mini3pro/api/shell','POST',origin='https://untrusted.example',body='test')[0],403)
+    def test_rejected_post_closes_connection_after_body(self):
+        status,_,headers=self.request('/speaker/mini3pro/api/shell','POST',origin='https://untrusted.example',body='test')
+        self.assertEqual(status,403)
+        self.assertEqual(headers.get('Connection'),'close')
     def test_proxy_preserves_page_bytes_instead_of_rewriting_source(self):
         for model in gateway.DEVICES:
             status,data,_=self.request('/speaker/'+model+'/');self.assertEqual(status,200)
@@ -107,10 +111,13 @@ class GatewayTests(unittest.TestCase):
     def test_private_worker_accepts_signed_snat_peer_only_on_loopback_listener(self):
         code='''import os,server,json
 from types import SimpleNamespace
+class Probe(server.Handler):
+ def _send(self,*args,**kwargs):pass
 os.environ['PANEL_GATEWAY_SECRET']='test-secret'
 results=[]
 for local,header in [('127.0.0.1','test-secret'),('127.0.0.1','wrong'),('192.0.2.1','test-secret')]:
- req=SimpleNamespace(client_address=('192.0.2.2',4321),connection=SimpleNamespace(getsockname=lambda:(local,18765)),headers={'X-Panel-Gateway':header},_send=lambda *a:None)
+ req=object.__new__(Probe)
+ req.client_address=('192.0.2.2',4321);req.connection=SimpleNamespace(getsockname=lambda:(local,18765));req.headers={'X-Panel-Gateway':header}
  results.append(server.Handler._guard(req,'/api/status'))
 print(json.dumps(results))'''
         result=subprocess.run([sys.executable,'-c',code],cwd=Path(__file__).resolve().parents[1],capture_output=True,text=True,check=True)

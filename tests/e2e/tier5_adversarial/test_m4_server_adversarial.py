@@ -34,7 +34,7 @@ from config import ConfigError, PanelConfig
 import max_profile
 import profiles
 import server
-from test_profiles import fresh_server
+from tests.test_profiles import fresh_server
 from tests.e2e.harness.simulated_server import E2ETestServer
 
 

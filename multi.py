@@ -78,7 +78,7 @@ class Gateway(server.Handler):
         if self.networks:
             address=self._client_ip()
             if address is None or not self._network_ok(address):
-                self._send(403,{'error':'Доступ только из домашней сети'});return False
+                self._reject(403,{'error':'Доступ только из домашней сети'});return False
         return not server.Handler._guard(self,path)
 
     def _client_ip(self):
@@ -104,8 +104,8 @@ class Gateway(server.Handler):
     def dispatch(self):
         try:
             try:length=self._content_length()
-            except ValueError as error:return self._send(400,{'error':str(error)})
-            if length>MAX_BODY:return self._send(413,{'error':'Слишком большой запрос'})
+            except ValueError as error:return self._reject(400,{'error':str(error)},discard_body=False)
+            if length>MAX_BODY:return self._reject(413,{'error':'Слишком большой запрос'},discard_body=False)
             if self.path=='/' or self.path.startswith('/?'):
                 if not self._allowed('/'):return
                 cookies=SimpleCookie()
@@ -116,7 +116,7 @@ class Gateway(server.Handler):
                 return self._send(302,b'',headers=[('Location','/speaker/'+model+'/')])
             try:model,path=route(self.path)
             except ValueError:
-                return self._send(409,{'error':'Обновите страницу единой панели','url':'/'})
+                return self._reject(409,{'error':'Обновите страницу единой панели','url':'/'})
             clean=urlsplit(path).path
             if not self._allowed(clean):return
             if clean=='/api/panel-auth' and self.command=='GET':
@@ -170,10 +170,12 @@ class Gateway(server.Handler):
 
     def proxy(self,model,path):
         try:length=self._content_length()
-        except ValueError as error:return self._send(400,{'error':str(error)})
-        if length>MAX_BODY:return self._send(413,{'error':'Слишком большой запрос'})
+        except ValueError as error:
+            return self._reject(400,{'error':str(error)},discard_body=False)
+        if length>MAX_BODY:
+            return self._reject(413,{'error':'Слишком большой запрос'},discard_body=False)
         if self.headers.get('Transfer-Encoding'):
-            return self._send(400,{'error':'Transfer-Encoding не поддерживается'})
+            return self._reject(400,{'error':'Transfer-Encoding не поддерживается'},discard_body=False)
         try:self.connection.settimeout(PROXY_TIMEOUT)
         except OSError:pass
         body=b''
