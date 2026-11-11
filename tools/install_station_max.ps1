@@ -4,6 +4,13 @@ param(
     [switch]$RecoverFailedPreparation,
     [string]$SshAlias = "station-max",
     [string]$AdbSerial = "192.168.31.196:5555",
+    [string]$SshExecutable = "ssh.exe",
+    [string]$AdbExecutable = "adb.exe",
+    [string]$HealthUri = "http://192.168.31.196:8765",
+    [int]$HealthAttempts = 60,
+    [int]$HealthDelaySeconds = 1,
+    [int]$SupervisorWaitAttempts = 60,
+    [int]$SupervisorWaitDelaySeconds = 1,
     [string]$AssetPath,
     [string]$WorkDirectory = (Join-Path (Get-Location) "station-install-0.3.11"),
     [string]$ExpectedVersion = "0.3.11",
@@ -27,7 +34,7 @@ function Invoke-StationSsh {
     # Передаём тело команды как base64, чтобы Android shell получил исходные байты.
     $commandBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($RemoteCommand))
     $transport = "printf %s $commandBase64 | /system/bin/base64 -d | /system/bin/sh"
-    $output = & ssh.exe -o BatchMode=yes $SshAlias $transport 2>&1
+    $output = & $SshExecutable -o BatchMode=yes $SshAlias $transport 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw ("SSH-команда завершилась с кодом " + $LASTEXITCODE + ": " + $RemoteCommand + [Environment]::NewLine + ($output -join [Environment]::NewLine))
     }
@@ -38,7 +45,7 @@ function Invoke-StationSsh {
 
 function Send-StationFile {
     param([string]$Source, [string]$Destination)
-    $sshPath = (Get-Command ssh.exe -ErrorAction Stop).Source
+    $sshPath = (Get-Command $SshExecutable -ErrorAction Stop).Source
     $command = 'type "' + $Source + '" | "' + $sshPath + '" -o BatchMode=yes ' + $SshAlias + ' "cat > ' + $Destination + '"'
     & $env:ComSpec /d /s /c $command 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Не удалось передать файл по бинарному каналу SSH: $Source -> $Destination" }
@@ -46,7 +53,7 @@ function Send-StationFile {
 
 function Receive-StationFile {
     param([string]$RemotePath, [string]$Destination)
-    $sshPath = (Get-Command ssh.exe -ErrorAction Stop).Source
+    $sshPath = (Get-Command $SshExecutable -ErrorAction Stop).Source
     $command = '"' + $sshPath + '" -o BatchMode=yes ' + $SshAlias + ' "cat ' + $RemotePath + '" > "' + $Destination + '"'
     & $env:ComSpec /d /s /c $command 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Не удалось скачать файл по SSH: $RemotePath -> $Destination" }
@@ -55,7 +62,7 @@ function Receive-StationFile {
 function Invoke-StationRootd {
     param([string]$RemoteCommand)
     $commandBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($RemoteCommand))
-    $output = & $python $rootdControl --serial $AdbSerial --command-base64 $commandBase64 2>&1
+    $output = & $python $rootdControl --serial $AdbSerial --adb $AdbExecutable --command-base64 $commandBase64 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw ("rootd-команда завершилась с ошибкой: " + ($output -join [Environment]::NewLine))
     }
@@ -361,13 +368,13 @@ function Invoke-StationDirectRollback {
 }
 
 function Wait-StationSupervisorRollback {
-    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    for ($attempt = 0; $attempt -lt $SupervisorWaitAttempts; $attempt++) {
         $status = (Invoke-StationSsh "cat /data/yapanel-state/updater/status.json 2>/dev/null || true") -join [Environment]::NewLine
         if ($status -match '"state"\s*:\s*"rolled_back"') { return }
         if ($status -match '"state"\s*:\s*"rollback_failed"') {
             throw "Внешний bootstrap сообщил rollback_failed"
         }
-        Start-Sleep -Seconds 1
+        if ($SupervisorWaitDelaySeconds -gt 0) { Start-Sleep -Seconds $SupervisorWaitDelaySeconds }
     }
     throw "Внешний bootstrap не подтвердил завершение rollback"
 }
@@ -398,7 +405,7 @@ $activationEvidence = $false
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     adb connect ($AdbSerial -replace ":.*$", "") | Out-Null
-    & adb.exe -s $AdbSerial shell id | Out-Null
+    & $AdbExecutable -s $AdbSerial shell id | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "ADB недоступен" }
     Test-StationRootdControl
     $before = Get-StationSnapshot
@@ -449,7 +456,7 @@ try {
     & $python (Join-Path $root "tools/prepare_station_release.py") --asset $asset --output $initial --source-root $root --sha256 $assetDigest --version $ExpectedVersion
     if ($LASTEXITCODE -ne 0) { throw "Не удалось собрать initial-release" }
     $initialDigest = (Get-FileHash -LiteralPath $initial -Algorithm SHA256).Hash.ToLowerInvariant()
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "tools/backup_station_max.ps1") -OutputDirectory $backupDir -SshAlias $SshAlias -ExpectedVersion $CurrentVersion
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "tools/backup_station_max.ps1") -OutputDirectory $backupDir -SshAlias $SshAlias -SshExecutable $SshExecutable -ExpectedVersion $CurrentVersion
     if ($LASTEXITCODE -ne 0) { throw "Не удалось создать backup станции" }
 
     Receive-StationFile "/data/yapanel/start.sh" $remoteStart
@@ -516,10 +523,10 @@ test "$(sha256sum /data/yapanel/start.sh | sed 's/ .*//')" = "__PATCHED_SHA256__
     $health = $null
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
         try {
-            $health = Invoke-RestMethod -UseBasicParsing "http://192.168.31.196:8765/api/panel/health"
+            $health = Invoke-RestMethod -UseBasicParsing ($HealthUri.TrimEnd('/') + "/api/panel/health")
             if ($health.ready -eq $true -and [string]$health.version -eq $ExpectedVersion -and [int]$health.critical_errors -eq 0) { break }
         } catch { }
-        Start-Sleep -Seconds 1
+        if ($HealthDelaySeconds -gt 0) { Start-Sleep -Seconds $HealthDelaySeconds }
     }
     if (-not $health -or $health.ready -ne $true -or [string]$health.version -ne $ExpectedVersion -or [int]$health.critical_errors -ne 0) { throw "Панель не прошла strict health check" }
 
@@ -530,7 +537,7 @@ test "$(sha256sum /data/yapanel/start.sh | sed 's/ .*//')" = "__PATCHED_SHA256__
     Write-Output "Установка завершена, health и системные invariants подтверждены."
 }
 catch {
-    Write-Error $_.Exception.Message
+    $originalError = $_
     if ($Apply -and $stationChangesStarted) {
         $recoveryErrors = @()
         try {
@@ -599,8 +606,9 @@ catch {
             $recoveryErrors += "Не удалось восстановить start.sh: $($_.Exception.Message)"
         }
         foreach ($recoveryError in $recoveryErrors) {
-            Write-Error $recoveryError
+            Write-Error $recoveryError -ErrorAction Continue
         }
     }
-    throw
+    Write-Error $originalError.Exception.Message -ErrorAction Continue
+    throw $originalError
 }

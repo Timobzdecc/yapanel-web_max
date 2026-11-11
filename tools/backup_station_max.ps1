@@ -2,6 +2,7 @@
 param(
     [string]$OutputDirectory = (Join-Path (Get-Location) "station-backups"),
     [string]$SshAlias = "station-max",
+    [string]$SshExecutable = "ssh.exe",
     [string]$ExpectedVersion = "0.3.5"
 )
 
@@ -10,7 +11,7 @@ $ErrorActionPreference = "Stop"
 function Invoke-CheckedSsh {
     param([string]$RemoteCommand)
 
-    $output = & ssh.exe -o BatchMode=yes $SshAlias $RemoteCommand 2>&1
+    $output = & $SshExecutable -o BatchMode=yes $SshAlias $RemoteCommand 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "SSH-команда завершилась с кодом ${LASTEXITCODE}: $RemoteCommand`n$($output -join [Environment]::NewLine)"
     }
@@ -20,7 +21,7 @@ function Invoke-CheckedSsh {
 function Invoke-BinaryTarBackup {
     param([string]$ArchivePath)
 
-    $sshPath = (Get-Command ssh.exe -ErrorAction Stop).Source
+    $sshPath = (Get-Command $SshExecutable -ErrorAction Stop).Source
     $quotedSsh = '"' + $sshPath.Replace('"', '\"') + '"'
     $quotedArchive = '"' + $ArchivePath.Replace('"', '\"') + '"'
     $remote = 'test "$(cat /data/yapanel/VERSION)" = "' + $ExpectedVersion + '" && ' +

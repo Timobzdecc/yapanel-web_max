@@ -24,6 +24,18 @@ def test_station_installer_uses_graceful_handoff_without_ctl_control():
     assert "setprop ctl.start" not in source
 
 
+def test_station_installer_transport_overrides_keep_production_defaults():
+    source = (ROOT / "tools" / "install_station_max.ps1").read_text(encoding="utf-8")
+
+    assert '[string]$SshExecutable = "ssh.exe"' in source
+    assert '[string]$AdbExecutable = "adb.exe"' in source
+    assert '[string]$HealthUri = "http://192.168.31.196:8765"' in source
+    assert "--adb $AdbExecutable" in source
+    assert "-SshExecutable $SshExecutable" in source
+    assert "$originalError = $_" in source
+    assert "Write-Error $originalError.Exception.Message -ErrorAction Continue" in source
+
+
 def test_station_snapshot_keeps_original_launch_invariants():
     source = (ROOT / "tools" / "install_station_max.ps1").read_text(encoding="utf-8")
 
