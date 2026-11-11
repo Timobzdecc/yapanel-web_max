@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import server
 import profiles
-from test_profiles import fresh_server
+from tests.test_profiles import fresh_server
 
 
 class BluetoothBoot(unittest.TestCase):
