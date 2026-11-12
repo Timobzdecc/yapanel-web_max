@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import server
+import panel_update_integration
 
 
 class FakeResponse:
@@ -88,6 +91,16 @@ def test_check_reports_network_error(monkeypatch):
 
     assert "error" in result
     assert "недоступен" in result["error"].lower()
+
+
+def test_station_integration_resolves_external_state_directory(tmp_path):
+    data_dir = tmp_path / "yapanel-state" / "data"
+    (data_dir.parent / "updater").mkdir(parents=True)
+    instance = SimpleNamespace(
+        config=SimpleNamespace(server=SimpleNamespace(data_dir=data_dir))
+    )
+
+    assert panel_update_integration._state_dir(instance) == data_dir.parent
 
 
 def test_check_reports_missing_releases(monkeypatch):

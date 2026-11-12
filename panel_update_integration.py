@@ -19,11 +19,24 @@ from update_agent import durable_json
 INTEGRATION_ID = "station-panel-updater-v2"
 
 
+def _state_dir(instance):
+    """На Android updater хранится отдельно от каталога исходников панели."""
+    configured = Path(getattr(instance.config.server, "data_dir", Path(__file__).resolve().parent))
+    candidates = []
+    if configured.name == "data":
+        candidates.append(configured.parent)
+    candidates.append(configured)
+    source_root = Path(__file__).resolve().parent
+    candidates.append(source_root.parent / "yapanel-state")
+    candidates.append(Path("/data/yapanel-state"))
+    for candidate in candidates:
+        if (candidate / "updater").is_dir():
+            return candidate
+    return candidates[0]
+
+
 def _status_path(instance):
-    root = Path(__file__).resolve().parent
-    data_dir = Path(getattr(instance.config.server, "data_dir", root))
-    state_dir = data_dir.parent if data_dir.name == "data" else data_dir
-    return state_dir / "updater" / "status.json"
+    return _state_dir(instance) / "updater" / "status.json"
 
 
 def _save_status(instance, **updates):
@@ -75,8 +88,7 @@ def _from_zip(instance, version):
     with urllib.request.urlopen(urllib.request.Request(
             asset["browser_download_url"], headers={"User-Agent": f"yapanel-web/{server.VERSION}"}), timeout=180) as response:
         blob = response.read()
-    data_dir = Path(getattr(instance.config.server, "data_dir", server.ROOT))
-    state_dir = data_dir.parent if data_dir.name == "data" else data_dir
+    state_dir = _state_dir(instance)
     agent = update_agent.UpdateAgent(server.ROOT, state_dir=state_dir)
     try:
         transaction, manifest = agent.stage(
