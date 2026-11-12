@@ -103,6 +103,19 @@ def test_station_integration_resolves_external_state_directory(tmp_path):
     assert panel_update_integration._state_dir(instance) == data_dir.parent
 
 
+def test_station_integration_prefers_external_state_over_stale_panel_updater(tmp_path, monkeypatch):
+    panel = tmp_path / "data" / "yapanel"
+    state = tmp_path / "data" / "yapanel-state"
+    (panel / "updater").mkdir(parents=True)
+    (state / "updater").mkdir(parents=True)
+    monkeypatch.setattr(panel_update_integration, "__file__", str(panel / "panel_update_integration.py"))
+    instance = SimpleNamespace(
+        config=SimpleNamespace(server=SimpleNamespace(data_dir=panel))
+    )
+
+    assert panel_update_integration._state_dir(instance) == state
+
+
 def test_check_reports_missing_releases(monkeypatch):
     def fake_urlopen(request, timeout=0):
         raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)

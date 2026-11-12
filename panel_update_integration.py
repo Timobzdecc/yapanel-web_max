@@ -22,11 +22,15 @@ INTEGRATION_ID = "station-panel-updater-v2"
 def _state_dir(instance):
     """На Android updater хранится отдельно от каталога исходников панели."""
     configured = Path(getattr(instance.config.server, "data_dir", Path(__file__).resolve().parent))
+    source_root = Path(__file__).resolve().parent
     candidates = []
     if configured.name == "data":
         candidates.append(configured.parent)
+    elif configured == source_root or configured.name == "yapanel":
+        # Старые версии PanelUpdater могли оставить /data/yapanel/updater.
+        # Внешний state является единственным владельцем durable journal.
+        candidates.append(source_root.parent / "yapanel-state")
     candidates.append(configured)
-    source_root = Path(__file__).resolve().parent
     candidates.append(source_root.parent / "yapanel-state")
     candidates.append(Path("/data/yapanel-state"))
     for candidate in candidates:
