@@ -13,9 +13,11 @@ HEALTH_MARKER = "# station-max-health-overlay-v1"
 STATIC_MARKER = "/* station-max-update-ui-v2 */"
 MAX_PROFILE_UPSTREAM_SHA256 = {
     "0.3.11": "49e7ea5e6d132abb9b91134f85d7ebd5d49159dde38abf02737cbe486018b098",
+    "0.3.12": "3082ba1c1d2df2334a1ef66fbc9f5cdf262f1d8ec157c833a973d0c66734c90a",
 }
 MAX_PROFILE_OVERLAY_SHA256 = {
     "0.3.11": "1a411df1621e172e3379e1760f6ec86010fd10dc15959e6a1f7789996e8f9d64",
+    "0.3.12": "ff55dcc781f4496c8ce312da97326431ac78440695a919e65cdcf4b6626a489c",
 }
 MAX_PROFILE_ANCHOR = "    def max_hook_status(self):"
 OVERLAY_ID = "station-max-local-path-v2"

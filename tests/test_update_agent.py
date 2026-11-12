@@ -817,7 +817,7 @@ def test_station_overlay_applies_only_to_known_v0311_server(tmp_path):
     assert station_overlay.apply(tmp_path, "0.3.11")["applied"] is False
 
     server.write_bytes(source.replace("def shell(", "def other_shell(", 1).encode("utf-8"))
-    with pytest.raises(RuntimeError, match="не нашёл"):
+    with pytest.raises(RuntimeError, match="не нашёл|несовместим"):
         station_overlay.apply(tmp_path, "0.3.12")
 
 
@@ -831,6 +831,21 @@ def test_station_overlay_transfers_reviewed_max_profile_fallback(tmp_path):
     assert UpdateAgent.sha256(profile) == station_overlay.MAX_PROFILE_OVERLAY_SHA256["0.3.11"]
     assert "max_assistant_hook_fallback" in profile.read_text(encoding="utf-8")
     assert station_overlay._inject_max_profile(profile, "0.3.11")["applied"] is False
+
+
+def test_station_overlay_applies_reviewed_v0312_release(tmp_path):
+    (tmp_path / "static").mkdir()
+    (tmp_path / "server.py").write_bytes(subprocess.check_output(["git", "show", "v0.3.12:server.py"]))
+    (tmp_path / "max_profile.py").write_bytes(subprocess.check_output(["git", "show", "v0.3.12:max_profile.py"]))
+    (tmp_path / "static" / "app.js").write_bytes(subprocess.check_output(["git", "show", "v0.3.12:static/app.js"]))
+
+    result = station_overlay.apply(tmp_path, "0.3.12")
+
+    assert result["applied"] is True
+    assert UpdateAgent.sha256(tmp_path / "max_profile.py") == station_overlay.MAX_PROFILE_OVERLAY_SHA256["0.3.12"]
+    assert station_overlay.SERVER_MARKER in (tmp_path / "server.py").read_text(encoding="utf-8")
+    assert station_overlay.HEALTH_MARKER in (tmp_path / "server.py").read_text(encoding="utf-8")
+    assert station_overlay.STATIC_MARKER in (tmp_path / "static" / "app.js").read_text(encoding="utf-8")
 
 
 def test_station_overlay_blocks_unknown_max_profile_revision(tmp_path):

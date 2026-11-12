@@ -62,8 +62,9 @@ function Invoke-StationAdbShell {
 function Invoke-StationAdbPush {
     param([string]$LocalPath, [string]$RemotePath)
     $output = & $AdbExecutable -s $AdbSerial push $LocalPath $RemotePath 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw ("ADB push завершился с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine))
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw ("ADB push завершился с кодом " + $exitCode + ": " + ($output -join [Environment]::NewLine))
     }
 }
 
