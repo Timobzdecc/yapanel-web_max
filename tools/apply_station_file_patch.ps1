@@ -308,7 +308,7 @@ set -eu
 pid=$ExpectedPid
 test -r /proc/`$pid/cmdline
 exe=`$(readlink /proc/`$pid/exe 2>/dev/null || true)
-test "`$exe" = /data/python/bin/python3
+case "`$exe" in /data/python/bin/python3|/data/python/bin/python3.*) ;; *) echo unexpected_python_executable >&2; exit 23;; esac
 args=`$(tr '\000' ' ' < /proc/`$pid/cmdline)
 case "`$args" in *server.py*--port*8765*|*server.py*8765*) ;; *) echo unexpected_panel_argv >&2; exit 21;; esac
 case "`$args" in *updater_bootstrap.py*) ;; *) ppid=`$(cat /proc/`$pid/stat | sed 's/.*) //' | cut -d' ' -f2); parent=`$(tr '\000' ' ' < /proc/`$ppid/cmdline); case "`$parent" in *updater_bootstrap.py*) ;; *) echo unowned_panel_process >&2; exit 22;; esac;; esac

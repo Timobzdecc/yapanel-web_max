@@ -163,6 +163,13 @@ def test_maintenance_patch_transfer_sets_shell_metadata_before_cli():
     assert source.index("Publish-UpdaterBundle $bundle") < source.index("Invoke-ApplyPatch $Source")
 
 
+def test_maintenance_handoff_accepts_python_minor_executable():
+    source = (ROOT / "tools" / "apply_station_file_patch.ps1").read_text(encoding="utf-8")
+
+    assert 'case "`$exe" in /data/python/bin/python3|/data/python/bin/python3.*)' in source
+    assert "unexpected_python_executable" in source
+
+
 def test_rollback_order_stops_child_before_direct_file_rollback():
     source = (ROOT / "tools" / "install_station_max.ps1").read_text(encoding="utf-8")
 
