@@ -12,6 +12,7 @@ Hardware:
 
 import base64
 import hashlib
+import json
 import logging
 import os
 import posixpath
@@ -841,6 +842,23 @@ def max_write_bt_conf(adb, text):
             adb.shell(f"su -c 'rm -f {q_stage} {q_tmp}' 2>/dev/null; true", check=False)
         except Exception:
             pass
+
+
+_BT_SYNC_LOG_RE = re.compile(
+    r"routeDirective\s+\([^)]+\)(start|stop)_bluetooth\.activation\s+via\s+BluetoothCapability"
+    r"|\bbecause of\s+(start|stop)_bluetooth\b"
+)
+_BT_LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\b")
+
+
+def max_parse_bt_log_line(line):
+    """Извлекает (ts, is_on) из строки logcat quark-native о переключении Bluetooth Алисой."""
+    m = _BT_SYNC_LOG_RE.search(line or "")
+    if not m:
+        return None
+    action = m.group(1) or m.group(2)
+    m_ts = _BT_LOG_TS_RE.match((line or "").lstrip())
+    return (m_ts.group(1) if m_ts else "", action == "start")
 
 
 def max_is_bt_off(adb, bt_off_path):
@@ -2003,12 +2021,194 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
 
     P._bt_position = max_bt_position
 
+    _bt_init_lock = threading.Lock()
+
+    def _bt_sync_state_init(self):
+        with _bt_init_lock:
+            if hasattr(self, "_bt_sync_lock"):
+                return
+            self._bt_sync_lock = threading.RLock()
+            self._bt_alice_off = False
+            self._bt_last_log_ts = ""
+            self._bt_pending = None
+            self._bt_sync_started = False
+            self._bt_last_remote_poll = 0.0
+
+    def _bt_boot_id(self):
+        if getattr(self.adb, "is_local", False) is True:
+            try:
+                return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+            except OSError:
+                return ""
+        return ""
+
+    def _bt_sync_cache_path(self):
+        data_dir = getattr(s, "DATA_DIR", None)
+        if not data_dir:
+            return None
+        return Path(str(data_dir)) / "max_bt_sync.json"
+
+    def _bt_load_sync_state(self):
+        path = self._bt_sync_cache_path()
+        if not path or not path.is_file():
+            return
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(saved, dict):
+            return
+        cur_boot = self._bt_boot_id()
+        saved_boot = str(saved.get("boot_id") or "")
+        if cur_boot and saved_boot and cur_boot != saved_boot:
+            # После перезагрузки колонки ServicesIosdk стартует с streamingEnabled=true.
+            return
+        with self._bt_sync_lock:
+            self._bt_alice_off = bool(saved.get("alice_off", False))
+            self._bt_last_log_ts = str(saved.get("last_ts") or "")
+
+    def _bt_save_sync_state(self):
+        path = self._bt_sync_cache_path()
+        if not path:
+            return
+        payload = {
+            "boot_id": self._bt_boot_id(),
+            "alice_off": bool(self._bt_alice_off),
+            "last_ts": str(self._bt_last_log_ts or ""),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+    def _bt_handle_log_line(self, line):
+        parsed = max_parse_bt_log_line(line)
+        if parsed is None:
+            return False
+        ts, is_on = parsed
+        self._bt_sync_state_init()
+        with self._bt_sync_lock:
+            if ts and self._bt_last_log_ts and ts <= self._bt_last_log_ts:
+                return False
+            self._bt_alice_off = not is_on
+            if ts:
+                self._bt_last_log_ts = ts
+            if not is_on:
+                self._pair_until = 0
+            if self._bt_pending is not None and self._bt_pending[0] == is_on:
+                self._bt_pending = None
+            self._bt_save_sync_state()
+            return True
+
+    def _bt_scan_logcat_dump(self, text):
+        if not text:
+            return False
+        latest = None
+        for line in text.splitlines():
+            parsed = max_parse_bt_log_line(line)
+            if parsed is not None:
+                latest = (line, parsed)
+        if latest is None:
+            return False
+        return self._bt_handle_log_line(latest[0])
+
+    def _bt_sync_start(self):
+        self._bt_sync_state_init()
+        with self._bt_sync_lock:
+            if self._bt_sync_started:
+                return
+            self._bt_sync_started = True
+        self._bt_load_sync_state()
+        if getattr(self.adb, "is_local", False) is not True:
+            return
+
+        try:
+            seed_out = max_android_cmd(
+                self.adb, ["logcat", "-d", "-v", "year", "-b", "main", "-s", "quark-native:I"], timeout=5
+            )
+            self._bt_scan_logcat_dump(seed_out)
+        except Exception as exc:
+            _log.debug("BT sync initial logcat seed failed: %s", exc)
+
+        def watch():
+            while True:
+                proc = None
+                try:
+                    proc = subprocess.Popen(
+                        ["logcat", "-v", "year", "-b", "main", "-T", "1", "-s", "quark-native:I"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                    )
+                    if proc.stdout is not None:
+                        for line in proc.stdout:
+                            self._bt_handle_log_line(line)
+                except Exception as exc:
+                    _log.debug("BT sync watcher error: %s", exc)
+                finally:
+                    if proc is not None:
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=1)
+                        except Exception:
+                            pass
+                time.sleep(3)
+
+        threading.Thread(target=watch, daemon=True, name="bt-sync-monitor").start()
+
+    def _bt_sync_poll_remote(self):
+        self._bt_sync_state_init()
+        now = time.monotonic()
+        if now - self._bt_last_remote_poll < 1.5:
+            return
+        self._bt_last_remote_poll = now
+        try:
+            out, _, _ = _shell_result(
+                self.adb.shell(
+                    "logcat -d -v year -b main -s quark-native:I 2>/dev/null "
+                    "| grep -E 'BluetoothCapability|because of (start|stop)_bluetooth'",
+                    check=False,
+                    timeout=5,
+                )
+            )
+            self._bt_scan_logcat_dump(out)
+        except Exception as exc:
+            _log.debug("BT sync remote poll failed: %s", exc)
+
+    def _bt_set_alice_state(self, is_on, pending=False):
+        self._bt_sync_state_init()
+        with self._bt_sync_lock:
+            self._bt_alice_off = not is_on
+            self._bt_pending = (bool(is_on), time.monotonic() + 8.0) if pending else None
+            if not is_on:
+                self._pair_until = 0
+            self._bt_save_sync_state()
+
+    def _bt_send_alice_command(self, text, require_glagol=True):
+        gl = getattr(self, "glagol", None)
+        if gl and getattr(gl, "ws", None):
+            gl.send({"command": "sendText", "text": text})
+            return True
+        if require_glagol:
+            raise AdbError("Нет связи с Алисой (Glagol) — дождитесь подключения")
+        return False
+
     def _bt_powered_now(self):
         out = max_android_cmd(self.adb, ["dumpsys", "bluetooth_manager"])
         m = re.search(r"enabled:\s*(true|false)", out, re.I)
         return bool(m and m.group(1).lower() == "true")
 
     def max_bt_state(self):
+        self._bt_sync_start()
+        if getattr(self.adb, "is_local", False) is not True:
+            self._bt_sync_poll_remote()
+
         bt_off_path = getattr(s, "BT_OFF", "/data/quasar/webpanel/bt_off")
         keep_off = max_is_bt_off(self.adb, bt_off_path)
 
@@ -2016,12 +2216,9 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
 
         m_enabled = re.search(r"enabled:\s*(true|false)", dumpsys_out, re.I)
         if m_enabled:
-            powered = (m_enabled.group(1).lower() == "true")
+            adapter_powered = (m_enabled.group(1).lower() == "true")
         else:
-            powered = bool(re.search(r"State:\s*ON", dumpsys_out, re.I))
-
-        if keep_off:
-            powered = False
+            adapter_powered = bool(re.search(r"State:\s*ON", dumpsys_out, re.I))
 
         m_name = re.search(r"^\s*name:\s*(.+)$", dumpsys_out, re.M | re.I)
         alias = m_name.group(1).strip() if m_name else "Яндекс Станция Макс"
@@ -2030,8 +2227,32 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         scan_mode = m_scan.group(1).upper() if m_scan else ""
         is_disc = ("DISCOVERABLE" in scan_mode)
 
-        pair_until = int(self._pair_until) if getattr(self, "_pair_until", 0) > time.time() else None
-        discoverable = is_disc or (pair_until is not None)
+        bt_media = max_bt_info(self.adb)
+        a2dp_connected = bool(
+            re.search(r"A2dpSinkStateMachine[^\r\n]*\bstate=Connected\b", dumpsys_out, re.I)
+        ) or bool(bt_media)
+
+        with self._bt_sync_lock:
+            if not adapter_powered:
+                powered = False
+            elif self._bt_pending is not None:
+                pending_on, deadline = self._bt_pending
+                if time.monotonic() < deadline:
+                    powered = pending_on
+                else:
+                    self._bt_pending = None
+                    if self._bt_alice_off and (a2dp_connected or is_disc):
+                        self._bt_alice_off = False
+                        self._bt_save_sync_state()
+                    powered = not self._bt_alice_off
+            else:
+                if self._bt_alice_off and (a2dp_connected or is_disc):
+                    self._bt_alice_off = False
+                    self._bt_save_sync_state()
+                powered = not self._bt_alice_off
+
+        pair_until = int(self._pair_until) if (powered and getattr(self, "_pair_until", 0) > time.time()) else None
+        discoverable = bool(powered and (is_disc or (pair_until is not None)))
 
         devices = []
         devices_map = {}
@@ -2071,7 +2292,6 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
                     elif bname and devices_map[bmac]["name"] == bmac:
                         devices_map[bmac]["name"] = bname
 
-        bt_media = max_bt_info(self.adb)
         for mac, info in devices_map.items():
             dev_class = info.get("dev_class", 0)
             major = (dev_class & 0x1F00) >> 8
@@ -2110,61 +2330,59 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             "out": {"on": False, "supported": False},
         }
 
+    P._bt_sync_state_init = _bt_sync_state_init
+    P._bt_boot_id = _bt_boot_id
+    P._bt_sync_cache_path = _bt_sync_cache_path
+    P._bt_load_sync_state = _bt_load_sync_state
+    P._bt_save_sync_state = _bt_save_sync_state
+    P._bt_handle_log_line = _bt_handle_log_line
+    P._bt_scan_logcat_dump = _bt_scan_logcat_dump
+    P._bt_sync_start = _bt_sync_start
+    P._bt_sync_poll_remote = _bt_sync_poll_remote
+    P._bt_set_alice_state = _bt_set_alice_state
+    P._bt_send_alice_command = _bt_send_alice_command
     P.bt_state = max_bt_state
     P._bt_powered_now = _bt_powered_now
 
     def max_bt_action(self, data):
+        self._bt_sync_start()
         AdbError = getattr(s, "AdbError", Exception)
         bt_off_path = getattr(s, "BT_OFF", "/data/quasar/webpanel/bt_off")
         act = data.get("action")
         mac = str(data.get("mac") or "").upper()
 
         if act == "power_off":
-            max_set_bt_off(self.adb, bt_off_path, True)
-            max_android_cmd(self.adb, ["svc", "bluetooth", "disable"])
-            for _ in range(10):
-                time.sleep(0.2)
-                if not self._bt_powered_now():
-                    break
-            self._pair_until = 0
-            if getattr(self, "glagol", None) and getattr(self.glagol, "ws", None):
-                try:
-                    self.glagol.send({"command": "sendText", "text": "выключи блютуз"})
-                except Exception:
-                    pass
+            # Синхронизация в стиле Яндекса: выключаем стриминг и видимость через Алису,
+            # не трогая BluetoothAdapter, чтобы не отваливался BLE-пульт (Yandex Remote 2).
+            self._bt_send_alice_command("выключи блютуз", require_glagol=True)
+            max_set_bt_off(self.adb, bt_off_path, False)
+            self._bt_set_alice_state(False, pending=True)
         elif act == "power_on":
             max_set_bt_off(self.adb, bt_off_path, False)
-            max_android_cmd(self.adb, ["svc", "bluetooth", "enable"])
-            for _ in range(10):
-                time.sleep(0.5)
-                if self._bt_powered_now():
-                    break
+            was_adapter_on = self._bt_powered_now()
+            if not was_adapter_on:
+                max_android_cmd(self.adb, ["svc", "bluetooth", "enable"])
+                for _ in range(10):
+                    time.sleep(0.5)
+                    if self._bt_powered_now():
+                        break
+            self._bt_send_alice_command("включи блютуз", require_glagol=was_adapter_on)
+            self._bt_set_alice_state(True, pending=True)
         elif act == "pair_on":
             max_set_bt_off(self.adb, bt_off_path, False)
-            max_android_cmd(self.adb, ["svc", "bluetooth", "enable"])
-            for _ in range(10):
-                time.sleep(0.5)
-                if self._bt_powered_now():
-                    break
+            if not self._bt_powered_now():
+                max_android_cmd(self.adb, ["svc", "bluetooth", "enable"])
+                for _ in range(10):
+                    time.sleep(0.5)
+                    if self._bt_powered_now():
+                        break
             self._pair_until = time.time() + 180
-            if getattr(self, "glagol", None) and getattr(self.glagol, "ws", None):
-                try:
-                    self.glagol.send({"command": "sendText", "text": "включи блютуз"})
-                except Exception:
-                    pass
+            self._bt_send_alice_command("включи блютуз", require_glagol=False)
+            self._bt_set_alice_state(True, pending=True)
         elif act == "pair_off":
             self._pair_until = 0
-            if getattr(self, "glagol", None) and getattr(self.glagol, "ws", None):
-                try:
-                    self.glagol.send({"command": "sendText", "text": "выключи блютуз"})
-                except Exception:
-                    pass
         elif act == "disconnect":
-            if getattr(self, "glagol", None) and getattr(self.glagol, "ws", None):
-                try:
-                    self.glagol.send({"command": "sendText", "text": "отключи блютуз"})
-                except Exception:
-                    pass
+            self._bt_send_alice_command("отключи блютуз", require_glagol=False)
         elif act == "remove":
             if not re.fullmatch(r"([0-9A-F]{2}:){5}[0-9A-F]{2}", mac):
                 raise AdbError("неверный адрес устройства")
@@ -2179,16 +2397,31 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
                 except Exception as e:
                     raise AdbError(f"Не удалось забыть устройство: {e}")
         elif act == "connect":
-            if getattr(self, "glagol", None) and getattr(self.glagol, "ws", None):
-                try:
-                    self.glagol.send({"command": "sendText", "text": "включи блютуз"})
-                except Exception:
-                    pass
+            if not self._bt_powered_now():
+                max_android_cmd(self.adb, ["svc", "bluetooth", "enable"])
+                for _ in range(10):
+                    time.sleep(0.5)
+                    if self._bt_powered_now():
+                        break
+            self._bt_send_alice_command("включи блютуз", require_glagol=False)
+            self._bt_set_alice_state(True, pending=True)
         else:
             raise AdbError("неизвестное действие")
         return self.bt_state()
 
     P.bt_action = max_bt_action
+
+    orig_configure_glagol = P._configure_glagol
+
+    def max_configure_glagol(self, device_id):
+        res = orig_configure_glagol(self, device_id)
+        try:
+            self._bt_sync_start()
+        except Exception as exc:
+            _log.debug("BT sync start in _configure_glagol failed: %s", exc)
+        return res
+
+    P._configure_glagol = max_configure_glagol
 
     # ---------- звуки включения/выключения Bluetooth ----------
     def _bt_memes_map(self):
@@ -2424,7 +2657,6 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             f"bind \"$d/${{f#./}}\" \"$t/${{f#./}}\"; done; done\n"
             f"[ -d {s.OVR_DIR}/sounds ] && (cd {s.OVR_DIR}/sounds && find . -type f) | while read -r f; do "
             f"bind \"{s.OVR_DIR}/sounds/${{f#./}}\" \"{s.SOUNDS_DIR}/${{f#./}}\"; done\n"
-            f"[ -f {s.WEB_DIR}/bt_off ] && ( svc bluetooth disable ) >/dev/null 2>&1 &\n"
             f"[ -f {s.ASSIST_CONF} ] && [ -x {s.ASSISTD} ] && [ ! -f {s.ASSIST_NO_AUTOSTART} ] && {{ "
             f"if [ ! -f {s.ASSIST_SD} ] || ! kill -0 \"$(cat {s.ASSIST_SD} 2>/dev/null)\" 2>/dev/null; then "
             # PID публикует только Python-демон после получения flock.
