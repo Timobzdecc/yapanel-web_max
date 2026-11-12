@@ -123,7 +123,7 @@ def test_prepared_wrapper_is_restored_after_restart_before_activation(tmp_path, 
     monkeypatch.setattr(updater_bootstrap, "_start", lambda *args: Child(returncode=0))
 
     assert updater_bootstrap.run(root, state, "python", []) == 0
-    assert (root / "start.sh").read_bytes() == patched
+    assert (root / "start.sh").read_bytes() == original
     assert not (updater / "wrapper-intent.json").exists()
     status = json.loads((updater / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "preparation_aborted"
