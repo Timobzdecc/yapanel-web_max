@@ -406,6 +406,62 @@ class UpdateAgent:
             shutil.rmtree(transaction_dir, ignore_errors=True)
             raise
 
+    def stage_patch(self, blob, version, filename="max_profile.py",
+                    expected_sha256=None, expected_current_sha256=None, commit=None):
+        """Готовим узкий patch как полноценную durable transaction."""
+        if filename != "max_profile.py":
+            raise UpdateFailure("Разрешён только maintenance patch max_profile.py")
+        blob = bytes(blob)
+        if expected_sha256 and hashlib.sha256(blob).hexdigest().lower() != expected_sha256.lower():
+            raise UpdateFailure("Контрольная сумма patch не совпадает")
+        current = self.root / filename
+        if not current.is_file():
+            raise UpdateFailure(f"Текущий файл patch отсутствует: {filename}")
+        current_sha256 = self.sha256(current)
+        if expected_current_sha256 and current_sha256.lower() != expected_current_sha256.lower():
+            raise UpdateFailure(
+                f"Текущий SHA-256 {filename} не совпадает с ожидаемым: {current_sha256}"
+            )
+        try:
+            compile(blob.decode("utf-8"), filename, "exec")
+        except (UnicodeDecodeError, SyntaxError) as exc:
+            raise UpdateFailure(f"Patch {filename} не прошёл проверку Python: {exc}") from exc
+
+        transaction_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        transaction_dir = self.updater_dir / "transactions" / transaction_id
+        stage = transaction_dir / "stage"
+        try:
+            patch_path = stage / filename
+            durable_write(patch_path, blob, mode="wb")
+            manifest = {
+                "version": str(version),
+                "commit": commit or "station-max-maintenance-patch-v1",
+                "managed": [filename],
+                "required": [filename],
+                "preserved": sorted(self.PRESERVED_FILES),
+                "patch": {
+                    "file": filename,
+                    "current_sha256": current_sha256,
+                    "target_sha256": hashlib.sha256(blob).hexdigest(),
+                },
+            }
+            self.preflight(manifest, archive_size=len(blob))
+            durable_json(transaction_dir / "manifest.json", manifest)
+            self._write_journal({
+                "id": transaction_id,
+                "state": "staged",
+                "version": manifest["version"],
+                "commit": manifest["commit"],
+                "stage": str(stage),
+                "archive": str(patch_path),
+                "managed": manifest["managed"],
+                "patch": manifest["patch"],
+            }, transaction_dir)
+            return transaction_id, manifest
+        except Exception:
+            shutil.rmtree(transaction_dir, ignore_errors=True)
+            raise
+
     def _transaction_dir(self, transaction_id):
         return self.updater_dir / "transactions" / transaction_id
 
@@ -457,13 +513,25 @@ class UpdateAgent:
         return conflicts
 
     def capture_baseline(self, files):
-        """Сохраняем hashes известной чистой установки для первого preflight."""
+        """Обновляем только переданные hashes, сохраняя остальные baseline entries.
+
+        Maintenance patch управляет одним файлом и не должен стирать lineage,
+        approved overrides и hashes остальных файлов панели.
+        """
+        target = self.updater_dir / "baseline.json"
         baseline = {}
+        if target.is_file():
+            try:
+                loaded = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise UpdateFailure("Не удалось прочитать существующий baseline") from exc
+            if not isinstance(loaded, dict):
+                raise UpdateFailure("Baseline должен содержать JSON-объект")
+            baseline.update(loaded)
         for name in files:
             path = self.root / name
             if path.is_file():
                 baseline[name] = self.sha256(path)
-        target = self.updater_dir / "baseline.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         durable_json(target, baseline)
         return baseline
@@ -532,7 +600,8 @@ class UpdateAgent:
         if conflicts:
             raise UpdateFailure("Обнаружены локальные изменения: " + ", ".join(item["file"] for item in conflicts))
         source_root = Path(journal["stage"])
-        if "station-max-update-overlay-v2" in (source_root / "server.py").read_text(encoding="utf-8"):
+        server_path = source_root / "server.py"
+        if server_path.is_file() and "station-max-update-overlay-v2" in server_path.read_text(encoding="utf-8"):
             if not (self.root / "panel_update_integration.py").is_file() and not (source_root / "panel_update_integration.py").is_file():
                 raise UpdateFailure("Не найден внешний panel_update_integration.py для безопасного updater")
         for name in managed:
@@ -730,13 +799,15 @@ class UpdateAgent:
 
 def _main(argv=None):
     parser = argparse.ArgumentParser(description="Восстановление staged-обновления yapanel-web_max")
-    parser.add_argument("command", choices=("apply", "rollback", "recover", "close-staged"))
+    parser.add_argument("command", choices=("apply", "apply-patch", "rollback", "recover", "close-staged"))
     parser.add_argument("transaction", nargs="?")
     parser.add_argument("--root", required=True)
     parser.add_argument("--state", required=True)
     parser.add_argument("--archive")
+    parser.add_argument("--file")
     parser.add_argument("--version")
     parser.add_argument("--sha256")
+    parser.add_argument("--expected-current-sha256")
     parser.add_argument("--commit")
     parser.add_argument("--reason")
     parser.add_argument("--conflict", action="append", dest="conflicts")
@@ -758,6 +829,29 @@ def _main(argv=None):
             "transaction": journal["id"],
             "version": journal["version"],
             "state": journal["state"],
+        }, ensure_ascii=False))
+    elif args.command == "apply-patch":
+        if not args.file or not args.version or not args.sha256 or not args.expected_current_sha256:
+            parser.error("для apply-patch нужны --file, --version, --sha256 и --expected-current-sha256")
+        patch_path = Path(args.file)
+        if not patch_path.is_file():
+            parser.error(f"patch-файл не найден: {patch_path}")
+        transaction, manifest = agent.stage_patch(
+            patch_path.read_bytes(),
+            version=args.version,
+            expected_sha256=args.sha256,
+            expected_current_sha256=args.expected_current_sha256,
+        )
+        baseline_path = agent.updater_dir / "baseline.json"
+        if not baseline_path.is_file():
+            raise UpdateFailure("Не найден baseline текущей установки; patch заблокирован")
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        journal = agent.activate(transaction, baseline=baseline)
+        print(json.dumps({
+            "transaction": journal["id"],
+            "version": journal["version"],
+            "state": journal["state"],
+            "file": manifest["patch"]["file"],
         }, ensure_ascii=False))
     elif args.command == "rollback":
         if not args.transaction:

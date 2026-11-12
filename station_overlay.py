@@ -11,6 +11,13 @@ SERVER_MARKER = "# station-max-update-overlay-v2"
 SUPERVISOR_MARKER = "# station-max-supervisor-v1"
 HEALTH_MARKER = "# station-max-health-overlay-v1"
 STATIC_MARKER = "/* station-max-update-ui-v2 */"
+MAX_PROFILE_UPSTREAM_SHA256 = {
+    "0.3.11": "49e7ea5e6d132abb9b91134f85d7ebd5d49159dde38abf02737cbe486018b098",
+}
+MAX_PROFILE_OVERLAY_SHA256 = {
+    "0.3.11": "1a411df1621e172e3379e1760f6ec86010fd10dc15959e6a1f7789996e8f9d64",
+}
+MAX_PROFILE_ANCHOR = "    def max_hook_status(self):"
 OVERLAY_ID = "station-max-local-path-v2"
 BRIDGE_IMPORT = "from panel_update_integration import install as _install_station_updater"
 BRIDGE_CALL = "_install_station_updater(PanelUpdater)"
@@ -42,6 +49,120 @@ if ($('#upd-go')) $('#upd-go').onclick = e => {
     } finally { btn.textContent = 'Обновить'; }
   });
 };
+'''
+
+
+MAX_PROFILE_BLOCK = r'''    def max_assistant_hook_fallback(self, users):
+        """Проверяет существующий worker автозапуска ассистента на Android."""
+        if "ассистент" not in users or getattr(self.adb, "is_local", False) is not True:
+            return False
+        out, _, _ = self.adb.shell(
+            f"[ -x /system/bin/sh ] && [ -d /data/quasar ] && "
+            f"[ -f {s.ASSIST_CONF} ] && [ -x {s.ASSISTD} ] && "
+            f"[ ! -f {s.ASSIST_NO_AUTOSTART} ] && echo assistant-worker || true",
+            check=False,
+        )
+        return "assistant-worker" in out.split()
+
+    def max_hook_status(self):
+        """Показывает статус boot hook для Android TV 9 / Station Max.
+
+        Свежесть проверяется по реальному MD5, а boot-route - read-only
+        проверкой caller. Одного наличия boot_hook.sh недостаточно, чтобы
+        подтвердить его выполнение после перезагрузки.
+        """
+        expected = hashlib.md5(max_boot_hook_script().encode("utf-8")).hexdigest()
+        possible = True
+        reason = ""
+        try:
+            self._boot_route()
+        except AdbError as exc:
+            possible = False
+            reason = str(exc)
+        out, _, _ = self.adb.shell(
+            f"{self._hook_users_script()}; [ -f {s.BOOT_HOOK} ] && echo hook; "
+            f"md5sum {s.BOOT_HOOK} 2>/dev/null; true", check=False)
+        out = s.strip_ansi(out)
+        flags = set(out.split())
+        users = [l.strip()[1:] for l in out.splitlines() if l.strip().startswith("@")]
+        hook = "hook" in flags
+        fresh = expected in out
+        assistant_fallback = self.max_assistant_hook_fallback(users)
+        required_users = [user for user in users if not (user == "ассистент" and assistant_fallback)]
+        if assistant_fallback and not required_users:
+            reason = "boot_hook не требуется: автозапуск ассистента выполняет worker панели"
+        return {
+            "hook": hook,
+            "fresh": hook and fresh,
+            "users": users,
+            "possible": possible,
+            "supported": True,
+            "reason": reason,
+            "broken": bool(required_users) and not (hook and fresh),
+            "rootkeeper": "/odm/bin/adbd_watchdog.sh",
+            "file": "/data/quasar/webpanel/boot_hook.sh",
+        }
+
+    def max_ensure_hook(self, remount=False):
+        """Write the Station Max boot_hook.sh (Android TV 9, no Buildroot parts)."""
+        # Не записываем файл, пока не доказано, что Android действительно
+        # вызывает его при загрузке. Иначе repair может убрать предупреждение,
+        # но оставить хук невыполняемым после перезагрузки.
+        self._boot_route()
+        hook_script = max_boot_hook_script()
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "hook"
+            with open(f, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(hook_script)
+            self.adb.shell(f"mkdir -p {s.WEB_DIR}")
+            self.adb.push(f, s.BOOT_HOOK)
+        self.adb.shell(f"chmod 755 {s.BOOT_HOOK}; true")
+
+    def max_hook_repair(self, remount=False):
+        self._ensure_hook(remount=False)
+        return self.hook_status()
+
+    def max_boot_route(self):
+        """Подтверждает реальный Android boot caller для boot_hook.sh."""
+        caller = shlex.quote(s.ROOTKEEPER_CALLER)
+        hook = shlex.quote(s.BOOT_HOOK)
+        command = (
+            f"[ -f {caller} ] && "
+            f"sed '/^[[:space:]]*#/d' {caller} 2>/dev/null | "
+            f"grep -F {hook} >/dev/null 2>&1 && echo watchdog || exit 3"
+        )
+        out, err, rc = self.adb.shell(command, check=False)
+        if rc or out.strip() != "watchdog":
+            detail = err.strip() or "caller не найден или не вызывает boot_hook.sh"
+            raise AdbError(
+                f"Автозапуск boot_hook.sh не подтверждён: {s.ROOTKEEPER_CALLER}: {detail}"
+            )
+        return "watchdog"
+
+    def max_hook_users_script(self):
+        """Android TV 9 hook users (strictly no Buildroot daemons)."""
+        users = [
+            ("заставка", s.BOOT_CUSTOM),
+            ("звук запуска", s.SOUND_CUSTOM),
+            ("блокировка аналитики", s.HOSTS_CUSTOM),
+            ("звуки Bluetooth", s.BT_MEMES_AUTOSTART),
+            ("выключенный bluetooth", s.BT_OFF),
+            ("агент", s.AGENT_TOKENS),
+            ("ассистент", s.ASSIST_CONF),
+            ("слова активации", s.WAKE_AUTOSTART),
+            ("активация Алисы (Frida)", s.WAKE_FRIDA_AUTOSTART),
+        ]
+        commands = []
+        for name, path in users:
+            condition = f"[ -f {path} ]"
+            if name == "ассистент":
+                condition += f" && [ ! -f {s.ASSIST_NO_AUTOSTART} ]"
+            commands.append(f"{condition} && echo {shlex.quote('@' + name)}")
+        cmd = "; ".join(commands)
+        cmd += f"; find {s.OVR_DIR}/sounds -type f 2>/dev/null | grep -q . && echo '@свои звуки'"
+        cmd += f"; find {s.OVR_DIR}/ledpatterns -type f 2>/dev/null | grep -q . && echo '@свои анимации'"
+        return cmd
+
 '''
 
 
@@ -165,6 +286,46 @@ def _inject_static(static_path):
     return {"applied": True}
 
 
+def _inject_max_profile(profile_path, version):
+    """Применяем только проверенный overlay к upstream max_profile.py."""
+    if not profile_path.is_file():
+        return {"applied": False, "reason": "max-profile-not-present"}
+    version = str(version)
+    source = profile_path.read_text(encoding="utf-8")
+    actual = _sha256(profile_path)
+    target = MAX_PROFILE_OVERLAY_SHA256.get(version)
+    if actual in MAX_PROFILE_OVERLAY_SHA256.values():
+        return {"applied": False, "reason": "already-present", "sha256": actual}
+    if MAX_PROFILE_ANCHOR not in source:
+        return {"applied": False, "reason": "max-profile-overlay-not-applicable"}
+    expected = MAX_PROFILE_UPSTREAM_SHA256.get(version)
+    if expected is None or actual != expected:
+        raise RuntimeError(
+            f"Overlay Station Max не знает совместимый max_profile.py для {version}: {actual}"
+        )
+    start = source.find(MAX_PROFILE_ANCHOR)
+    end = source.find("    def max_drop_hook_if_unused", start)
+    if start < 0 or end < 0 or source.count(MAX_PROFILE_ANCHOR) != 1:
+        raise RuntimeError("Overlay Station Max не нашёл однозначный блок max_profile.py")
+    source = source[:start] + MAX_PROFILE_BLOCK + source[end:]
+    binding = "    P.hook_status = max_hook_status\n"
+    if source.count(binding) != 1:
+        raise RuntimeError("Overlay Station Max не нашёл binding hook_status")
+    source = source.replace(
+        binding,
+        binding + "    P.max_assistant_hook_fallback = max_assistant_hook_fallback\n",
+        1,
+    )
+    with profile_path.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(source)
+    actual = _sha256(profile_path)
+    if actual != target:
+        raise RuntimeError(
+            f"Overlay max_profile.py дал неожиданный SHA-256: {actual}, ожидался {target}"
+        )
+    return {"applied": True, "sha256": actual, "version": version}
+
+
 def apply(content_root, version):
     root = Path(content_root)
     server = root / "server.py"
@@ -177,8 +338,11 @@ def apply(content_root, version):
                               or STATIC_MARKER in static_path.read_text(encoding="utf-8")
                               or ("/api/panel/update/status" in static_path.read_text(encoding="utf-8")
                                   and "activated_pending_health" in static_path.read_text(encoding="utf-8")))
+    max_profile = _inject_max_profile(root / "max_profile.py", version)
     source = _inject_server(initial_source, version, server)
-    if server_already_patched and static_already_patched:
-        return {"id": OVERLAY_ID, "version": str(version), "applied": False, "static": {"reason": "already-present"}}
+    if server_already_patched and static_already_patched and not max_profile["applied"]:
+        return {"id": OVERLAY_ID, "version": str(version), "applied": False,
+                "max_profile": max_profile, "static": {"reason": "already-present"}}
     static = _inject_static(static_path)
-    return {"id": OVERLAY_ID, "version": str(version), "applied": True, "static": static}
+    return {"id": OVERLAY_ID, "version": str(version), "applied": True,
+            "max_profile": max_profile, "static": static}

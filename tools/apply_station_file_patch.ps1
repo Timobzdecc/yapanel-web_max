@@ -1,13 +1,11 @@
-[CmdletBinding(DefaultParameterSetName = "Apply")]
+[CmdletBinding()]
 param(
-    [Parameter(ParameterSetName = "Apply")]
     [switch]$Apply,
-    [Parameter(ParameterSetName = "DryRun")]
-    [switch]$DryRun,
-    [Parameter(ParameterSetName = "Rollback", Mandatory = $true)]
+    [switch]$Restart,
     [switch]$Rollback,
+    [switch]$DryRun,
+    [string]$TransactionId,
     [string]$Source,
-    [string]$BackupArchive,
     [string]$SshAlias = "station-max",
     [string]$AdbSerial = "192.168.31.196:5555",
     [string]$SshExecutable = "ssh.exe",
@@ -15,71 +13,54 @@ param(
     [string]$HealthUri = "http://192.168.31.196:8765",
     [string]$ExpectedVersion = "0.3.11",
     [string]$ExpectedCurrentSha256 = "49e7ea5e6d132abb9b91134f85d7ebd5d49159dde38abf02737cbe486018b098",
-    [string]$ExpectedActiveSha256,
-    [string]$RemotePath = "/data/yapanel/max_profile.py",
+    [string]$ExpectedPatchedSha256 = "1a411df1621e172e3379e1760f6ec86010fd10dc15959e6a1f7789996e8f9d64",
     [string]$WorkDirectory = (Join-Path (Get-Location) "station-patch-0.3.11")
 )
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $python = (Get-Command python.exe -ErrorAction Stop).Source
-$managedRemotePath = "/data/yapanel/max_profile.py"
+$rootdControl = Join-Path $PSScriptRoot "rootd_control.py"
+$componentNames = @("update_agent.py", "station_overlay.py", "updater_bootstrap.py", "panel_update_integration.py")
+if (-not $Source) { $Source = Join-Path $root "max_profile.py" }
 
-if (($Apply -and $Rollback) -or ($DryRun -and ($Apply -or $Rollback))) {
-    throw "Нельзя одновременно указать -Apply и -Rollback"
-}
-if (-not $Apply -and -not $Rollback) {
-    $DryRun = $true
-}
-if ($SshAlias -notmatch '^[A-Za-z0-9_.-]+$') {
-    throw "Недопустимый SSH alias"
-}
-if ($RemotePath -ne $managedRemotePath) {
-    throw "Разрешён только точечный патч $managedRemotePath"
-}
-if ($Rollback -and -not $BackupArchive) {
-    throw "Для -Rollback нужен -BackupArchive"
-}
-if ($Rollback -and -not $ExpectedActiveSha256) {
-    throw "Для -Rollback нужен SHA-256 текущего активного файла через -ExpectedActiveSha256"
-}
-if (($Apply -or $DryRun) -and -not $Source) {
-    $Source = Join-Path $root "max_profile.py"
-}
-if ($Source -and -not (Test-Path -LiteralPath $Source -PathType Leaf)) {
-    throw "Файл источника не найден: $Source"
-}
+if ($DryRun -and ($Apply -or $Restart -or $Rollback)) { throw "-DryRun нельзя совмещать с изменяющей операцией" }
+if ($Rollback -and ($Apply -or $Restart)) { throw "-Rollback нельзя совмещать с -Apply или -Restart" }
+if ($Restart -and -not $TransactionId) { throw "Для -Restart нужен -TransactionId" }
+if ($Rollback -and -not $TransactionId) { throw "Для -Rollback нужен -TransactionId" }
+if ($TransactionId -and $TransactionId -notmatch '^[A-Za-z0-9-]+$') { throw "Недопустимый transaction id" }
+if ($Apply -and -not (Test-Path -LiteralPath $Source -PathType Leaf)) { throw "Patch-файл не найден: $Source" }
+if ($SshAlias -notmatch '^[A-Za-z0-9_.-]+$') { throw "Недопустимый SSH alias" }
 
 function Invoke-StationSsh {
-    param([string]$RemoteCommand)
-
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($RemoteCommand))
+    param([Parameter(Mandatory = $true)][string]$Command)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
     $transport = "printf %s $encoded | /system/bin/base64 -d | /system/bin/sh"
     $output = & $SshExecutable -o BatchMode=yes $SshAlias $transport 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw ("SSH-команда завершилась с кодом " + $LASTEXITCODE + ": " + $RemoteCommand +
-            [Environment]::NewLine + ($output -join [Environment]::NewLine))
-    }
+    if ($LASTEXITCODE -ne 0) { throw ("SSH-команда завершилась с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine)) }
+    return @($output)
+}
+
+function Invoke-StationAdb {
+    param([Parameter(Mandatory = $true)][string]$Command)
+    $output = & $AdbExecutable -s $AdbSerial shell $Command 2>&1
+    if ($LASTEXITCODE -ne 0) { throw ("ADB-команда завершилась с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine)) }
     return @($output)
 }
 
 function Send-StationFileBase64 {
-    param([string]$LocalPath, [string]$RemoteDestination)
-
+    param([string]$LocalPath, [string]$RemotePath)
     $sshPath = (Get-Command $SshExecutable -ErrorAction Stop).Source
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $sshPath
-    $startInfo.Arguments = '-o BatchMode=yes ' + $SshAlias +
-        ' "base64 -d > ' + $RemoteDestination + '"'
+    $startInfo.Arguments = '-o BatchMode=yes ' + $SshAlias + ' "base64 -d > ' + $RemotePath + '"'
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.RedirectStandardOutput = $true
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
-    if (-not $process.Start()) {
-        throw "Не удалось запустить SSH для передачи файла"
-    }
+    if (-not $process.Start()) { throw "Не удалось запустить SSH для передачи файла" }
     try {
         $bytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($LocalPath))
         $payload = [Text.Encoding]::ASCII.GetBytes($bytes)
@@ -88,203 +69,224 @@ function Send-StationFileBase64 {
         $errorText = $process.StandardError.ReadToEnd()
         $outputText = $process.StandardOutput.ReadToEnd()
         $process.WaitForExit()
-        if ($process.ExitCode -ne 0) {
-            throw ("SSH-передача завершилась с кодом " + $process.ExitCode + ": " + $errorText + $outputText)
-        }
+        if ($process.ExitCode -ne 0) { throw ("SSH-передача завершилась с кодом " + $process.ExitCode + ": " + $errorText + $outputText) }
     }
-    finally {
-        $process.Dispose()
-    }
+    finally { $process.Dispose() }
+}
+
+function Get-LabelValue {
+    param([object[]]$Lines, [string]$Label)
+    $line = $Lines | Where-Object { [string]$_ -like ($Label + "=*") } | Select-Object -First 1
+    if (-not $line) { return $null }
+    return ([string]$line).Substring($Label.Length + 1).Trim()
 }
 
 function Get-StationFacts {
-    $remote = @'
+    $script = @'
 set -eu
 printf 'VERSION='; cat /data/yapanel/VERSION
-printf 'STATE='; sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /data/yapanel-state/updater/status.json | head -1
-printf 'TRANSACTION='; sed -n 's/.*"transaction"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /data/yapanel-state/updater/status.json | head -1
-printf 'TARGET_SHA='; sha256sum /data/yapanel/max_profile.py | cut -d' ' -f1
-printf 'TARGET_META='; stat -c '%u:%g:%a' /data/yapanel/max_profile.py
+printf 'START_SHA256='; sha256sum /data/yapanel/start.sh | cut -d' ' -f1
+printf 'PATCH_SHA256='; sha256sum /data/yapanel/max_profile.py | cut -d' ' -f1
+printf 'START_BOOTSTRAP='; grep -q 'updater_bootstrap.py' /data/yapanel/start.sh && echo yes || echo no
 printf 'YAPANEL='; getprop init.svc.yapanel
 printf 'ROOTD='; getprop init.svc.rootd
 printf 'ADBGUARD='; getprop init.svc.adbguard
 printf 'ABSSHD='; getprop init.svc.absshd
-printf 'PANEL_PIDS='; ps -A -o ARGS | grep '[s]erver.py' | wc -l
+printf 'ROOTD_SHA256='; sha256sum /odm/bin/rootd | cut -d' ' -f1
+printf 'MOUNTS_SHA256='; grep -e 'hosts-ota' -e 'hosts-full' -e '/system/etc/hosts' -e '/odm' /proc/self/mountinfo | sha256sum | cut -d' ' -f1
+printf 'START_PARAMS='; grep -q -- '--device local' /data/yapanel/start.sh && grep -q -- '--host 0.0.0.0' /data/yapanel/start.sh && grep -q -- '--port 8765' /data/yapanel/start.sh && grep -q 'PANEL_ALLOW_NETWORKS=192.168.31.0/24' /data/yapanel/start.sh && echo yes || echo no
+printf 'STATE='; sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /data/yapanel-state/updater/status.json | head -1
+printf 'TRANSACTION='; sed -n 's/.*"transaction"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /data/yapanel-state/updater/status.json | head -1
 printf 'PENDING='
 for journal in /data/yapanel-state/updater/transactions/*/transaction.json; do
     [ -f "$journal" ] || continue
     state=$(sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$journal" | head -1)
-    case "$state" in
-        backup|activating|activated_pending_health|rollback_started|rollback_pending_health) printf '%s ' "$state";;
-    esac
+    case "$state" in backup|activating|activated_pending_health|rollback_started|rollback_pending_health) printf '%s ' "$state";; esac
 done
 printf '\n'
+panel_pids=""
+for proc in /proc/[0-9]*; do
+    [ -r "$proc/cmdline" ] || continue
+    exe=$(readlink "$proc/exe" 2>/dev/null || true)
+    case "$exe" in /data/python/bin/python3|/data/python/bin/python3.*) ;; *) continue;; esac
+    [ "$(readlink "$proc/cwd" 2>/dev/null || true)" = "/data/yapanel" ] || continue
+    script_ok=no; port_ok=no; expect_port=no
+    for arg in $(tr '\000' '\n' < "$proc/cmdline" 2>/dev/null); do
+        case "$arg" in server.py|/data/yapanel/server.py) script_ok=yes;; --port=8765) port_ok=yes;; --port) expect_port=yes;; 8765) [ "$expect_port" = yes ] && port_ok=yes; expect_port=no;; *) expect_port=no;; esac
+    done
+    [ "$script_ok" = yes ] && [ "$port_ok" = yes ] || continue
+    ppid=$(cat "$proc/stat" 2>/dev/null | sed 's/.*) //' | cut -d' ' -f2)
+    if [ "$ppid" != 1 ]; then
+        parent_line=$(tr '\000' ' ' < "/proc/$ppid/cmdline" 2>/dev/null || true)
+        case "$parent_line" in *updater_bootstrap.py*) ;; *) continue;; esac
+    fi
+    panel_pids="$panel_pids ${proc##*/}"
+done
+set -- $panel_pids
+printf 'PANEL_COUNT=%s\n' "$#"
+printf 'PANEL_PID=%s\n' "${1-}"
 '@
-    $lines = Invoke-StationSsh $remote
-    $facts = @{}
-    foreach ($line in $lines) {
-        if ($line -match '^([A-Z_]+)=(.*)$') {
-            $facts[$matches[1]] = $matches[2].Trim()
-        }
-    }
-    return $facts
+    return Invoke-StationSsh $script
 }
 
-function Assert-StationPreflight {
-    param([string]$TargetHash)
-    $facts = Get-StationFacts
-    foreach ($name in @("VERSION", "STATE", "TARGET_SHA", "TARGET_META", "YAPANEL", "ROOTD", "ADBGUARD", "ABSSHD")) {
-        if (-not $facts.ContainsKey($name)) {
-            throw "Не удалось получить read-only preflight: $name"
-        }
+function Assert-HealthyPreflight {
+    param([object[]]$Facts)
+    foreach ($label in @("VERSION", "PATCH_SHA256", "YAPANEL", "ROOTD", "ADBGUARD", "ABSSHD", "START_BOOTSTRAP", "START_PARAMS", "STATE", "PENDING", "PANEL_COUNT")) {
+        if ($null -eq (Get-LabelValue $Facts $label)) { throw "Read-only preflight не вернул $label" }
     }
-    if ($facts.VERSION -ne $ExpectedVersion) { throw "Ожидалась версия $ExpectedVersion, получена $($facts.VERSION)" }
-    if ($facts.STATE -ne "healthy") { throw "Updater journal не healthy: $($facts.STATE)" }
-    if ($facts.PENDING) { throw "Найдена незавершённая транзакция: $($facts.PENDING)" }
-    if ($facts.YAPANEL -ne "running") { throw "Служба yapanel не running" }
-    foreach ($service in @("ROOTD", "ADBGUARD", "ABSSHD")) {
-        if ($facts[$service] -ne "running") { throw "Служба $service не running" }
-    }
-    if ($facts.PANEL_PIDS -ne "1") { throw "Ожидался единственный процесс server.py, найдено: $($facts.PANEL_PIDS)" }
-    $expectedTargetHash = if ($TargetHash) {
-        $TargetHash
-    } elseif ($Rollback) {
-        $ExpectedActiveSha256
-    } else {
-        $ExpectedCurrentSha256
-    }
-    if ($expectedTargetHash -and $facts.TARGET_SHA.ToLowerInvariant() -ne $expectedTargetHash.ToLowerInvariant()) {
-        throw "Текущий SHA-256 max_profile.py не совпадает с ожидаемым"
-    }
-    return $facts
+    if ((Get-LabelValue $Facts "VERSION") -ne $ExpectedVersion) { throw "Ожидалась версия $ExpectedVersion" }
+    if ((Get-LabelValue $Facts "PATCH_SHA256").ToLowerInvariant() -ne $ExpectedCurrentSha256.ToLowerInvariant()) { throw "Текущий max_profile.py не совпадает с проверенным baseline" }
+    if ((Get-LabelValue $Facts "YAPANEL") -ne "running") { throw "Служба yapanel не running" }
+    foreach ($service in @("ROOTD", "ADBGUARD", "ABSSHD")) { if ((Get-LabelValue $Facts $service) -ne "running") { throw "Сервис $service не running" } }
+    if ((Get-LabelValue $Facts "START_BOOTSTRAP") -ne "yes" -or (Get-LabelValue $Facts "START_PARAMS") -ne "yes") { throw "start.sh не соответствует проверенному bootstrap-профилю" }
+    if ((Get-LabelValue $Facts "STATE") -ne "healthy") { throw "Updater journal не healthy" }
+    if (-not [string]::IsNullOrWhiteSpace((Get-LabelValue $Facts "PENDING"))) { throw "Найдена незавершённая transaction: $(Get-LabelValue $Facts 'PENDING')" }
+    if ((Get-LabelValue $Facts "PANEL_COUNT") -ne "1") { throw "Ожидался единственный контролируемый процесс панели" }
 }
 
 function Assert-HttpHealth {
-    try {
-        $health = Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 ($HealthUri.TrimEnd('/') + "/api/panel/health")
-    }
-    catch {
-        throw "Не удалось получить HTTP health: $($_.Exception.Message)"
-    }
-    if ($health.ready -ne $true -or [string]$health.version -ne $ExpectedVersion -or [int]$health.critical_errors -ne 0) {
-        throw "Strict HTTP health не подтверждён"
-    }
+    $health = Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 ($HealthUri.TrimEnd('/') + "/api/panel/health")
+    if ($health.ready -ne $true -or [string]$health.version -ne $ExpectedVersion -or [int]$health.critical_errors -ne 0) { throw "Strict HTTP health не подтверждён" }
 }
 
-function Assert-LocalPython {
-    param([string]$Path)
-    & $python -c "from pathlib import Path; compile(Path(r'$Path').read_text(encoding='utf-8'), r'$Path', 'exec')"
-    if ($LASTEXITCODE -ne 0) { throw "Локальный Python syntax check не пройден" }
+function Invoke-Rootd {
+    param([string]$Command, [int]$Timeout = 45)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
+    $output = & $python $rootdControl --serial $AdbSerial --adb $AdbExecutable --timeout $Timeout --command-base64 $encoded 2>&1
+    if ($LASTEXITCODE -ne 0) { throw ("rootd-команда завершилась с ошибкой: " + ($output -join [Environment]::NewLine)) }
+    $result = (($output -join [Environment]::NewLine) | ConvertFrom-Json)
+    if (-not $result.ok) { throw ("rootd не подтвердил команду: " + [string]$result.stdout) }
+    return @(([string]$result.stdout) -split "`r?`n" | Where-Object { $_ -ne "" })
 }
 
 function Invoke-Backup {
-    New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
-    $backupDir = Join-Path $WorkDirectory "backups"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "backup_station_max.ps1") `
-        -OutputDirectory $backupDir -SshAlias $SshAlias -SshExecutable $SshExecutable -ExpectedVersion $ExpectedVersion
-    if ($LASTEXITCODE -ne 0) { throw "Создание backup завершилось с ошибкой" }
-    $archive = Get-ChildItem -LiteralPath $backupDir -Filter "*.tar.gz" -File |
-        Sort-Object LastWriteTimeUtc | Select-Object -Last 1
+    New-Item -ItemType Directory -Force -Path (Join-Path $WorkDirectory "backups") | Out-Null
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "backup_station_max.ps1") -OutputDirectory (Join-Path $WorkDirectory "backups") -SshAlias $SshAlias -SshExecutable $SshExecutable -ExpectedVersion $ExpectedVersion
+    if ($LASTEXITCODE -ne 0) { throw "Создание backup станции завершилось с ошибкой" }
+    $archive = Get-ChildItem -LiteralPath (Join-Path $WorkDirectory "backups") -Filter "*.tar.gz" -File | Sort-Object LastWriteTimeUtc | Select-Object -Last 1
     if (-not $archive) { throw "Backup-архив не найден" }
+    & tar.exe -tzf $archive.FullName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Созданный backup невозможно прочитать" }
+    Write-Output ("Backup: " + $archive.FullName)
+    Write-Output ("Backup SHA-256: " + (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant())
     return $archive.FullName
 }
 
-function Get-BackupFile {
-    param([string]$Archive)
-    $extract = Join-Path ([IO.Path]::GetTempPath()) ("station-patch-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $extract | Out-Null
-    try {
-        & tar.exe -tzf $Archive | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Backup-архив не читается" }
-        & tar.exe -xzf $Archive -C $extract "yapanel/max_profile.py"
-        if ($LASTEXITCODE -ne 0) { throw "max_profile.py отсутствует в backup" }
-        $file = Join-Path $extract "yapanel/max_profile.py"
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Не удалось извлечь max_profile.py" }
-        Assert-LocalPython $file
-        return @{ Root = $extract; File = $file }
-    }
-    catch {
-        Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
-        throw
+function Install-UpdaterComponents {
+    Invoke-StationSsh "mkdir -p /data/yapanel-state/updater"
+    foreach ($name in $componentNames) {
+        $local = Join-Path $root $name
+        $remote = "/data/yapanel-state/updater/$name"
+        $temporary = "$remote.new"
+        Send-StationFileBase64 $local $temporary
+        Invoke-StationSsh ("set -eu; if [ -f '$remote' ]; then chown `$(stat -c '%u:%g' '$remote') '$temporary'; chmod `$(stat -c '%a' '$remote') '$temporary'; fi; mv -f '$temporary' '$remote'; sync") | Out-Null
     }
 }
 
-function Invoke-RemoteFileActivation {
-    param([string]$LocalFile, [string]$ExpectedHash, [string]$FactsTransaction, [string]$Operation)
-    $id = $Operation + "-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + ([guid]::NewGuid().ToString("N").Substring(0, 8))
-    $remoteDir = "/data/yapanel-state/updater/patches/$id"
-    $remoteNew = "$remoteDir/max_profile.py.new"
-    $remoteBefore = "$remoteDir/max_profile.py.before"
-    $remote = @'
+function Invoke-ApplyPatch {
+    param([string]$PatchPath, [string]$CurrentSha)
+    $remotePatch = "/data/yapanel-state/updater/max_profile.py.patch"
+    Send-StationFileBase64 $PatchPath $remotePatch
+    $command = "/data/python/bin/python3 /data/yapanel-state/updater/update_agent.py apply-patch --root /data/yapanel --state /data/yapanel-state --file $remotePatch --version $ExpectedVersion --sha256 $ExpectedPatchedSha256 --expected-current-sha256 $CurrentSha"
+    $lines = Invoke-StationAdb $command
+    $jsonLine = $lines | Where-Object { [string]$_ -match '^\s*\{' } | Select-Object -Last 1
+    if (-not $jsonLine) { throw "apply-patch не вернул JSON-контракт" }
+    $result = ($jsonLine | ConvertFrom-Json)
+    if ([string]$result.state -ne "activated_pending_health") { throw "apply-patch вернул неожиданное состояние: $($result.state)" }
+    if ([string]::IsNullOrWhiteSpace([string]$result.transaction)) { throw "apply-patch не вернул transaction" }
+    $journal = Invoke-StationSsh ("cat /data/yapanel-state/updater/transactions/$($result.transaction)/transaction.json")
+    $journalJson = (($journal -join [Environment]::NewLine) | ConvertFrom-Json)
+    if ([string]$journalJson.id -ne [string]$result.transaction -or [string]$journalJson.state -ne "activated_pending_health") { throw "Durable journal не соответствует CLI-контракту" }
+    return [string]$result.transaction
+}
+
+function Invoke-PanelHandoff {
+    param([string]$ExpectedPid)
+    if ($ExpectedPid -notmatch '^\d+$') { throw "Не найден подтверждённый PID панели" }
+    $command = @"
 set -eu
-mkdir -p '__REMOTE_DIR__'
-cp -p '__REMOTE_PATH__' '__REMOTE_BEFORE__'
-old_meta=$(stat -c '%u:%g:%a' '__REMOTE_PATH__')
-test "$(sha256sum '__REMOTE_NEW__' | cut -d' ' -f1)" = '__EXPECTED_HASH__'
-/data/python/bin/python3 -c "from pathlib import Path; compile(Path('__REMOTE_NEW__').read_text(encoding='utf-8'), '__REMOTE_NEW__', 'exec')"
-chown "$(stat -c '%u:%g' '__REMOTE_PATH__')" '__REMOTE_NEW__'
-chmod "$(stat -c '%a' '__REMOTE_PATH__')" '__REMOTE_NEW__'
-mv '__REMOTE_NEW__' '__REMOTE_PATH__'
-/data/python/bin/python3 -c "from pathlib import Path; compile(Path('__REMOTE_PATH__').read_text(encoding='utf-8'), '__REMOTE_PATH__', 'exec')"
-test "$(sha256sum '__REMOTE_PATH__' | cut -d' ' -f1)" = '__EXPECTED_HASH__'
-test "$(stat -c '%u:%g:%a' '__REMOTE_PATH__')" = "$old_meta"
-'@
-    $remote = $remote.Replace("__REMOTE_DIR__", $remoteDir).
-        Replace("__REMOTE_PATH__", $remotePath).
-        Replace("__REMOTE_BEFORE__", $remoteBefore).
-        Replace("__REMOTE_NEW__", $remoteNew).
-        Replace("__EXPECTED_HASH__", $ExpectedHash)
-    Invoke-StationSsh ("mkdir -p '" + $remoteDir + "'") | Out-Null
-    Send-StationFileBase64 $LocalFile $remoteNew
-    Invoke-StationSsh $remote | Out-Null
-    Assert-HttpHealth
-    $after = Assert-StationPreflight -TargetHash $ExpectedHash
-    if ($after.TRANSACTION -ne $FactsTransaction) { throw "Изменился updater transaction" }
-    Write-Output "Файл активирован атомарно: $remotePath"
-    Write-Output "Backup-файл на станции: $remoteBefore"
+pid=$ExpectedPid
+test -r /proc/`$pid/cmdline
+exe=`$(readlink /proc/`$pid/exe 2>/dev/null || true)
+test "`$exe" = /data/python/bin/python3
+args=`$(tr '\000' ' ' < /proc/`$pid/cmdline)
+case "`$args" in *server.py*--port*8765*|*server.py*8765*) ;; *) echo unexpected_panel_argv >&2; exit 21;; esac
+case "`$args" in *updater_bootstrap.py*) ;; *) ppid=`$(cat /proc/`$pid/stat | sed 's/.*) //' | cut -d' ' -f2); parent=`$(tr '\000' ' ' < /proc/`$ppid/cmdline); case "`$parent" in *updater_bootstrap.py*) ;; *) echo unowned_panel_process >&2; exit 22;; esac;; esac
+test "`$(getprop init.svc.yapanel)" = running
+kill -TERM "`$pid"
+echo handoff_pid=`$pid
+"@
+    Invoke-Rootd $command | Out-Null
+}
+
+function Wait-Healthy {
+    param([string]$OldPid)
+    for ($i = 0; $i -lt 60; $i++) {
+        try {
+            $health = Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 ($HealthUri.TrimEnd('/') + "/api/panel/health")
+            $facts = Get-StationFacts
+            $pid = Get-LabelValue $facts "PANEL_PID"
+            if ($health.ready -eq $true -and [string]$health.version -eq $ExpectedVersion -and [int]$health.critical_errors -eq 0 -and (Get-LabelValue $facts "STATE") -eq "healthy" -and $pid -match '^\d+$' -and $pid -ne $OldPid) { return $facts }
+        } catch { }
+        Start-Sleep -Seconds 1
+    }
+    throw "Новая версия не прошла strict health или journal healthy за отведённое время"
+}
+
+function Invoke-SafeRollback {
+    param([string]$Id)
+    $facts = Get-StationFacts
+    if ((Get-LabelValue $facts "YAPANEL") -eq "running" -or (Get-LabelValue $facts "PANEL_COUNT") -ne "0") { throw "Прямой rollback запрещён: служба или процесс панели активны; rollback принадлежит supervisor" }
+    Invoke-StationAdb ("/data/python/bin/python3 /data/yapanel-state/updater/update_agent.py rollback $Id --root /data/yapanel --state /data/yapanel-state") | Out-Null
+    Write-Output "Rollback файлов завершён; запуск панели не выполнялся. Требуется отдельная проверка legacy health."
 }
 
 & $AdbExecutable connect ($AdbSerial -replace ":.*$", "") | Out-Null
 & $AdbExecutable -s $AdbSerial shell id | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "ADB недоступен" }
 
-if ($DryRun) {
-    Assert-LocalPython $Source
-    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
-    $facts = Assert-StationPreflight
+if ($DryRun -or (-not $Apply -and -not $Restart -and -not $Rollback)) {
+    $facts = Get-StationFacts
+    Assert-HealthyPreflight $facts
     Assert-HttpHealth
+    $sourceHash = if (Test-Path -LiteralPath $Source -PathType Leaf) { (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant() } else { "not-found" }
     Write-Output "Dry-run: станция не изменялась."
-    Write-Output "Исходный SHA-256 max_profile.py: $sourceHash"
-    Write-Output "Текущий SHA-256 max_profile.py: $($facts.TARGET_SHA)"
-    Write-Output "Updater transaction: $($facts.TRANSACTION)"
+    Write-Output ("Исходный SHA-256 max_profile.py: " + $sourceHash)
+    Write-Output ("Текущий SHA-256 max_profile.py: " + (Get-LabelValue $facts "PATCH_SHA256"))
+    Write-Output ("Текущий updater transaction: " + (Get-LabelValue $facts "TRANSACTION"))
     return
 }
 
 if ($Apply) {
-    Assert-LocalPython $Source
-    $newHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
-    $facts = Assert-StationPreflight
+    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($sourceHash -ne $ExpectedPatchedSha256.ToLowerInvariant()) { throw "Локальный patch имеет неподтверждённый SHA-256: $sourceHash" }
+    & $python -c "from pathlib import Path; compile(Path(r'$Source').read_text(encoding='utf-8'), r'$Source', 'exec')"
+    if ($LASTEXITCODE -ne 0) { throw "Локальный patch не прошёл syntax check" }
+    $before = Get-StationFacts
+    Assert-HealthyPreflight $before
     Assert-HttpHealth
-    $archive = Invoke-Backup
-    $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    Write-Output "Backup: $archive"
-    Write-Output "Backup SHA-256: $archiveHash"
-    Invoke-RemoteFileActivation $Source $newHash $facts.TRANSACTION "max-profile"
-    Write-Output "Новый SHA-256 max_profile.py: $newHash"
-    Write-Output "Перезапуск панели не выполнялся; загруженный процесс использует прежний импорт до отдельного согласования restart."
+    Invoke-Backup | Out-Null
+    Install-UpdaterComponents
+    $TransactionId = [string](Invoke-ApplyPatch $Source (Get-LabelValue $before "PATCH_SHA256"))
+    Write-Output ("Transaction: " + $TransactionId)
+    Write-Output "Managed-файл активирован через durable transaction; рабочий процесс ещё не переключён."
+    if (-not $Restart) {
+        Write-Output ("Для контролируемого handoff выполните: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\apply_station_file_patch.ps1 -Restart -TransactionId " + $TransactionId)
+        return
+    }
 }
 
-if ($Rollback) {
-    $backup = Get-BackupFile $BackupArchive
-    try {
-        $oldHash = (Get-FileHash -LiteralPath $backup.File -Algorithm SHA256).Hash.ToLowerInvariant()
-        $facts = Assert-StationPreflight
-        Invoke-RemoteFileActivation $backup.File $oldHash $facts.TRANSACTION "max-profile-rollback"
-        Write-Output "max_profile.py восстановлен из проверенного backup."
-        Write-Output "Временный каталог извлечения: $($backup.Root)"
-    }
-    catch {
-        Remove-Item -LiteralPath $backup.Root -Recurse -Force -ErrorAction SilentlyContinue
-        throw
-    }
+if ($Restart) {
+    $before = Get-StationFacts
+    if ((Get-LabelValue $before "PENDING") -notmatch '(^|\s)activated_pending_health(\s|$)') { throw "Durable journal не находится в activated_pending_health" }
+    $journal = Invoke-StationSsh ("cat /data/yapanel-state/updater/transactions/$TransactionId/transaction.json")
+    $journalJson = (($journal -join [Environment]::NewLine) | ConvertFrom-Json)
+    if ([string]$journalJson.id -ne $TransactionId -or [string]$journalJson.state -ne "activated_pending_health") { throw "Transaction ID не совпадает с durable journal" }
+    $oldPid = Get-LabelValue $before "PANEL_PID"
+    Invoke-PanelHandoff $oldPid
+    $after = Wait-Healthy $oldPid
+    if ((Get-LabelValue $after "ROOTD_SHA256") -ne (Get-LabelValue $before "ROOTD_SHA256") -or (Get-LabelValue $after "MOUNTS_SHA256") -ne (Get-LabelValue $before "MOUNTS_SHA256")) { throw "Изменились rootd или hosts/odm mount invariants" }
+    Write-Output "Maintenance patch завершён: новая версия healthy, PID изменился, системные invariants сохранены."
 }
+
+if ($Rollback) { Invoke-SafeRollback $TransactionId }

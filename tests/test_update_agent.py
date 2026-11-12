@@ -821,6 +821,82 @@ def test_station_overlay_applies_only_to_known_v0311_server(tmp_path):
         station_overlay.apply(tmp_path, "0.3.12")
 
 
+def test_station_overlay_transfers_reviewed_max_profile_fallback(tmp_path):
+    profile = tmp_path / "max_profile.py"
+    profile.write_bytes(subprocess.check_output(["git", "show", "v0.3.11:max_profile.py"]))
+
+    result = station_overlay._inject_max_profile(profile, "0.3.11")
+
+    assert result["applied"] is True
+    assert UpdateAgent.sha256(profile) == station_overlay.MAX_PROFILE_OVERLAY_SHA256["0.3.11"]
+    assert "max_assistant_hook_fallback" in profile.read_text(encoding="utf-8")
+    assert station_overlay._inject_max_profile(profile, "0.3.11")["applied"] is False
+
+
+def test_station_overlay_blocks_unknown_max_profile_revision(tmp_path):
+    profile = tmp_path / "max_profile.py"
+    profile.write_bytes(subprocess.check_output(["git", "show", "v0.3.11:max_profile.py"]))
+    profile.write_text(profile.read_text(encoding="utf-8") + "\n# неизвестная правка\n", encoding="utf-8", newline="\n")
+
+    with pytest.raises(RuntimeError, match="совместимый max_profile.py"):
+        station_overlay._inject_max_profile(profile, "0.3.11")
+
+
+def test_apply_patch_cli_uses_durable_transaction_and_refreshes_baseline(tmp_path):
+    panel = tmp_path / "panel"
+    state = tmp_path / "state"
+    panel.mkdir()
+    seed_root(panel)
+    agent = UpdateAgent(panel, state)
+    managed = agent._managed_files(panel)
+    agent.capture_baseline(managed)
+    baseline_path = state / "updater" / "baseline.json"
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline["device/agent/build/yapanel-agent"] = {
+        "base": None,
+        "approved": ["official-lineage-hash"],
+        "lineage": "v0.3.4",
+    }
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+    current_sha = agent.sha256(panel / "max_profile.py")
+    patch = tmp_path / "max_profile.patch.py"
+    patch.write_text("import max_privacy\nVALUE = 'station-overlay'\n", encoding="utf-8", newline="\n")
+    target_sha = agent.sha256(patch)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).parents[1] / "update_agent.py"),
+            "apply-patch",
+            "--root", str(panel),
+            "--state", str(state),
+            "--file", str(patch),
+            "--version", "0.3.11",
+            "--sha256", target_sha,
+            "--expected-current-sha256", current_sha,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["state"] == "activated_pending_health"
+    assert payload["file"] == "max_profile.py"
+    assert agent.sha256(panel / "max_profile.py") == target_sha
+    baseline = json.loads((state / "updater" / "baseline.json").read_text(encoding="utf-8"))
+    assert baseline["max_profile.py"] == target_sha
+    assert baseline["device/agent/build/yapanel-agent"]["approved"] == ["official-lineage-hash"]
+
+    agent.rollback(payload["transaction"])
+
+    assert agent.sha256(panel / "max_profile.py") == current_sha
+    restored_baseline = json.loads((state / "updater" / "baseline.json").read_text(encoding="utf-8"))
+    assert restored_baseline["max_profile.py"] == current_sha
+    assert restored_baseline["device/agent/build/yapanel-agent"]["lineage"] == "v0.3.4"
+
+
 def test_station_start_patch_preserves_launch_parameters_and_is_idempotent():
     source = (
         b"#!/system/bin/sh\n"

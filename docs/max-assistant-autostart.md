@@ -79,23 +79,36 @@ OFF → reboot → демон не запущен (`AUTOSTART_DISABLED`); ON →
 
 Для точечного обновления уже установленной 0.3.11 используется
 `tools/apply_station_file_patch.ps1`. Он проверяет `healthy` journal, создаёт полный
-локальный backup, передаёт только проверенный Python-файл через base64 SSH-транспорт,
-проверяет syntax и SHA-256, затем выполняет атомарную замену с сохранением metadata.
-Скрипт не перезапускает панель и не меняет updater transaction; применение restart
-требует отдельного согласования.
+локальный backup, передаёт только проверенный Python-файл через base64 SSH-транспорт
+и запускает `update_agent.py apply-patch`. Такой patch создаёт обычную durable
+transaction, сохраняет полный baseline и выполняет атомарную замену managed-файла.
+Перезапуск выполняется только отдельным `-Restart`: supervisor остаётся владельцем
+health check и rollback, а helper может отправить лишь graceful SIGTERM подтверждённому
+PID процесса панели. При неизвестном или активном процессе прямой rollback блокируется.
 
-Восстановление выполняется только после проверки SHA-256 активного patched-файла:
+Применение выполняется двумя отдельными шагами после отдельного разрешения:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File .\tools\apply_station_file_patch.ps1 `
-  -Rollback `
-  -BackupArchive .\station-patch-0.3.11\backups\yapanel-station-0.3.11-<timestamp>.tar.gz `
-  -ExpectedActiveSha256 <sha256-активного-файла>
+  -Apply
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\tools\apply_station_file_patch.ps1 `
+  -Restart -TransactionId <transaction-id-из-вывода-Apply>
 ```
 
-Операция восстанавливает только `max_profile.py`, сохраняет его metadata и не
-отправляет lifecycle-команды Android init.
+При failed health сначала ожидается rollback supervisor. Ручной откат файлов
+допустим только при отсутствии активной службы и процесса панели:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\tools\apply_station_file_patch.ps1 `
+  -Rollback -TransactionId <transaction-id>
+```
+
+Rollback восстанавливает данные из durable backup transaction, сохраняет metadata
+и не выполняет запуск панели или команды Android init.
 
 ## Ограничения
 
