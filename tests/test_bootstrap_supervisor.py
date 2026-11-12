@@ -123,7 +123,7 @@ def test_prepared_wrapper_is_restored_after_restart_before_activation(tmp_path, 
     monkeypatch.setattr(updater_bootstrap, "_start", lambda *args: Child(returncode=0))
 
     assert updater_bootstrap.run(root, state, "python", []) == 0
-    assert (root / "start.sh").read_bytes() == original
+    assert (root / "start.sh").read_bytes() == patched
     assert not (updater / "wrapper-intent.json").exists()
     status = json.loads((updater / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "preparation_aborted"
@@ -170,7 +170,7 @@ def test_power_loss_after_apply_recovers_real_files_and_journal(tmp_path, monkey
     assert updater_bootstrap.run(root, state, "python", ["--port", "8765"], health_timeout=0) == 0
     assert agent.read_journal(transaction)["state"] == "rolled_back"
     assert (root / "VERSION").read_text(encoding="utf-8").strip() == "0.3.5"
-    assert (root / "start.sh").read_bytes() == original
+    assert (root / "start.sh").read_bytes() == patched
     status = json.loads((updater / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "rolled_back"
     assert started[0].terminated is True
@@ -513,6 +513,28 @@ def test_active_journal_has_priority_over_stale_status_transaction(tmp_path):
     assert durable["state"] == "activating"
 
 
+def test_newer_rolled_back_journal_has_priority_over_stale_healthy_status(tmp_path):
+    updater_dir = tmp_path / "state" / "updater"
+    old_dir = updater_dir / "transactions" / "20261112-old"
+    rollback_dir = updater_dir / "transactions" / "20261113-new"
+    old_dir.mkdir(parents=True)
+    rollback_dir.mkdir(parents=True)
+    (old_dir / "transaction.json").write_text(json.dumps({
+        "id": "20261112-old", "state": "healthy", "version": "0.3.11",
+    }), encoding="utf-8")
+    (rollback_dir / "transaction.json").write_text(json.dumps({
+        "id": "20261113-new", "state": "rolled_back", "version": "0.3.11",
+    }), encoding="utf-8")
+
+    class Agent:
+        def __init__(self):
+            self.updater_dir = updater_dir
+
+    durable = updater_bootstrap._durable_transaction(Agent(), "20261112-old")
+    assert durable["id"] == "20261113-new"
+    assert durable["state"] == "rolled_back"
+
+
 def test_rollback_pending_health_is_not_reported_as_rolled_back(tmp_path, monkeypatch):
     state = tmp_path / "state"
     root = tmp_path / "panel"
@@ -573,7 +595,7 @@ def test_rollback_pending_health_is_not_reported_as_rolled_back(tmp_path, monkey
     assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "rollback_failed"
 
 
-def test_bootstrap_restores_launch_wrapper_before_legacy_restart(tmp_path, monkeypatch):
+def test_bootstrap_keeps_launch_wrapper_for_future_recovery_after_legacy_restart(tmp_path, monkeypatch):
     state = tmp_path / "state"
     root = tmp_path / "panel"
     root.mkdir()
@@ -618,7 +640,7 @@ def test_bootstrap_restores_launch_wrapper_before_legacy_restart(tmp_path, monke
 
     assert updater_bootstrap.run(root, state, "python", ["--port", "8765"], health_timeout=0) == 0
     assert fake_agent.rollback_calls == ["tx-1"]
-    assert (root / "start.sh").read_bytes() == original_start
+    assert (root / "start.sh").read_bytes() == patched_start
     assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "rolled_back"
 
 

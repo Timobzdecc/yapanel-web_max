@@ -360,14 +360,17 @@ def _durable_transaction(agent, preferred_transaction=None):
         raise BootstrapFailure("Найдено несколько активных durable transaction")
     if active:
         return active[0]
+    terminal = [item for item in journals if item.get("state") in _TERMINAL_STATES]
+    latest_terminal = max(terminal, key=lambda item: str(item.get("id", "")), default=None)
+    if latest_terminal is not None:
+        return latest_terminal
     if preferred_transaction:
         selected = [item for item in journals if item.get("id") == preferred_transaction]
         if len(selected) > 1:
             raise BootstrapFailure("Для transaction найдено несколько durable journal")
         if selected:
             return selected[0]
-    terminal = [item for item in journals if item.get("state") in _TERMINAL_STATES]
-    return max(terminal, key=lambda item: str(item.get("id", "")), default=None)
+    return None
 
 
 def _hold_on_failure(status_path, error):
@@ -397,8 +400,10 @@ def run(root, state, python, server_args, health_timeout=30):
     except UpdateFailure as exc:
         _hold_on_failure(status_path, f"Не удалось восстановить незавершённую транзакцию: {exc}")
     if recovered:
+        # Сохраняем внешний supervisor после восстановления: следующий cold
+        # boot должен снова проходить через recovery, а не обходить updater.
         try:
-            _restore_launch_wrapper(root, state_root)
+            _clear_wrapper_intent(state_root)
         except BootstrapFailure as exc:
             _hold_on_failure(status_path, str(exc))
         _save_status(
@@ -509,11 +514,6 @@ def run(root, state, python, server_args, health_timeout=30):
                 except UpdateFailure as exc:
                     _save_status(status_path, state="rollback_failed", error=str(exc))
                     raise
-                try:
-                    _restore_launch_wrapper(root, state_root)
-                except BootstrapFailure as exc:
-                    _save_status(status_path, state="rollback_failed", error=str(exc))
-                    _hold_on_failure(status_path, str(exc))
                 _save_status(
                     status_path,
                     state="rollback_pending_health",
@@ -560,11 +560,6 @@ def run(root, state, python, server_args, health_timeout=30):
                 error=None,
             )
         elif rolled_back or rollback_pending_health:
-            try:
-                _restore_launch_wrapper(root, state_root)
-            except BootstrapFailure as exc:
-                _save_status(status_path, state="rollback_failed", error=str(exc))
-                _hold_on_failure(status_path, str(exc))
             old_version = (root / "VERSION").read_text(encoding="utf-8").strip()
             if not _wait_for_legacy_health(_port(server_args), old_version, health_timeout):
                 try:

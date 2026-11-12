@@ -303,7 +303,7 @@ def test_real_health_failure_rolls_back_to_legacy(tmp_path):
     bootstrap = _run_bootstrap(panel, state, 18767, health="failed")
     assert bootstrap.returncode == 0, bootstrap.stderr
     assert (panel / "VERSION").read_text(encoding="utf-8").strip() == "0.3.5"
-    assert (panel / "start.sh").read_bytes() == b"#!/system/bin/sh\nexec legacy\n"
+    assert b"updater_bootstrap.py" in (panel / "start.sh").read_bytes()
     assert _journal(state, result["transaction"])["state"] == "rolled_back"
     status = json.loads((state / "updater" / "status.json").read_text(encoding="utf-8"))
     assert status["state"] == "rolled_back"
@@ -425,7 +425,7 @@ def test_power_loss_after_partial_activation_recovers_real_files(tmp_path):
     assert (panel / "VERSION").read_text(encoding="utf-8").strip() == "0.3.5"
     assert _journal(state, transaction)["state"] == "rolled_back"
     assert json.loads((state / "updater" / "status.json").read_text(encoding="utf-8"))["state"] == "rolled_back"
-    assert (panel / "start.sh").read_bytes() == b"#!/system/bin/sh\nexec legacy\n"
+    assert b"updater_bootstrap.py" in (panel / "start.sh").read_bytes()
     assert backup.joinpath("backup.complete").is_file()
 
 
