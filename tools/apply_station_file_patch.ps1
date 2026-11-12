@@ -33,11 +33,11 @@ if ($Apply -and -not (Test-Path -LiteralPath $Source -PathType Leaf)) { throw "P
 if ($SshAlias -notmatch '^[A-Za-z0-9_.-]+$') { throw "Недопустимый SSH alias" }
 
 function Invoke-NativeCommand {
-    param([Parameter(Mandatory = $true)][scriptblock]$Command)
+    param([Parameter(Mandatory = $true)][scriptblock]$NativeCommand)
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        $output = @(& $Command 2>&1)
+        $output = @(& $NativeCommand 2>&1)
         $exitCode = $LASTEXITCODE
     }
     finally {
