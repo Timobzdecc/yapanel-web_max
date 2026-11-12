@@ -300,8 +300,8 @@ function Wait-Healthy {
         try {
             $health = Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 ($HealthUri.TrimEnd('/') + "/api/panel/health")
             $facts = Get-StationFacts
-            $pid = Get-LabelValue $facts "PANEL_PID"
-            if ($health.ready -eq $true -and [string]$health.version -eq $ExpectedVersion -and [int]$health.critical_errors -eq 0 -and (Get-LabelValue $facts "STATE") -eq "healthy" -and $pid -match '^\d+$' -and $pid -ne $OldPid) { return $facts }
+            $newPid = Get-LabelValue $facts "PANEL_PID"
+            if ($health.ready -eq $true -and [string]$health.version -eq $ExpectedVersion -and [int]$health.critical_errors -eq 0 -and (Get-LabelValue $facts "STATE") -eq "healthy" -and $newPid -match '^\d+$' -and $newPid -ne $OldPid) { return $facts }
         } catch { }
         Start-Sleep -Seconds 1
     }
