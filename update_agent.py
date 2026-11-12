@@ -88,6 +88,7 @@ class UpdateAgent:
         "device/android_audio",
         "device/bt_memes",
     }
+    BACKUP_IGNORED_DIR_NAMES = {"__pycache__", ".pytest_cache"}
     CONTROLLED_BOOTSTRAP_FILES = {
         "panel_update_integration.py",
         "update_agent.py",
@@ -272,13 +273,16 @@ class UpdateAgent:
                      (Path(relative_current) / name).as_posix().startswith(preserved + "/"))
                     for preserved in self.PRESERVED_DIRS
                 )]
+            directories[:] = [name for name in directories if name not in self.BACKUP_IGNORED_DIR_NAMES]
             for name in files:
                 path = current_path / name
                 if self.updater_dir in path.parents:
                     continue
+                if not os.access(path, os.R_OK):
+                    continue
                 yield path
 
-    def _add_backup_tree(self, tar, root, arcname, preserve_runtime_dirs=True):
+    def _add_backup_tree(self, tar, root, arcname, preserve_runtime_dirs=True, skipped=None):
         """Добавляем backup поэлементно, чтобы tar не заходил в protected runtime-каталоги."""
         root = Path(root)
         tar.add(root, arcname=arcname, recursive=False)
@@ -292,11 +296,18 @@ class UpdateAgent:
                 continue
             for path in entries:
                 relative = path.relative_to(root).as_posix()
+                if path.name in self.BACKUP_IGNORED_DIR_NAMES:
+                    continue
                 if preserve_runtime_dirs and any(
                         relative == preserved or relative.startswith(preserved + "/")
                         for preserved in self.PRESERVED_DIRS):
                     continue
-                tar.add(path, arcname=f"{arcname}/{relative}", recursive=False)
+                try:
+                    tar.add(path, arcname=f"{arcname}/{relative}", recursive=False)
+                except OSError:
+                    if skipped is not None:
+                        skipped.append(relative)
+                    continue
                 if path.is_dir() and not path.is_symlink():
                     stack.append(path)
 
@@ -587,21 +598,32 @@ class UpdateAgent:
     def create_backup(self, transaction_id, include_state=True):
         transaction_dir = self._transaction_dir(transaction_id)
         backup_dir = self.updater_dir / "backups" / transaction_id
+        journal = self.read_journal(transaction_id)
+        managed = set(journal.get("managed", ()))
+        unavailable_managed = [name for name in managed
+                               if (self.root / name).exists() and
+                               not os.access(self.root / name, os.R_OK)]
+        if unavailable_managed:
+            raise UpdateFailure(
+                "Backup не может прочитать managed-файлы: " + ", ".join(sorted(unavailable_managed))
+            )
         backup_dir.mkdir(parents=True, exist_ok=False)
         archive = backup_dir / "panel-backup.tar.gz"
         original_files = []
         original_state_files = []
         updater_snapshots = {}
+        skipped_files = []
         with tarfile.open(archive, "w:gz") as tar:
             if self.root.exists():
                 original_files = [path.relative_to(self.root).as_posix()
                                   for path in self._backup_files(self.root)]
-                self._add_backup_tree(tar, self.root, "panel")
+                self._add_backup_tree(tar, self.root, "panel", skipped=skipped_files)
             data_dir = self.state_dir / "data"
             if include_state and data_dir.is_dir():
                 original_state_files = [path.relative_to(data_dir).as_posix()
                                         for path in self._backup_files(data_dir, preserve_runtime_dirs=False)]
-                self._add_backup_tree(tar, data_dir, "state/data", preserve_runtime_dirs=False)
+                self._add_backup_tree(tar, data_dir, "state/data", preserve_runtime_dirs=False,
+                                      skipped=skipped_files)
         with archive.open("r+b") as stream:
             os.fsync(stream.fileno())
         fsync_directory(backup_dir)
@@ -617,10 +639,10 @@ class UpdateAgent:
             "original_files": original_files,
             "original_state_files": original_state_files,
             "updater_snapshots": updater_snapshots,
+            "skipped_files": sorted(set(skipped_files)),
         }
         durable_json(backup_dir / "metadata.json", metadata)
         durable_write(backup_dir / "backup.complete", b"complete\n", mode="wb")
-        journal = self.read_journal(transaction_id)
         journal.update({"state": "backup", "backup": str(backup_dir)})
         self._write_journal(journal, transaction_dir)
         return backup_dir

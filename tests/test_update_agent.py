@@ -499,6 +499,8 @@ def test_station_runtime_directories_are_preserved_from_shell_updater(tmp_path):
     (panel / "device" / "android_audio" / "StationAudio.dex").write_bytes(b"station runtime")
     (panel / "device" / "bt_memes").mkdir(parents=True)
     (panel / "device" / "bt_memes" / "bt-memes").write_bytes(b"station runtime")
+    (panel / "__pycache__").mkdir()
+    (panel / "__pycache__" / "config.cpython-314.pyc").write_bytes(b"generated cache")
     (panel / "server.py").write_text("# panel\n", encoding="utf-8")
     agent = UpdateAgent(panel, state)
 
@@ -516,6 +518,7 @@ def test_station_runtime_directories_are_preserved_from_shell_updater(tmp_path):
         names = tar.getnames()
     assert "panel/device/android_audio/StationAudio.dex" not in names
     assert "panel/device/bt_memes/bt-memes" not in names
+    assert "panel/__pycache__/config.cpython-314.pyc" not in names
 
 
 def test_reviewed_overlay_hash_allows_known_local_change(tmp_path):
