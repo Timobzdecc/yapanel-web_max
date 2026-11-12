@@ -68,6 +68,7 @@ class MaxProfileTests(unittest.TestCase):
         s = fresh_server()
         profiles.install(s, "max")
         p = s.Panel(Mock())
+        p.adb.shell.return_value = ("watchdog\n", "", 0)
         pushed = {}
         p.adb.push = lambda local, remote, *a, **k: pushed.__setitem__(
             remote, Path(local).read_text(encoding="utf-8"))
@@ -78,6 +79,107 @@ class MaxProfileTests(unittest.TestCase):
         self.assertIn(s.PATTERNS["ring"], hook)
         self.assertIn(s.PATTERNS["clock"], hook)
         self.assertNotIn(f"{s.PATTERNS['clock']}/ledpatterns/ring", hook)
+
+    def test_max_boot_route_requires_a_real_android_caller(self):
+        s = fresh_server()
+        profiles.install(s, "max")
+        p = s.Panel(Mock())
+        p.adb.shell.return_value = ("", "", 0)
+
+        with self.assertRaisesRegex(s.AdbError, "Автозапуск boot_hook.sh не подтверждён"):
+            p._boot_route()
+
+    def test_max_hook_repair_refuses_before_writing_without_boot_route(self):
+        s = fresh_server()
+        profiles.install(s, "max")
+        p = s.Panel(Mock())
+        p.adb.shell.return_value = ("", "", 0)
+
+        with self.assertRaisesRegex(s.AdbError, "Автозапуск boot_hook.sh не подтверждён"):
+            p.hook_repair()
+
+        p.adb.push.assert_not_called()
+
+    def test_max_hook_status_reports_unavailable_boot_route(self):
+        s = fresh_server()
+        profiles.install(s, "max")
+        p = s.Panel(Mock())
+        p.adb.shell.side_effect = [
+            ("", "", 0),
+            ("@ассистент\nhook\n0000  /data/quasar/webpanel/boot_hook.sh\n", "", 0),
+        ]
+
+        status = p.hook_status()
+
+        self.assertFalse(status["possible"])
+        self.assertIn("Автозапуск boot_hook.sh не подтверждён", status["reason"])
+        self.assertTrue(status["hook"])
+        self.assertTrue(status["broken"])
+
+    def test_max_hook_status_uses_local_assistant_worker_without_boot_route(self):
+        s = fresh_server()
+        profiles.install(s, "max")
+        p = s.Panel(Mock())
+        p.adb.is_local = True
+        p.adb.shell.side_effect = [
+            ("", "", 0),
+            ("@ассистент\nhook\n0000  /data/quasar/webpanel/boot_hook.sh\n", "", 0),
+            ("assistant-worker\n", "", 0),
+        ]
+
+        status = p.hook_status()
+
+        self.assertFalse(status["possible"])
+        self.assertFalse(status["broken"])
+        self.assertIn("worker панели", status["reason"])
+
+    def test_max_hook_status_does_not_hide_assistant_when_worker_prerequisites_are_missing(self):
+        s = fresh_server()
+        profiles.install(s, "max")
+        p = s.Panel(Mock())
+        p.adb.is_local = True
+        p.adb.shell.side_effect = [
+            ("", "", 0),
+            ("@ассистент\nhook\n0000  /data/quasar/webpanel/boot_hook.sh\n", "", 0),
+            ("", "", 0),
+        ]
+
+        status = p.hook_status()
+
+        self.assertFalse(status["possible"])
+        self.assertTrue(status["broken"])
+
+    def test_max_assistant_hook_fallback_checks_real_worker_prerequisites(self):
+        s = fresh_server()
+        profiles.install(s, "max")
+        p = s.Panel(Mock())
+        p.adb.is_local = True
+        p.adb.shell.return_value = ("", "", 0)
+
+        p.max_assistant_hook_fallback(["ассистент"])
+
+        command = p.adb.shell.call_args.args[0]
+        self.assertIn("/data/quasar", command)
+        self.assertIn(s.ASSIST_CONF, command)
+        self.assertIn(s.ASSISTD, command)
+        self.assertIn(s.ASSIST_NO_AUTOSTART, command)
+
+    def test_max_hook_users_disable_assistant_when_autostart_flag_exists(self):
+        s = fresh_server()
+        profiles.install(s, "max")
+        p = s.Panel(Mock())
+
+        hook_users = p._hook_users_script()
+
+        self.assertIn(f"[ ! -f {s.ASSIST_NO_AUTOSTART} ]", hook_users)
+
+    def test_max_boot_route_accepts_a_caller_that_references_hook(self):
+        s = fresh_server()
+        profiles.install(s, "max")
+        p = s.Panel(Mock())
+        p.adb.shell.return_value = ("watchdog\n", "", 0)
+
+        self.assertEqual(p._boot_route(), "watchdog")
 
     def test_max_ring_try_writes_bgr_bytes_not_list(self):
         import base64
@@ -268,6 +370,7 @@ class MaxProfileTests(unittest.TestCase):
         self.assertIn("com.yandex.tv.services/no_backup/appmetrica", s.METRICA_BATCH)
         self.assertIn("com.yandex.tv.services/no_backup/appmetrica", s.ANALYTICS_PURGE)
         self.assertIn("com.yandex.io.sdk/databases/appmetrica", s.METRICA_BATCH)
+        p.adb.shell.return_value = ("watchdog\n", "", 0)
         self.assertEqual(p._boot_route(), "watchdog")
 
         # Verify audio player is native Android playaudio

@@ -24,7 +24,13 @@ class FakeAdb:
     def __init__(self, responder=None):
         self.commands = []
         self.pushed = []
-        self.responder = responder or (lambda cmd: ("", "", 0))
+        self.responder = responder or self._default_responder
+
+    @staticmethod
+    def _default_responder(cmd):
+        if "adbd_watchdog.sh" in cmd:
+            return "watchdog\n", "", 0
+        return "", "", 0
 
     def shell(self, cmd, check=True, timeout=None):
         self.commands.append(cmd)

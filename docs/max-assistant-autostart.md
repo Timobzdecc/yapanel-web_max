@@ -34,6 +34,17 @@ START_ATTEMPT, START_OK, START_ERROR, RETRIES_EXHAUSTED.
 механизм Android-автозапуска не включается, прежнее управление
 через ADB сохраняется.
 
+Профиль Station Max проверяет наличие реального Android caller для
+`/data/quasar/webpanel/boot_hook.sh`. Если заявленный watchdog отсутствует
+или не содержит активного вызова хука, `/api/hook` сообщает
+`possible=false`, а repair блокируется до записи файла. Одного наличия
+`boot_hook.sh` недостаточно: это предотвращает ложное подтверждение
+автозапуска после перезагрузки.
+
+Если все активные hook-users покрыты штатным worker-ом панели, предупреждение
+не показывается. Для новых функций без такого fallback предупреждение остаётся
+и требует отдельного подтверждённого boot caller.
+
 Запуск ассистента через кнопку в локальной Android-панели тоже
 использует прямой процесс, без зависимости от start-stop-daemon.
 
@@ -58,11 +69,33 @@ python -m unittest tests.test_max_assistant_autostart -v
 проверить штатную установку обновления, фактический автозапуск
 после полного reboot Android и работу кнопок перезапуска/остановки.
 
-Проверено на YNDX-0008, прошивка 5000000921: установка, `start`/`daemon stop`,
-полный reboot и автозапуск через worker. Тумблер автозапуска проверен отдельно:
+На отдельной тестовой YNDX-0008 с прошивкой 5000000921 ранее проверялись установка,
+`start`/`daemon stop`, reboot и автозапуск через worker. Это не является доказательством
+cold boot для текущей станции. Для текущей станции read-only проверка подтверждает
+только запущенный worker, его prerequisites и записи `START_OK`. Тумблер автозапуска проверен отдельно:
 OFF → reboot → демон не запущен (`AUTOSTART_DISABLED`); ON → reboot → запущен (`START_OK`).
 Отдельно найден и исправлен CRLF-баг: `device/assistant/assistantd` должен иметь LF, иначе shebang
 `#!/system/bin/sh\r` даёт `ENOENT` и ассистент не стартует.
+
+Для точечного обновления уже установленной 0.3.11 используется
+`tools/apply_station_file_patch.ps1`. Он проверяет `healthy` journal, создаёт полный
+локальный backup, передаёт только проверенный Python-файл через base64 SSH-транспорт,
+проверяет syntax и SHA-256, затем выполняет атомарную замену с сохранением metadata.
+Скрипт не перезапускает панель и не меняет updater transaction; применение restart
+требует отдельного согласования.
+
+Восстановление выполняется только после проверки SHA-256 активного patched-файла:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\tools\apply_station_file_patch.ps1 `
+  -Rollback `
+  -BackupArchive .\station-patch-0.3.11\backups\yapanel-station-0.3.11-<timestamp>.tar.gz `
+  -ExpectedActiveSha256 <sha256-активного-файла>
+```
+
+Операция восстанавливает только `max_profile.py`, сохраняет его metadata и не
+отправляет lifecycle-команды Android init.
 
 ## Ограничения
 

@@ -95,5 +95,10 @@ console.log('Unknown volume, zero volume and reconnected scale cases passed');
   ctx.renderHook();
   assert.equal(hookNodes['#hook-repair'].hidden,true);
   assert.equal(hookNodes['#hook-warn-text'].textContent,ctx.hookInfo.reason);
-  console.log('Bluetooth preparation feedback and unsupported hook controls passed');
+  // Отсутствующий boot caller не является предупреждением, если API подтвердил,
+  // что единственный активный пользователь покрыт fallback worker панели.
+  ctx.hookInfo={broken:false,possible:false,fresh:false,hook:false,users:['ассистент'],supported:true,reason:'worker панели'};
+  ctx.renderHook();
+  assert.equal(hookNodes['#hook-warn'].hidden,true);
+  console.log('Bluetooth preparation feedback, unsupported hook controls and fallback warning contract passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
