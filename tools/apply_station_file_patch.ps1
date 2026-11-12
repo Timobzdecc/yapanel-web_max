@@ -48,30 +48,67 @@ function Invoke-StationAdb {
     return @($output)
 }
 
-function Send-StationFileBase64 {
+function Invoke-StationAdbPush {
     param([string]$LocalPath, [string]$RemotePath)
-    $sshPath = (Get-Command $SshExecutable -ErrorAction Stop).Source
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $sshPath
-    $startInfo.Arguments = '-o BatchMode=yes ' + $SshAlias + ' "base64 -d > ' + $RemotePath + '"'
-    $startInfo.UseShellExecute = $false
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.RedirectStandardOutput = $true
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $startInfo
-    if (-not $process.Start()) { throw "Не удалось запустить SSH для передачи файла" }
-    try {
-        $bytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($LocalPath))
-        $payload = [Text.Encoding]::ASCII.GetBytes($bytes)
-        $process.StandardInput.BaseStream.Write($payload, 0, $payload.Length)
-        $process.StandardInput.BaseStream.Close()
-        $errorText = $process.StandardError.ReadToEnd()
-        $outputText = $process.StandardOutput.ReadToEnd()
-        $process.WaitForExit()
-        if ($process.ExitCode -ne 0) { throw ("SSH-передача завершилась с кодом " + $process.ExitCode + ": " + $errorText + $outputText) }
+    $output = & $AdbExecutable -s $AdbSerial push $LocalPath $RemotePath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("ADB push завершился с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine))
     }
-    finally { $process.Dispose() }
+}
+
+function Get-LocalVerifiedFile {
+    param([string]$LocalPath, [string]$Name)
+    if (-not (Test-Path -LiteralPath $LocalPath -PathType Leaf)) {
+        throw "Локальный файл комплекта не найден: $LocalPath"
+    }
+    & $python -c "from pathlib import Path; compile(Path(r'$LocalPath').read_text(encoding='utf-8'), r'$Name', 'exec')"
+    if ($LASTEXITCODE -ne 0) { throw "Локальный файл не прошёл Python syntax check: $Name" }
+    return [pscustomobject]@{
+        Name = $Name
+        LocalPath = $LocalPath
+        Sha256 = (Get-FileHash -LiteralPath $LocalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Length = (Get-Item -LiteralPath $LocalPath).Length
+    }
+}
+
+function Stage-UpdaterBundle {
+    param([string]$PatchPath)
+    $id = "maintenance-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + ([guid]::NewGuid().ToString("N").Substring(0, 8))
+    $remoteDir = "/data/yapanel-state/updater/.maintenance-staging/$id"
+    $targetDir = "/data/yapanel-state/updater"
+    $files = @()
+    try {
+        Invoke-StationAdb "mkdir -p '$remoteDir'; chmod 700 '$remoteDir'"
+        foreach ($name in $componentNames) {
+            $local = Get-LocalVerifiedFile (Join-Path $root $name) $name
+            $remote = "$remoteDir/$name"
+            Invoke-StationAdbPush $local.LocalPath $remote
+            Invoke-StationAdb "chmod 600 '$remote'"
+            $files += [pscustomobject]@{ Name = $name; LocalPath = $local.LocalPath; Sha256 = $local.Sha256; Length = $local.Length; RemotePath = $remote; TargetPath = "$targetDir/$name" }
+        }
+        $patch = Get-LocalVerifiedFile $PatchPath "max_profile.py.patch"
+        $patchRemote = "$remoteDir/max_profile.py.patch"
+        Invoke-StationAdbPush $patch.LocalPath $patchRemote
+        Invoke-StationAdb "chmod 600 '$patchRemote'"
+        $files += [pscustomobject]@{ Name = "max_profile.py.patch"; LocalPath = $patch.LocalPath; Sha256 = $patch.Sha256; Length = $patch.Length; RemotePath = $patchRemote; TargetPath = "$targetDir/max_profile.py.patch" }
+
+        $checks = @(
+            'set -eu'
+            ('test "$(stat -c ''%U:%G:%a'' ''{0}'')" = ''shell:shell:700''' -f $remoteDir)
+        )
+        foreach ($file in $files) {
+            $checks += "test -f '$($file.RemotePath)'"
+            $checks += ('test "$(stat -c ''%U:%G:%a'' ''{0}'')" = ''shell:shell:600''' -f $file.RemotePath)
+            $checks += ('test "$(sha256sum ''{0}'' | cut -d'' '' -f1)" = ''{1}''' -f $file.RemotePath, $file.Sha256)
+            $checks += ('/data/python/bin/python3 -c ''from pathlib import Path; compile(Path("' + $file.RemotePath + '").read_text(encoding="utf-8"), "' + $file.Name + '", "exec")''')
+        }
+        Invoke-StationAdb ($checks -join "; ") | Out-Null
+        return [pscustomobject]@{ Id = $id; RemoteDir = $remoteDir; Files = $files }
+    }
+    catch {
+        Invoke-StationAdb "rm -rf '$remoteDir'" | Out-Null
+        throw
+    }
 }
 
 function Get-LabelValue {
@@ -142,11 +179,22 @@ function Assert-HealthyPreflight {
     if ((Get-LabelValue $Facts "STATE") -ne "healthy") { throw "Updater journal не healthy" }
     if (-not [string]::IsNullOrWhiteSpace((Get-LabelValue $Facts "PENDING"))) { throw "Найдена незавершённая transaction: $(Get-LabelValue $Facts 'PENDING')" }
     if ((Get-LabelValue $Facts "PANEL_COUNT") -ne "1") { throw "Ожидался единственный контролируемый процесс панели" }
+    Assert-StationUpdaterReadable
 }
 
 function Assert-HttpHealth {
     $health = Invoke-RestMethod -UseBasicParsing -TimeoutSec 5 ($HealthUri.TrimEnd('/') + "/api/panel/health")
     if ($health.ready -ne $true -or [string]$health.version -ne $ExpectedVersion -or [int]$health.critical_errors -ne 0) { throw "Strict HTTP health не подтверждён" }
+}
+
+function Assert-StationUpdaterReadable {
+    $checks = @("set -eu")
+    foreach ($name in $componentNames) {
+        $path = "/data/yapanel-state/updater/$name"
+        $checks += "test -r '$path'"
+        $checks += ('/data/python/bin/python3 -c ''from pathlib import Path; compile(Path("' + $path + '").read_text(encoding="utf-8"), "' + $name + '", "exec")''')
+    }
+    Invoke-StationAdb ($checks -join "; ") | Out-Null
 }
 
 function Invoke-Rootd {
@@ -172,37 +220,48 @@ function Invoke-Backup {
     return $archive.FullName
 }
 
-function Install-UpdaterComponents {
-    Invoke-StationSsh "mkdir -p /data/yapanel-state/updater"
-    foreach ($name in $componentNames) {
-        $local = Join-Path $root $name
-        $remote = "/data/yapanel-state/updater/$name"
-        $temporary = "$remote.new"
-        Send-StationFileBase64 $local $temporary
-        Invoke-StationSsh ("set -eu; if [ -f '$remote' ]; then chown `$(stat -c '%u:%g' '$remote') '$temporary'; chmod `$(stat -c '%a' '$remote') '$temporary'; fi; mv -f '$temporary' '$remote'; sync") | Out-Null
+function Publish-UpdaterBundle {
+    param([object]$Bundle)
+    $backupDir = "/data/yapanel-state/updater/.maintenance-backups/$($Bundle.Id)"
+    $names = (@($Bundle.Files | ForEach-Object { $_.Name }) -join " ")
+    $lines = @(
+        'set -eu'
+        ("stage='{0}'" -f $Bundle.RemoteDir)
+        "target='/data/yapanel-state/updater'"
+        ("backup='{0}'" -f $backupDir)
+        'mkdir -p "$backup"'
+        'chmod 700 "$backup"'
+        'rollback() {'
+        ("  for name in {0}; do" -f $names)
+        '    if [ -f "$backup/$name.before" ]; then cp -p "$backup/$name.before" "$target/$name"; fi'
+        '    if [ -f "$backup/$name.missing" ]; then rm -f "$target/$name"; fi'
+        '  done'
+        '  rm -rf "$stage"'
+        '}'
+        ("for name in {0}; do" -f $names)
+        '  if [ -f "$target/$name" ]; then cp -p "$target/$name" "$backup/$name.before" || { rollback; exit 1; }; else touch "$backup/$name.missing" || { rollback; exit 1; }; fi'
+        'done'
+    )
+    foreach ($file in $Bundle.Files) {
+        $lines += "if ! mv -f '$($file.RemotePath)' '$($file.TargetPath)'; then rollback; exit 1; fi"
+        $lines += "if ! chmod 600 '$($file.TargetPath)'; then rollback; exit 1; fi"
+        $lines += ('if ! test "$(stat -c ''%U:%G:%a'' ''{0}'')" = ''shell:shell:600''; then rollback; exit 1; fi' -f $file.TargetPath)
+        $lines += ('if ! test "$(sha256sum ''{0}'' | cut -d'' '' -f1)" = ''{1}''; then rollback; exit 1; fi' -f $file.TargetPath, $file.Sha256)
+    }
+    $lines += 'printf "%s\n" complete > "$backup/publish.complete"'
+    $lines += 'chmod 600 "$backup/publish.complete"'
+    $lines += 'rm -rf "$stage"'
+    try {
+        Invoke-StationAdb ($lines -join "`n") | Out-Null
+    }
+    catch {
+        throw "Не удалось опубликовать полный updater-комплект; активный комплект восстановлен: $($_.Exception.Message)"
     }
 }
 
 function Invoke-ApplyPatch {
     param([string]$PatchPath, [string]$CurrentSha)
     $remotePatch = "/data/yapanel-state/updater/max_profile.py.patch"
-    $remotePatchTemporary = "$remotePatch.new"
-    Send-StationFileBase64 $PatchPath $remotePatchTemporary
-    $installPatch = @'
-set -eu
-temporary=/data/yapanel-state/updater/max_profile.py.patch.new
-target=/data/yapanel-state/updater/max_profile.py.patch
-expected=__EXPECTED_PATCH_SHA256__
-trap 'rm -f "$temporary"' EXIT
-test "$(sha256sum "$temporary" | cut -d' ' -f1)" = "$expected"
-chown shell:shell "$temporary"
-chmod 600 "$temporary"
-mv -f "$temporary" "$target"
-sync
-test "$(stat -c '%U:%G:%a' "$target")" = "shell:shell:600"
-test "$(sha256sum "$target" | cut -d' ' -f1)" = "$expected"
-'@.Replace('__EXPECTED_PATCH_SHA256__', $ExpectedPatchedSha256)
-    Invoke-StationSsh $installPatch | Out-Null
     $command = "/data/python/bin/python3 /data/yapanel-state/updater/update_agent.py apply-patch --root /data/yapanel --state /data/yapanel-state --file $remotePatch --version $ExpectedVersion --sha256 $ExpectedPatchedSha256 --expected-current-sha256 $CurrentSha"
     $lines = Invoke-StationAdb $command
     $jsonLine = $lines | Where-Object { [string]$_ -match '^\s*\{' } | Select-Object -Last 1
@@ -282,7 +341,8 @@ if ($Apply) {
     Assert-HealthyPreflight $before
     Assert-HttpHealth
     Invoke-Backup | Out-Null
-    Install-UpdaterComponents
+    $bundle = Stage-UpdaterBundle $Source
+    Publish-UpdaterBundle $bundle
     $TransactionId = [string](Invoke-ApplyPatch $Source (Get-LabelValue $before "PATCH_SHA256"))
     Write-Output ("Transaction: " + $TransactionId)
     Write-Output "Managed-файл активирован через durable transaction; рабочий процесс ещё не переключён."

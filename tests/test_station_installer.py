@@ -150,13 +150,17 @@ def test_panel_handoff_accepts_relative_and_absolute_server_argv_safely():
 def test_maintenance_patch_transfer_sets_shell_metadata_before_cli():
     source = (ROOT / "tools" / "apply_station_file_patch.ps1").read_text(encoding="utf-8")
 
-    assert "max_profile.py.patch.new" in source
-    assert "chown shell:shell \"$temporary\"" in source
-    assert "chmod 600 \"$temporary\"" in source
-    assert "stat -c '%U:%G:%a' \"$target\"" in source
+    assert "function Stage-UpdaterBundle" in source
+    assert "function Publish-UpdaterBundle" in source
+    assert "Invoke-StationAdbPush" in source
+    assert "Invoke-StationAdb \"chmod 600 '$remote'\"" in source
+    assert "max_profile.py.patch" in source
     assert "shell:shell:600" in source
-    assert "trap 'rm -f \"$temporary\"' EXIT" in source
-    assert source.index("Invoke-StationSsh $installPatch") < source.index("apply-patch")
+    assert "publish.complete" in source
+    assert "rollback()" in source
+    assert "Send-StationFileBase64" not in source
+    assert source.index("Stage-UpdaterBundle") < source.index("Publish-UpdaterBundle")
+    assert source.index("Publish-UpdaterBundle $bundle") < source.index("Invoke-ApplyPatch $Source")
 
 
 def test_rollback_order_stops_child_before_direct_file_rollback():
