@@ -48,6 +48,17 @@ function Invoke-StationAdb {
     return @($output)
 }
 
+function Invoke-StationAdbShell {
+    param([Parameter(Mandatory = $true)][string]$Command)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
+    $transport = "printf %s $encoded | /system/bin/base64 -d | /system/bin/sh"
+    $output = & $AdbExecutable -s $AdbSerial shell $transport 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("ADB encoded shell-команда завершилась с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine))
+    }
+    return @($output)
+}
+
 function Invoke-StationAdbPush {
     param([string]$LocalPath, [string]$RemotePath)
     $output = & $AdbExecutable -s $AdbSerial push $LocalPath $RemotePath 2>&1
@@ -102,7 +113,7 @@ function Stage-UpdaterBundle {
             $checks += ('test "$(sha256sum ''{0}'' | cut -d'' '' -f1)" = ''{1}''' -f $file.RemotePath, $file.Sha256)
             $checks += ('/data/python/bin/python3 -c ''from pathlib import Path; compile(Path("' + $file.RemotePath + '").read_text(encoding="utf-8"), "' + $file.Name + '", "exec")''')
         }
-        Invoke-StationAdb ($checks -join "; ") | Out-Null
+        Invoke-StationAdbShell ($checks -join "; ") | Out-Null
         return [pscustomobject]@{ Id = $id; RemoteDir = $remoteDir; Files = $files }
     }
     catch {
@@ -194,7 +205,7 @@ function Assert-StationUpdaterReadable {
         $checks += "test -r '$path'"
         $checks += ('/data/python/bin/python3 -c ''from pathlib import Path; compile(Path("' + $path + '").read_text(encoding="utf-8"), "' + $name + '", "exec")''')
     }
-    Invoke-StationAdb ($checks -join "; ") | Out-Null
+    Invoke-StationAdbShell ($checks -join "; ") | Out-Null
 }
 
 function Invoke-Rootd {
@@ -252,7 +263,7 @@ function Publish-UpdaterBundle {
     $lines += 'chmod 600 "$backup/publish.complete"'
     $lines += 'rm -rf "$stage"'
     try {
-        Invoke-StationAdb ($lines -join "`n") | Out-Null
+        Invoke-StationAdbShell ($lines -join "`n") | Out-Null
     }
     catch {
         throw "Не удалось опубликовать полный updater-комплект; активный комплект восстановлен: $($_.Exception.Message)"
@@ -263,7 +274,7 @@ function Invoke-ApplyPatch {
     param([string]$PatchPath, [string]$CurrentSha)
     $remotePatch = "/data/yapanel-state/updater/max_profile.py.patch"
     $command = "/data/python/bin/python3 /data/yapanel-state/updater/update_agent.py apply-patch --root /data/yapanel --state /data/yapanel-state --file $remotePatch --version $ExpectedVersion --sha256 $ExpectedPatchedSha256 --expected-current-sha256 $CurrentSha"
-    $lines = Invoke-StationAdb $command
+    $lines = Invoke-StationAdbShell $command
     $jsonLine = $lines | Where-Object { [string]$_ -match '^\s*\{' } | Select-Object -Last 1
     if (-not $jsonLine) { throw "apply-patch не вернул JSON-контракт" }
     $result = ($jsonLine | ConvertFrom-Json)
