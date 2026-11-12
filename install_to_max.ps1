@@ -764928,37 +764928,27 @@ Write-Host ("      Root-доступ подтверждён (" + $script:RootMod
 
 
 function Invoke-RootShell {
-
     param([string]$Command)
 
     if ($script:RootMode -eq "direct") {
-
         $out = (& $script:AdbExe -s $script:Device shell $Command 2>&1) | Out-String
-
         return $out
-
     }
 
+    # adb shell removes nested quotes, so pass the command as base64 and run it
+    # as root from a temporary script file.
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
+    $scriptFile = "/data/local/tmp/.yp_rootcmd.sh"
+    $runner = "echo $b64 | base64 -d > $scriptFile; chmod 755 $scriptFile; "
     if ($script:RootMode -eq "su") {
-
-        $out = (& $script:AdbExe -s $script:Device shell "$script:SuPath -c `"$Command`"" 2>&1) | Out-String
-
-        return $out
-
+        $runner += "$script:SuPath -c sh $scriptFile"
+    } elseif ($script:RootMode -eq "su0") {
+        $runner += "su 0 sh $scriptFile"
+    } else {
+        $runner += "sudo sh $scriptFile"
     }
-
-    if ($script:RootMode -eq "su0") {
-
-        $out = (& $script:AdbExe -s $script:Device shell "su 0 sh -c `"$Command`"" 2>&1) | Out-String
-
-        return $out
-
-    }
-
-    $out = (& $script:AdbExe -s $script:Device shell "sudo sh -c `"$Command`"" 2>&1) | Out-String
-
+    $out = (& $script:AdbExe -s $script:Device shell "$runner; rm -f $scriptFile" 2>&1) | Out-String
     return $out
-
 }
 
 
@@ -764985,7 +764975,7 @@ $pipOut = Invoke-RootShell '/data/python/bin/python3 -m pip install tinytuya req
 
 
 
-$depCheck = Invoke-RootShell "/data/python/bin/python3 -c 'import tinytuya, requests, cryptography' && echo DEPS_OK"
+$depCheck = Invoke-RootShell "/data/python/bin/python3 -m pip show tinytuya requests cryptography >/dev/null 2>&1 && echo DEPS_OK"
 
 if ($depCheck -notmatch "DEPS_OK") {
 
