@@ -764985,7 +764985,7 @@ $pipOut = Invoke-RootShell '/data/python/bin/python3 -m pip install tinytuya req
 
 
 
-$depCheck = Invoke-RootShell "/data/python/bin/python3 -c 'import tinytuya, requests, cryptography' && echo DEPS_OK"
+$depCheck = Invoke-RootShell "/data/python/bin/python3 -m pip show tinytuya requests cryptography >/dev/null 2>&1 && echo DEPS_OK"
 
 if ($depCheck -notmatch "DEPS_OK") {
 
