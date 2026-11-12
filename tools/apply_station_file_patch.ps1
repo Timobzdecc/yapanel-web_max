@@ -186,7 +186,23 @@ function Install-UpdaterComponents {
 function Invoke-ApplyPatch {
     param([string]$PatchPath, [string]$CurrentSha)
     $remotePatch = "/data/yapanel-state/updater/max_profile.py.patch"
-    Send-StationFileBase64 $PatchPath $remotePatch
+    $remotePatchTemporary = "$remotePatch.new"
+    Send-StationFileBase64 $PatchPath $remotePatchTemporary
+    $installPatch = @'
+set -eu
+temporary=/data/yapanel-state/updater/max_profile.py.patch.new
+target=/data/yapanel-state/updater/max_profile.py.patch
+expected=__EXPECTED_PATCH_SHA256__
+trap 'rm -f "$temporary"' EXIT
+test "$(sha256sum "$temporary" | cut -d' ' -f1)" = "$expected"
+chown shell:shell "$temporary"
+chmod 600 "$temporary"
+mv -f "$temporary" "$target"
+sync
+test "$(stat -c '%U:%G:%a' "$target")" = "shell:shell:600"
+test "$(sha256sum "$target" | cut -d' ' -f1)" = "$expected"
+'@.Replace('__EXPECTED_PATCH_SHA256__', $ExpectedPatchedSha256)
+    Invoke-StationSsh $installPatch | Out-Null
     $command = "/data/python/bin/python3 /data/yapanel-state/updater/update_agent.py apply-patch --root /data/yapanel --state /data/yapanel-state --file $remotePatch --version $ExpectedVersion --sha256 $ExpectedPatchedSha256 --expected-current-sha256 $CurrentSha"
     $lines = Invoke-StationAdb $command
     $jsonLine = $lines | Where-Object { [string]$_ -match '^\s*\{' } | Select-Object -Last 1
