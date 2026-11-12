@@ -32,39 +32,52 @@ if ($TransactionId -and $TransactionId -notmatch '^[A-Za-z0-9-]+$') { throw "Н�
 if ($Apply -and -not (Test-Path -LiteralPath $Source -PathType Leaf)) { throw "Patch-файл не найден: $Source" }
 if ($SshAlias -notmatch '^[A-Za-z0-9_.-]+$') { throw "Недопустимый SSH alias" }
 
+function Invoke-NativeCommand {
+    param([Parameter(Mandatory = $true)][scriptblock]$Command)
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(& $Command 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    return [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+}
+
 function Invoke-StationSsh {
     param([Parameter(Mandatory = $true)][string]$Command)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
     $transport = "printf %s $encoded | /system/bin/base64 -d | /system/bin/sh"
-    $output = & $SshExecutable -o BatchMode=yes $SshAlias $transport 2>&1
-    if ($LASTEXITCODE -ne 0) { throw ("SSH-команда завершилась с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine)) }
-    return @($output)
+    $result = Invoke-NativeCommand { & $SshExecutable -o BatchMode=yes $SshAlias $transport }
+    if ($result.ExitCode -ne 0) { throw ("SSH-команда завершилась с кодом " + $result.ExitCode + ": " + ($result.Output -join [Environment]::NewLine)) }
+    return @($result.Output)
 }
 
 function Invoke-StationAdb {
     param([Parameter(Mandatory = $true)][string]$Command)
-    $output = & $AdbExecutable -s $AdbSerial shell $Command 2>&1
-    if ($LASTEXITCODE -ne 0) { throw ("ADB-команда завершилась с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine)) }
-    return @($output)
+    $result = Invoke-NativeCommand { & $AdbExecutable -s $AdbSerial shell $Command }
+    if ($result.ExitCode -ne 0) { throw ("ADB-команда завершилась с кодом " + $result.ExitCode + ": " + ($result.Output -join [Environment]::NewLine)) }
+    return @($result.Output)
 }
 
 function Invoke-StationAdbShell {
     param([Parameter(Mandatory = $true)][string]$Command)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Command))
     $transport = "printf %s $encoded | /system/bin/base64 -d | /system/bin/sh"
-    $output = & $AdbExecutable -s $AdbSerial shell $transport 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw ("ADB encoded shell-команда завершилась с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine))
+    $result = Invoke-NativeCommand { & $AdbExecutable -s $AdbSerial shell $transport }
+    if ($result.ExitCode -ne 0) {
+        throw ("ADB encoded shell-команда завершилась с кодом " + $result.ExitCode + ": " + ($result.Output -join [Environment]::NewLine))
     }
-    return @($output)
+    return @($result.Output)
 }
 
 function Invoke-StationAdbPush {
     param([string]$LocalPath, [string]$RemotePath)
-    $output = & $AdbExecutable -s $AdbSerial push $LocalPath $RemotePath 2>&1
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
-        throw ("ADB push завершился с кодом " + $exitCode + ": " + ($output -join [Environment]::NewLine))
+    $result = Invoke-NativeCommand { & $AdbExecutable -s $AdbSerial push $LocalPath $RemotePath }
+    if ($result.ExitCode -ne 0) {
+        throw ("ADB push завершился с кодом " + $result.ExitCode + ": " + ($result.Output -join [Environment]::NewLine))
     }
 }
 
