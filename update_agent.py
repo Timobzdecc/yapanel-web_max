@@ -84,6 +84,10 @@ class UpdateAgent:
         "start.bat",
         "start.command",
     }
+    PRESERVED_DIRS = {
+        "device/android_audio",
+        "device/bt_memes",
+    }
     CONTROLLED_BOOTSTRAP_FILES = {
         "panel_update_integration.py",
         "update_agent.py",
@@ -248,9 +252,53 @@ class UpdateAgent:
             if not source.is_dir():
                 continue
             for path in source.rglob("*"):
+                relative = path.relative_to(content_root).as_posix()
+                if any(relative == preserved or relative.startswith(preserved + "/")
+                       for preserved in self.PRESERVED_DIRS):
+                    continue
                 if path.is_file() and path.suffix.lower() not in self.EXCLUDED_RELEASE_SUFFIXES:
-                    result.add(path.relative_to(content_root).as_posix())
+                    result.add(relative)
         return tuple(sorted(result))
+
+    def _backup_files(self, root, preserve_runtime_dirs=True):
+        """Перечисляем доступные файлы, не заходя в локальные protected runtime-каталоги."""
+        root = Path(root)
+        for current, directories, files in os.walk(root, topdown=True):
+            current_path = Path(current)
+            relative_current = current_path.relative_to(root).as_posix()
+            if preserve_runtime_dirs:
+                directories[:] = [name for name in directories if not any(
+                    ((Path(relative_current) / name).as_posix() == preserved or
+                     (Path(relative_current) / name).as_posix().startswith(preserved + "/"))
+                    for preserved in self.PRESERVED_DIRS
+                )]
+            for name in files:
+                path = current_path / name
+                if self.updater_dir in path.parents:
+                    continue
+                yield path
+
+    def _add_backup_tree(self, tar, root, arcname, preserve_runtime_dirs=True):
+        """Добавляем backup поэлементно, чтобы tar не заходил в protected runtime-каталоги."""
+        root = Path(root)
+        tar.add(root, arcname=arcname, recursive=False)
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            relative_current = current.relative_to(root).as_posix()
+            try:
+                entries = sorted(current.iterdir(), key=lambda item: item.name)
+            except OSError:
+                continue
+            for path in entries:
+                relative = path.relative_to(root).as_posix()
+                if preserve_runtime_dirs and any(
+                        relative == preserved or relative.startswith(preserved + "/")
+                        for preserved in self.PRESERVED_DIRS):
+                    continue
+                tar.add(path, arcname=f"{arcname}/{relative}", recursive=False)
+                if path.is_dir() and not path.is_symlink():
+                    stack.append(path)
 
     @staticmethod
     def _elf_metadata(path):
@@ -546,18 +594,14 @@ class UpdateAgent:
         updater_snapshots = {}
         with tarfile.open(archive, "w:gz") as tar:
             if self.root.exists():
-                for path in self.root.rglob("*"):
-                    if path.is_file() and self.updater_dir not in path.parents:
-                        original_files.append(path.relative_to(self.root).as_posix())
-                tar.add(self.root, arcname="panel", recursive=True)
+                original_files = [path.relative_to(self.root).as_posix()
+                                  for path in self._backup_files(self.root)]
+                self._add_backup_tree(tar, self.root, "panel")
             data_dir = self.state_dir / "data"
             if include_state and data_dir.is_dir():
-                original_state_files = [
-                    path.relative_to(data_dir).as_posix()
-                    for path in data_dir.rglob("*")
-                    if path.is_file()
-                ]
-                tar.add(data_dir, arcname="state/data", recursive=True)
+                original_state_files = [path.relative_to(data_dir).as_posix()
+                                        for path in self._backup_files(data_dir, preserve_runtime_dirs=False)]
+                self._add_backup_tree(tar, data_dir, "state/data", preserve_runtime_dirs=False)
         with archive.open("r+b") as stream:
             os.fsync(stream.fileno())
         fsync_directory(backup_dir)

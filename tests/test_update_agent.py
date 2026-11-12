@@ -491,6 +491,33 @@ def test_generated_release_binaries_require_static_arm64_and_release_version(tmp
         agent.stage(make_archive(extra=invalid), apply_overlays=False)
 
 
+def test_station_runtime_directories_are_preserved_from_shell_updater(tmp_path):
+    panel = tmp_path / "panel"
+    state = tmp_path / "state"
+    panel.mkdir()
+    (panel / "device" / "android_audio").mkdir(parents=True)
+    (panel / "device" / "android_audio" / "StationAudio.dex").write_bytes(b"station runtime")
+    (panel / "device" / "bt_memes").mkdir(parents=True)
+    (panel / "device" / "bt_memes" / "bt-memes").write_bytes(b"station runtime")
+    (panel / "server.py").write_text("# panel\n", encoding="utf-8")
+    agent = UpdateAgent(panel, state)
+
+    archive = make_archive(extra={
+        "device/android_audio/StationAudio.dex": b"release runtime",
+        "device/bt_memes/bt-memes": b"release runtime",
+    })
+    transaction, manifest = agent.stage(archive, version="0.3.11", apply_overlays=False)
+    assert "device/android_audio/StationAudio.dex" not in manifest["managed"]
+    assert "device/bt_memes/bt-memes" not in manifest["managed"]
+
+    agent.create_backup(transaction)
+    backup = state / "updater" / "backups" / transaction / "panel-backup.tar.gz"
+    with tarfile.open(backup, "r:gz") as tar:
+        names = tar.getnames()
+    assert "panel/device/android_audio/StationAudio.dex" not in names
+    assert "panel/device/bt_memes/bt-memes" not in names
+
+
 def test_reviewed_overlay_hash_allows_known_local_change(tmp_path):
     panel = tmp_path / "panel"
     panel.mkdir()
