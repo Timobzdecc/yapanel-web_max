@@ -882,7 +882,9 @@ def test_station_overlay_applies_reviewed_v0312_release(tmp_path):
 def test_station_overlay_blocks_unknown_max_profile_revision(tmp_path):
     profile = tmp_path / "max_profile.py"
     profile.write_bytes(subprocess.check_output(["git", "show", "v0.3.11:max_profile.py"]))
-    profile.write_text(profile.read_text(encoding="utf-8") + "\n# неизвестная правка\n", encoding="utf-8", newline="\n")
+    profile_text = profile.read_text(encoding="utf-8") + "\n# неизвестная правка\n"
+    with profile.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(profile_text)
 
     with pytest.raises(RuntimeError, match="совместимый max_profile.py"):
         station_overlay._inject_max_profile(profile, "0.3.11")
@@ -906,7 +908,8 @@ def test_apply_patch_cli_uses_durable_transaction_and_refreshes_baseline(tmp_pat
     baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
     current_sha = agent.sha256(panel / "max_profile.py")
     patch = tmp_path / "max_profile.patch.py"
-    patch.write_text("import max_privacy\nVALUE = 'station-overlay'\n", encoding="utf-8", newline="\n")
+    with patch.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write("import max_privacy\nVALUE = 'station-overlay'\n")
     target_sha = agent.sha256(patch)
 
     result = subprocess.run(
@@ -952,7 +955,8 @@ def test_apply_patch_cli_targets_requested_server_file(tmp_path):
     agent.capture_baseline(agent._managed_files(panel))
     current_sha = agent.sha256(panel / "server.py")
     patch = tmp_path / "server.py.patch"
-    patch.write_text("VALUE = 'assistant-autostart-overlay'\n", encoding="utf-8", newline="\n")
+    with patch.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write("VALUE = 'assistant-autostart-overlay'\n")
     target_sha = agent.sha256(patch)
 
     result = subprocess.run(
