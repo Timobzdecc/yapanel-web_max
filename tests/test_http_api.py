@@ -10,6 +10,8 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import access
 import server
@@ -234,6 +236,56 @@ class HttpApiTests(unittest.TestCase):
                                        headers={"Origin": "https://evil.example"})
         self.assertEqual(status, 403)
         self.assertIn("чужого сайта", self.json((status, body))["error"])
+
+    def test_panel_update_route_runs_sequential_releases_through_http(self):
+        events = []
+        releases = iter(("0.3.11", "0.3.12"))
+
+        class ImmediateTimer:
+            def __init__(self, delay, callback):
+                events.append(("schedule", delay))
+                self.callback = callback
+
+            def start(self):
+                self.callback()
+
+        updater = server.PanelUpdater(
+            restart=lambda: events.append("supervisor-restart"),
+            config=SimpleNamespace(
+                server=SimpleNamespace(data_dir=Path(self.tmp.name) / "panel-data",
+                                       github_repo="Timobzdecc/yapanel-web_max")
+            ),
+        )
+
+        def check(refresh=False):
+            version = next(releases)
+            return {"latest": version, "update": True, "install": "zip"}
+
+        def activate(version):
+            events.append(("activate", version))
+            updater._save_update_status(state="activated_pending_health", version=version,
+                                        transaction="tx-" + version, error=None)
+
+        updater.check = check
+        updater._from_zip = activate
+        previous_updater = TestHandler.updater
+        TestHandler.updater = updater
+        try:
+            with patch.object(server.threading, "Timer", ImmediateTimer):
+                first = self.request("POST", "/api/panel/update", {})
+                second = self.request("POST", "/api/panel/update", {})
+        finally:
+            TestHandler.updater = previous_updater
+
+        self.assertEqual(first[0], 200)
+        self.assertEqual(second[0], 200)
+        self.assertEqual(self.json(first)["version"], "0.3.11")
+        self.assertEqual(self.json(second)["version"], "0.3.12")
+        self.assertEqual(
+            events,
+            [("activate", "0.3.11"), ("schedule", 1.0), "supervisor-restart",
+             ("activate", "0.3.12"), ("schedule", 1.0), "supervisor-restart"],
+        )
 
     def login(self, password):
         status, body, headers = self.request("POST", "/api/panel-auth/login",

@@ -2676,15 +2676,33 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             + "exit 0\n"
         )
 
-    def max_hook_status(self):
-        """Native hook status for Android TV 9 / Station Max.
+    def max_assistant_hook_fallback(self, users):
+        """Проверяет существующий worker автозапуска ассистента на Android."""
+        if "ассистент" not in users or getattr(self.adb, "is_local", False) is not True:
+            return False
+        out, _, _ = self.adb.shell(
+            f"[ -x /system/bin/sh ] && [ -d /data/quasar ] && "
+            f"[ -f {s.ASSIST_CONF} ] && [ -x {s.ASSISTD} ] && "
+            f"[ ! -f {s.ASSIST_NO_AUTOSTART} ] && echo assistant-worker || true",
+            check=False,
+        )
+        return "assistant-worker" in out.split()
 
-        Persistence is handled natively by /odm/bin/adbd_watchdog.sh which runs
-        /data/quasar/webpanel/boot_hook.sh. Freshness is a real md5 check, not a
-        constant: otherwise the panel cannot notice that the generated hook was
-        replaced by an older version.
+    def max_hook_status(self):
+        """Показывает статус boot hook для Android TV 9 / Station Max.
+
+        Свежесть проверяется по реальному MD5, а boot-route - read-only
+        проверкой caller. Одного наличия boot_hook.sh недостаточно, чтобы
+        подтвердить его выполнение после перезагрузки.
         """
         expected = hashlib.md5(max_boot_hook_script().encode("utf-8")).hexdigest()
+        possible = True
+        reason = ""
+        try:
+            self._boot_route()
+        except AdbError as exc:
+            possible = False
+            reason = str(exc)
         out, _, _ = self.adb.shell(
             f"{self._hook_users_script()}; [ -f {s.BOOT_HOOK} ] && echo hook; "
             f"md5sum {s.BOOT_HOOK} 2>/dev/null; true", check=False)
@@ -2693,20 +2711,28 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         users = [l.strip()[1:] for l in out.splitlines() if l.strip().startswith("@")]
         hook = "hook" in flags
         fresh = expected in out
+        assistant_fallback = self.max_assistant_hook_fallback(users)
+        required_users = [user for user in users if not (user == "ассистент" and assistant_fallback)]
+        if assistant_fallback and not required_users:
+            reason = "boot_hook не требуется: автозапуск ассистента выполняет worker панели"
         return {
             "hook": hook,
             "fresh": hook and fresh,
             "users": users,
-            "possible": True,
+            "possible": possible,
             "supported": True,
-            "reason": "",
-            "broken": bool(users) and not (hook and fresh),
+            "reason": reason,
+            "broken": bool(required_users) and not (hook and fresh),
             "rootkeeper": "/odm/bin/adbd_watchdog.sh",
             "file": "/data/quasar/webpanel/boot_hook.sh",
         }
 
     def max_ensure_hook(self, remount=False):
         """Write the Station Max boot_hook.sh (Android TV 9, no Buildroot parts)."""
+        # Не записываем файл, пока не доказано, что Android действительно
+        # вызывает его при загрузке. Иначе repair может убрать предупреждение,
+        # но оставить хук невыполняемым после перезагрузки.
+        self._boot_route()
         hook_script = max_boot_hook_script()
         with tempfile.TemporaryDirectory() as td:
             f = Path(td) / "hook"
@@ -2721,7 +2747,20 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         return self.hook_status()
 
     def max_boot_route(self):
-        """Station Max uses Android boot watchdog, strictly no Buildroot rootkeeper/init.d."""
+        """Подтверждает реальный Android boot caller для boot_hook.sh."""
+        caller = shlex.quote(s.ROOTKEEPER_CALLER)
+        hook = shlex.quote(s.BOOT_HOOK)
+        command = (
+            f"[ -f {caller} ] && "
+            f"sed '/^[[:space:]]*#/d' {caller} 2>/dev/null | "
+            f"grep -F {hook} >/dev/null 2>&1 && echo watchdog || exit 3"
+        )
+        out, err, rc = self.adb.shell(command, check=False)
+        if rc or out.strip() != "watchdog":
+            detail = err.strip() or "caller не найден или не вызывает boot_hook.sh"
+            raise AdbError(
+                f"Автозапуск boot_hook.sh не подтверждён: {s.ROOTKEEPER_CALLER}: {detail}"
+            )
         return "watchdog"
 
     def max_hook_users_script(self):
@@ -2737,7 +2776,13 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             ("слова активации", s.WAKE_AUTOSTART),
             ("активация Алисы (Frida)", s.WAKE_FRIDA_AUTOSTART),
         ]
-        cmd = "; ".join(f"[ -f {path} ] && echo {shlex.quote('@' + name)}" for name, path in users)
+        commands = []
+        for name, path in users:
+            condition = f"[ -f {path} ]"
+            if name == "ассистент":
+                condition += f" && [ ! -f {s.ASSIST_NO_AUTOSTART} ]"
+            commands.append(f"{condition} && echo {shlex.quote('@' + name)}")
+        cmd = "; ".join(commands)
         cmd += f"; find {s.OVR_DIR}/sounds -type f 2>/dev/null | grep -q . && echo '@свои звуки'"
         cmd += f"; find {s.OVR_DIR}/ledpatterns -type f 2>/dev/null | grep -q . && echo '@свои анимации'"
         return cmd
@@ -3024,6 +3069,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         return st
 
     P.hook_status = max_hook_status
+    P.max_assistant_hook_fallback = max_assistant_hook_fallback
     P._ensure_hook = max_ensure_hook
     P.hook_repair = max_hook_repair
     P._boot_route = max_boot_route

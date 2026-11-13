@@ -50,6 +50,7 @@ import access
 import agent as agentlink
 import api
 import glagol
+import update_agent
 from config import get_config, PanelConfig, set_config
 _cfg = get_config()
 
@@ -237,7 +238,7 @@ PANEL_PROFILE = ("max", False)   # (модель, определена ли са
 set_data_dir(ROOT)
 # Без пароля доступны только оболочка страницы и вход; всё остальное — после входа.
 PUBLIC_PATHS = {"/", "/index.html", "/manifest.webmanifest", "/sw.js", "/ca.crt", "/api/panel-auth",
-                "/api/panel-auth/login"}
+                "/api/panel-auth/login", "/api/panel/health"}
 # Тело запроса не читаем в память целиком: JSON — 8 МБ, файлы — своим лимитом.
 # Лимит проверяется по Content-Length заранее, поэтому огромный запрос получает 413 без чтения.
 JSON_BODY_LIMIT = 8 * 1024 * 1024
@@ -1343,6 +1344,9 @@ echo WP_MODE=none
         return self._needs_su
 
     def shell(self, cmd, timeout=15, check=True):
+        # На Station Max локальные root-утилиты лежат в каталоге панели, а не в /odm/bin.
+        if getattr(self, "is_local", False):
+            cmd = "export PATH=/data/yapanel/bin:$PATH; " + cmd
         if getattr(self, "is_local", False):
             try:
                 if os.name == "nt":
@@ -7122,7 +7126,16 @@ class Handler(BaseHTTPRequestHandler):
     panel: Panel = None
     access = None            # access.PanelAccess
     updater = None           # PanelUpdater
+    ready = False
+    critical_errors = ()
+    startup_errors = []
     ports = {}          # {"http": 8765, "https": 8766} — для подсказок в интерфейсе
+
+    @classmethod
+    def record_startup_error(cls, component, error):
+        """Фиксируем тип ошибки запуска без публикации её содержимого или секретов."""
+        cls.startup_errors = [*cls.startup_errors, f"{component}: {type(error).__name__}"]
+        cls.critical_errors = tuple(cls.startup_errors)
 
     def log_message(self, fmt, *args):
         pass
@@ -7657,6 +7670,10 @@ class Handler(BaseHTTPRequestHandler):
             "/api/privacy": p.privacy_status,
             "/api/assistant": p.assistant_status,
             "/api/panel/version": lambda: self.updater.check(q.get("refresh") == "1"),
+            "/api/panel/update/status": lambda: self.updater.status() if self.updater else {"state": "idle"},
+            "/api/panel/health": lambda: {"ready": bool(getattr(Handler, "ready", False)),
+                                           "version": VERSION,
+                                           "critical_errors": len(getattr(Handler, "critical_errors", ()))},
             "/api/metrics": lambda: p.metrics.get(q.get("range", 3600)),
         }
         if u.path in routes:
@@ -7831,6 +7848,36 @@ class PanelUpdater:
         self.cache = (0, None)
         self.lock = threading.Lock()
         self.config = config or get_config()
+        data_dir = Path(getattr(self.config.server, "data_dir", ROOT))
+        self.status_path = data_dir.parent / "updater" / "status.json" if data_dir.name == "data" else data_dir / ".panel_update_status.json"
+
+    def _save_update_status(self, **updates):
+        """Сохраняем короткий статус отдельно от исходников панели."""
+        try:
+            self.status_path.parent.mkdir(parents=True, exist_ok=True)
+            current = {}
+            if self.status_path.is_file():
+                try:
+                    current = json.loads(self.status_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    current = {}
+            current.update(updates)
+            temporary = self.status_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temporary, self.status_path)
+        except OSError:
+            pass
+
+    def status(self):
+        """Статус последней транзакции без вывода содержимого архива или секретов."""
+        try:
+            data = json.loads(self.status_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {"state": "unknown"}
+        except (OSError, ValueError):
+            return {"state": "idle"}
+
+    def _mark_current_update_healthy(self):
+        return self.status()
 
     @staticmethod
     def kind():
@@ -7886,6 +7933,7 @@ class PanelUpdater:
             "install": self.kind(),
             "repo": f"https://github.com/{repo}",
             "checked": self.cache[0] or None,
+            "update_status": self._mark_current_update_healthy(),
         }
         if rel is None:
             return {**result, "error": err or "нет данных о релизе"}
@@ -7922,7 +7970,12 @@ class PanelUpdater:
             else:
                 self._from_zip(info["latest"])
             threading.Timer(1.0, self.restart).start()
-            return {"ok": True, "version": info["latest"], "install": kind}
+            result = {"ok": True, "version": info["latest"], "install": kind}
+            status = self.status()
+            if isinstance(status, dict) and status.get("state") not in (None, "idle"):
+                result["state"] = status["state"]
+                result["transaction"] = status.get("transaction")
+            return result
         finally:
             self.lock.release()
 
@@ -7931,33 +7984,66 @@ class PanelUpdater:
         return
 
     def _from_zip(self, version):
-        """Исходники релиза с GitHub → поверх файлов панели. Данные (.yandex_auth.json и пр.), runtime и
-        platform-tools не трогаем — их в архиве нет, а заменяем только файлы самой панели."""
+        """Скачиваем проверяемый release asset и активируем его staged-транзакцией."""
         repo = getattr(self.config.server, "github_repo", REPO) if hasattr(self, "config") and self.config else REPO
-        url = f"https://github.com/{repo}/archive/refs/tags/v{version}.zip"
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "webpanel"}), timeout=120) as r:
+        release_url = f"https://api.github.com/repos/{repo}/releases/tags/v{version}"
+        with urllib.request.urlopen(urllib.request.Request(
+                release_url,
+                headers={"User-Agent": f"yapanel-web/{VERSION}", "Accept": "application/vnd.github+json"}),
+                timeout=30) as r:
+            release = json.load(r)
+        if release.get("tag_name") != f"v{version}":
+            raise AdbError("GitHub вернул release с неожиданным tag")
+        assets = release.get("assets") if isinstance(release, dict) else None
+        asset_name = os.environ.get("PANEL_UPDATE_ASSET", "windows-arm64.zip")
+        asset = next((a for a in assets or () if a.get("name", "").endswith(asset_name)), None)
+        if not asset or not asset.get("browser_download_url"):
+            raise AdbError(f"В релизе {version} отсутствует проверяемый asset {asset_name}")
+        digest = str(asset.get("digest") or "")
+        download_url = str(asset.get("browser_download_url") or "")
+        if not download_url.startswith(f"https://github.com/{repo}/releases/download/"):
+            raise AdbError("Release asset находится не на ожидаемом GitHub URL")
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+            raise AdbError("GitHub не предоставил SHA-256 для release asset")
+        commit = str(release.get("tag_name") or version)
+        self._save_update_status(state="downloading", version=version, transaction=None, error=None)
+        with urllib.request.urlopen(urllib.request.Request(
+                asset["browser_download_url"], headers={"User-Agent": f"yapanel-web/{VERSION}"}), timeout=180) as r:
             blob = r.read()
-        with zipfile.ZipFile(io.BytesIO(blob)) as z:
-            names = [n for n in z.namelist() if not n.endswith("/")]
-            prefix = names[0].split("/", 1)[0] + "/" if names else ""
-            if not any(n == prefix + "server.py" for n in names):
-                raise AdbError("в архиве релиза нет server.py")
-            for n in names:
-                rel = n[len(prefix):]
-                top = rel.split("/", 1)[0]
-                if rel not in self.FILES and top not in self.DIRS:
-                    continue
-                if ".." in Path(rel).parts:
-                    continue
-                dst = ROOT / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                tmp = dst.with_name(dst.name + ".upd")
-                tmp.write_bytes(z.read(n))
-                os.replace(tmp, dst)
-                if rel in ("start.sh", "start.command"):
-                    os.chmod(dst, 0o755)
-        for name in self.OBSOLETE:
-            shutil.rmtree(ROOT / name, ignore_errors=True)
+        state_dir = Path(getattr(self.config.server, "data_dir", ROOT))
+        state_dir = state_dir.parent if state_dir.name == "data" else state_dir
+        agent = update_agent.UpdateAgent(ROOT, state_dir=state_dir)
+        try:
+            transaction, manifest = agent.stage(
+                blob,
+                version=version,
+                expected_sha256=digest.split(":", 1)[1],
+                commit=commit,
+            )
+        except update_agent.UpdateFailure as exc:
+            self._save_update_status(state="blocked", version=version, transaction=None, error=str(exc))
+            raise AdbError(str(exc)) from exc
+        self._save_update_status(state="preflight", version=version, transaction=transaction,
+                                 files=len(manifest["managed"]), error=None)
+        baseline_path = agent.updater_dir / "baseline.json"
+        if not baseline_path.is_file():
+            self._save_update_status(state="blocked", version=version, transaction=transaction,
+                                     error="Не найден baseline текущей установки")
+            raise AdbError("Не найден baseline текущей установки; обновление заблокировано")
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            self._save_update_status(state="blocked", version=version, transaction=transaction,
+                                     error="Baseline текущей установки повреждён")
+            raise AdbError("Baseline текущей установки повреждён") from exc
+        try:
+            agent.activate(transaction, baseline=baseline)
+        except update_agent.UpdateFailure as exc:
+            self._save_update_status(state="blocked", version=version, transaction=transaction, error=str(exc))
+            raise AdbError(str(exc)) from exc
+        self._save_update_status(state="activated_pending_health", version=version,
+                                 transaction=transaction, error=None)
+        return manifest
 
 
 # Платформа колонки Станция Макс (Amlogic S905X2 / yandexstation_2).
@@ -8131,7 +8217,14 @@ def restart_self(device=None):
     os.execv(sys.executable, [sys.executable] + args)
 
 
-RESTART_HOOK = None   # (аргументы без имени скрипта) → перезапуск снаружи, см. android/
+def _supervised_restart(_args):
+    """Передаём перезапуск внешнему bootstrap, сохраняя durable journal update."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(75)
+
+
+RESTART_HOOK = _supervised_restart if os.environ.get("PANEL_SUPERVISOR_MODE") == "1" else None
 
 
 class TLSServer(ThreadingHTTPServer):
@@ -8391,6 +8484,9 @@ def _max_assistant_autostart_worker(assistant_dir=None, log_path=None, attempts=
 
 def main():
     import profiles
+    Handler.ready = False
+    Handler.startup_errors = []
+    Handler.critical_errors = ()
     ap = argparse.ArgumentParser(description="Веб-панель для Яндекс Станций")
     ap.add_argument("--device", default=None,
                     help="IP колонки (порт 5555 по умолчанию), host:port или серийник USB; запоминается [ADB_SERIAL]")
@@ -8469,12 +8565,19 @@ def main():
     panel.glagol = glagol.Glagol(panel.auth, host, None, GLAGOL_PLATFORM, config=cfg.glagol)
     try:
         panel.version()
-    except Exception:
-        pass
-    panel.wakeword_router_start()
+    except Exception as error:  # noqa: BLE001
+        Handler.record_startup_error("panel.version", error)
+    for component, start in (("wakeword_router", panel.wakeword_router_start),):
+        try:
+            start()
+        except Exception as error:  # noqa: BLE001
+            Handler.record_startup_error(component, error)
     panel.ymusic = glagol.YandexMusic(panel.auth)
-    panel.agent_attach()
-    panel.greeting_start()
+    for component, start in (("agent_attach", panel.agent_attach), ("greeting", panel.greeting_start)):
+        try:
+            start()
+        except Exception as error:  # noqa: BLE001
+            Handler.record_startup_error(component, error)
     panel.conn = Connection(adb)
     panel.leds = LedStream(adb)
     panel.metrics = Metrics(adb, panel.conn)
@@ -8498,6 +8601,8 @@ def main():
                 raise
             time.sleep(0.5)
     args.port = srv.server_address[1]
+    # station-max-health-overlay-v1
+    Handler.ready = True
     Handler.ports["http"] = args.port
     ready = os.environ.get("PANEL_READY_FILE")
     if ready:

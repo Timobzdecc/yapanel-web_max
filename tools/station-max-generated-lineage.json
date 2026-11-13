@@ -1,0 +1,61 @@
+{
+  "repository": "Timobzdecc/yapanel-web_max",
+  "release": "v0.3.4",
+  "archive_asset": {
+    "name": "yapanel-web-0.3.4-windows-arm64.zip",
+    "sha256": "92506f4957ecb4722a9444f612b723b46c86fd2c959eb16daffe97636bbb18af"
+  },
+  "files": {
+    "device/agent/build/VERSION": {
+      "asset_name": "yapanel-web-0.3.4-windows-arm64.zip",
+      "path_in_asset": "device/agent/build/VERSION",
+      "sha256": "027a61167f091a427fa7844dcac0c5141bafbcbdcadc7e04a93578147ab956f2",
+      "size": 6,
+      "version": "0.3.4"
+    },
+    "device/agent/build/yapanel-agent": {
+      "asset_name": "yapanel-agent-linux-arm64",
+      "asset_sha256": "ff096256a027cbcff547c591d9c2622914d9078258978d9e64651a50f71b4761",
+      "archive_asset": "yapanel-web-0.3.4-windows-arm64.zip",
+      "path_in_asset": "device/agent/build/yapanel-agent",
+      "sha256": "ff096256a027cbcff547c591d9c2622914d9078258978d9e64651a50f71b4761",
+      "size": 5308568,
+      "elf": "ELF64 little-endian AArch64 static",
+      "go_version": "go1.22.12"
+    },
+    "device/assistant/build/VERSION": {
+      "asset_name": "yapanel-web-0.3.4-windows-arm64.zip",
+      "path_in_asset": "device/assistant/build/VERSION",
+      "sha256": "027a61167f091a427fa7844dcac0c5141bafbcbdcadc7e04a93578147ab956f2",
+      "size": 6,
+      "version": "0.3.4"
+    },
+    "device/assistant/build/assistantd": {
+      "asset_name": "assistantd-linux-arm64",
+      "asset_sha256": "cd0e90d7045c194b88e81f0e9873c7ebd5d7b1586071b35834832b1f1b492df9",
+      "archive_asset": "yapanel-web-0.3.4-windows-arm64.zip",
+      "path_in_asset": "device/assistant/build/assistantd",
+      "sha256": "cd0e90d7045c194b88e81f0e9873c7ebd5d7b1586071b35834832b1f1b492df9",
+      "size": 5308568,
+      "elf": "ELF64 little-endian AArch64 static",
+      "go_version": "go1.22.12"
+    },
+    "device/viz/build/VERSION": {
+      "asset_name": "yapanel-web-0.3.4-windows-arm64.zip",
+      "path_in_asset": "device/viz/build/VERSION",
+      "sha256": "027a61167f091a427fa7844dcac0c5141bafbcbdcadc7e04a93578147ab956f2",
+      "size": 6,
+      "version": "0.3.4"
+    },
+    "device/viz/build/vizd": {
+      "asset_name": "vizd-linux-arm64",
+      "asset_sha256": "b61f4a152f614667ba538d652cb6695b5df020f4ceb4a77d2afa69112558755b",
+      "archive_asset": "yapanel-web-0.3.4-windows-arm64.zip",
+      "path_in_asset": "device/viz/build/vizd",
+      "sha256": "b61f4a152f614667ba538d652cb6695b5df020f4ceb4a77d2afa69112558755b",
+      "size": 2162840,
+      "elf": "ELF64 little-endian AArch64 static",
+      "go_version": "go1.22.12"
+    }
+  }
+}
