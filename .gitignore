@@ -46,19 +46,5 @@ device/viz/build/
 
 .station_ip
 tools/
-!tools/
-tools/*
-!tools/make_updater_baseline.py
-!tools/prepare_station_release.py
-!tools/backup_station_max.ps1
-!tools/patch_station_start.py
-!tools/install_station_max.ps1
-!tools/verify_station_backup.py
-!tools/station-max-v0.3.5-overrides.json
 *.zip
 yapanel_max.tar.gz
-station-backups/
-station-install-0.3.11/
-station-install-finalcheck
-station-lifecycle-backup-20261111
-graphify-out
