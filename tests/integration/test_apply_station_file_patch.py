@@ -149,6 +149,7 @@ def _run_operation(tmp_path: Path, fixture: Path, scenario: str, *operation: str
         "-AdbExecutable", str(adb_ps if "-Apply" in operation else adb),
         "-HealthUri", f"http://127.0.0.1:{server.server_address[1]}",
         "-WorkDirectory", str(work),
+        "-ExpectedPatchedSha256", _sha(ROOT / "max_profile.py"),
     ]
     try:
         result = subprocess.run(args, cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
