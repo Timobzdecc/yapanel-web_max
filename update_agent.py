@@ -871,6 +871,7 @@ def _main(argv=None):
     parser.add_argument("--state", required=True)
     parser.add_argument("--archive")
     parser.add_argument("--file")
+    parser.add_argument("--target-file")
     parser.add_argument("--version")
     parser.add_argument("--sha256")
     parser.add_argument("--expected-current-sha256")
@@ -907,6 +908,7 @@ def _main(argv=None):
             version=args.version,
             expected_sha256=args.sha256,
             expected_current_sha256=args.expected_current_sha256,
+            filename=args.target_file or "max_profile.py",
         )
         baseline_path = agent.updater_dir / "baseline.json"
         if not baseline_path.is_file():

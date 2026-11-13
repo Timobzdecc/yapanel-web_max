@@ -942,6 +942,42 @@ def test_apply_patch_cli_uses_durable_transaction_and_refreshes_baseline(tmp_pat
     assert restored_baseline["device/agent/build/yapanel-agent"]["lineage"] == "v0.3.4"
 
 
+def test_apply_patch_cli_targets_requested_server_file(tmp_path):
+    panel = tmp_path / "panel"
+    state = tmp_path / "state"
+    panel.mkdir()
+    seed_root(panel)
+    agent = UpdateAgent(panel, state)
+    agent.capture_baseline(agent._managed_files(panel))
+    current_sha = agent.sha256(panel / "server.py")
+    patch = tmp_path / "server.py.patch"
+    patch.write_text("VALUE = 'assistant-autostart-overlay'\n", encoding="utf-8", newline="\n")
+    target_sha = agent.sha256(patch)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).parents[1] / "update_agent.py"),
+            "apply-patch",
+            "--root", str(panel),
+            "--state", str(state),
+            "--file", str(patch),
+            "--target-file", "server.py",
+            "--version", "0.3.12",
+            "--sha256", target_sha,
+            "--expected-current-sha256", current_sha,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["file"] == "server.py"
+    assert agent.sha256(panel / "server.py") == target_sha
+
+
 def test_station_start_patch_preserves_launch_parameters_and_is_idempotent():
     source = (
         b"#!/system/bin/sh\n"
