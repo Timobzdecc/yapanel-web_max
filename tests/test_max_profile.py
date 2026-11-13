@@ -309,6 +309,101 @@ class MaxProfileTests(unittest.TestCase):
         source = (ROOT / "max_profile.py").read_text(encoding="utf-8")
         self.assertIn("! grep -q appmetrica.yandex.net /odm/etc/hosts", source)
 
+    def test_max_parse_bt_log_line(self):
+        line_off = "2026-11-12 13:04:12.345 20801 20965 I quark-native: [sdk] [info] routeDirective (xx043d5c91)stop_bluetooth.activation via BluetoothCapability, vins=abc"
+        line_on = "2026-11-12 13:05:01.100 20801 20965 I quark-native: [sdk] [info] routeDirective (xx12345678)start_bluetooth.activation via BluetoothCapability, vins=def"
+        line_pre = "2026-11-12 13:04:11.477 20801 20953 I quark-native: Add directive divui_hide_all_views because of stop_bluetooth"
+        self.assertEqual(max_profile.max_parse_bt_log_line(line_off), ("2026-11-12 13:04:12.345", False))
+        self.assertEqual(max_profile.max_parse_bt_log_line(line_on), ("2026-11-12 13:05:01.100", True))
+        self.assertEqual(max_profile.max_parse_bt_log_line(line_pre), ("2026-11-12 13:04:11.477", False))
+        self.assertIsNone(max_profile.max_parse_bt_log_line("2026-11-12 13:04:12.000 I quark-native: unrelated"))
+
+    def test_max_bt_soft_sync_alice_to_panel(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            s = fresh_server()
+            s.DATA_DIR = td
+            profiles.install(s, "max")
+            p = s.Panel(Mock(is_local=False))
+            p._pair_until = 0
+            dumpsys_ble_only = "\n".join([
+                "  enabled: true",
+                "  state: ON",
+                "  name: Яндекс Станция Макс",
+                "  ScanMode: SCAN_MODE_NONE",
+                "  ConnectionState: STATE_CONNECTED",
+                "Profile: GattService",
+                "Profile: A2dpSinkService",
+                "  StateMachine: name=A2dpSinkStateMachine state=Disconnected",
+            ])
+            logcat_lines = [
+                "2026-11-12 13:04:12.345 20801 20965 I quark-native: routeDirective (xx04)stop_bluetooth.activation via BluetoothCapability",
+            ]
+            cmds = []
+
+            def fake_shell(cmd, *a, **k):
+                cmds.append(cmd)
+                if "dumpsys bluetooth_manager" in cmd:
+                    return (dumpsys_ble_only, "", 0)
+                if "logcat -d" in cmd:
+                    return ("\n".join(logcat_lines), "", 0)
+                return ("", "", 0)
+
+            p.adb.shell = fake_shell
+            st = p.bt_state()
+            self.assertFalse(st["powered"])
+            self.assertFalse(st["discoverable"])
+            self.assertFalse(st["pairable"])
+            self.assertFalse(any("svc bluetooth disable" in c for c in cmds))
+
+            # Alice turns BT back on via voice -> panel follows
+            p._bt_last_remote_poll = 0.0
+            logcat_lines.append(
+                "2026-11-12 13:05:01.100 20801 20965 I quark-native: routeDirective (xx05)start_bluetooth.activation via BluetoothCapability"
+            )
+            st2 = p.bt_state()
+            self.assertTrue(st2["powered"])
+            self.assertTrue(st2["pairable"])
+
+    def test_max_bt_action_soft_sync_panel_to_alice(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            s = fresh_server()
+            s.DATA_DIR = td
+            profiles.install(s, "max")
+            p = s.Panel(Mock(is_local=False))
+            cmds = []
+            dumpsys_out = "  enabled: true\n  state: ON\n  ScanMode: SCAN_MODE_NONE\n"
+
+            def fake_shell(cmd, *a, **k):
+                cmds.append(cmd)
+                if "dumpsys bluetooth_manager" in cmd:
+                    return (dumpsys_out, "", 0)
+                return ("", "", 0)
+
+            p.adb.shell = fake_shell
+            p.glagol = None
+            with self.assertRaises(s.AdbError):
+                p.bt_action({"action": "power_off"})
+
+            sent = []
+            p.glagol = SimpleNamespace(ws=object(), send=lambda payload: sent.append(payload))
+            st_off = p.bt_action({"action": "power_off"})
+            self.assertEqual(sent[-1], {"command": "sendText", "text": "выключи блютуз"})
+            self.assertFalse(st_off["powered"])
+            self.assertFalse(any("svc bluetooth disable" in c for c in cmds))
+
+            st_on = p.bt_action({"action": "power_on"})
+            self.assertEqual(sent[-1], {"command": "sendText", "text": "включи блютуз"})
+            self.assertTrue(st_on["powered"])
+
+            # Verify boot_hook no longer kills BLE adapter on Station Max
+            pushed_hooks = []
+            p.adb.push = lambda src, dst, **k: pushed_hooks.append((dst, Path(src).read_text(encoding="utf-8")))
+            p._ensure_hook()
+            self.assertTrue(pushed_hooks)
+            self.assertNotIn("svc bluetooth disable", pushed_hooks[-1][1])
+
 
 if __name__ == "__main__":
     unittest.main()

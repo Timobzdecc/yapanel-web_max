@@ -298,7 +298,7 @@ class TestAdbOutputNormalizationAdversarial:
     def test_max_play_remote_wav_quotes_paths(self):
         """max_profile.py:max_play_remote_wav quotes audio path and play_log."""
         import profiles
-        from test_profiles import fresh_server
+        from tests.test_profiles import fresh_server
 
         mock_adb = Mock()
         mock_adb.shell = Mock(return_value=("", "", 0))
