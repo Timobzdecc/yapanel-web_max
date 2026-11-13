@@ -12,6 +12,7 @@
 - Strict health: `ready=true`, `critical_errors=0`.
 - `/api/hook`: `possible=false`, `broken=false`; для этой прошивки отдельный boot hook не требуется.
 - `/api/assistant`: `running=true`, `autostart=true`.
+- После финального cold boot assistant worker снова запустился автоматически.
 
 ## Сохранённые локальные изменения
 
@@ -37,13 +38,17 @@ Station overlay применён к официальному 0.3.12. Сохра�
 - `start.sh` сохранил hash `7424f025be9b9171038bf2761833dbdc914bb687bfc4127c049187e075851067`;
 - `max_profile.py`: `ff55dcc781f4496c8ce312da97326431ac78440695a919e65cdcf4b6626a489c`;
 - patched `server.py`: `8b1999946bd2d90575e6cbf7cb5b21543fa78d19dc161310854c266379dd5c11`;
-- `update_agent.py`: `8f1270d56a6ab4d4482684e38e024597a8efa40f733b30d31abff2bdce97054d`;
+- `update_agent.py`: `d7bfc6f3471e9531ccaadcd2a371d11e087bce65483dfab5eb295cec56f13f89`;
 - `station_overlay.py`: `3ddcf8656558f58304555dab3029af24d4118dbd91f98867c43e44cb19f35a0e`;
 - bootstrap: `a8ad1d9b61a0ea2c6272f7b9e936b15c7e7d3a67f1a05b3f373a1441a2a261af`.
 
+После разрешённого cold boot наблюдались новые PID: bootstrap `4276`, YaPanel `4849`, assistant `5476`. `sys.boot_completed=1`, `init.svc.yapanel=running`, assistant `running=true`, а запрос через сохранённый SOCKS5 после reboot вернул HTTP 200. Дублирующих процессов не обнаружено.
+
 `/odm` остался read-only; hosts mount topology, rootd, adbguard, absshd, SSH и ADB не изменялись. Порт 8765 слушает, параметры `--device local`, `--host 0.0.0.0`, `--port 8765` и `PANEL_ALLOW_NETWORKS=192.168.31.0/24` сохранены.
 
-Первый cold boot после 0.3.12 поднял YaPanel и bootstrap, но выявил раннее условие `/data/quasar`: assistant worker не был создан. После установки overlay выполнен контролируемый restart только YaPanel, и worker запустился автоматически. Повторный Android reboot после исправления не выполнялся.
+Первый cold boot после 0.3.12 выявил раннее условие `/data/quasar`: assistant worker не был создан. После исправления overlay и ownership-safe updater финальный cold boot подтвердил автоматический запуск worker без ручного API start.
+
+Атомарные записи updater теперь наследуют mode существующего файла и владельца существующего файла/родительского каталога. Новые transaction, journal и backup при root-вызове не остаются недоступными пользователю `shell`.
 
 ## Проверка fixture и regression
 
@@ -73,6 +78,7 @@ Station overlay применён к официальному 0.3.12. Сохра�
 - `81bb622` - актуализация теста wrapper recovery;
 - `13367e9` - retry автозапуска assistant после Android boot;
 - `182c6bf` - корректный target file для maintenance patch CLI.
+- `41d95b1` - сохранение owner/mode updater при атомарных записях.
 
 Рабочее дерево также содержит ранее существовавшие несвязанные изменения и локальные диагностические каталоги; они не входят в эти коммиты.
 
@@ -82,7 +88,6 @@ Station overlay применён к официальному 0.3.12. Сохра�
 
 ## Ограничения
 
-- Второй cold boot после исправления assistant worker не выполнялся.
 - Аппаратные проверки TTS, StationAudio, DSP, Bluetooth, Zigbee и голосового сценария Алисы требуют ручного smoke-test.
 - Полный rollback реального рабочего релиза искусственно не провоцировался; его fault-injection покрыт fixture.
 - Веб-панель оставлена без пароля по временному техническому решению. После завершения работ необходимо восстановить пароль администратора и проверить доступ только из локальной сети.
