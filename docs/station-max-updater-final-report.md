@@ -44,6 +44,8 @@ Station overlay применён к официальному 0.3.12. Сохра�
 
 После разрешённого cold boot наблюдались новые PID: bootstrap `4276`, YaPanel `4849`, assistant `5476`. `sys.boot_completed=1`, `init.svc.yapanel=running`, assistant `running=true`, а запрос через сохранённый SOCKS5 после reboot вернул HTTP 200. Дублирующих процессов не обнаружено.
 
+Дополнительно выполнен реальный `AssistantDaemon.call_llm()` через сохранённый SOCKS5 после reboot: получен ответ длиной 5 символов. Содержимое ответа и credentials не записывались.
+
 `/odm` остался read-only; hosts mount topology, rootd, adbguard, absshd, SSH и ADB не изменялись. Порт 8765 слушает, параметры `--device local`, `--host 0.0.0.0`, `--port 8765` и `PANEL_ALLOW_NETWORKS=192.168.31.0/24` сохранены.
 
 Первый cold boot после 0.3.12 выявил раннее условие `/data/quasar`: assistant worker не был создан. После исправления overlay и ownership-safe updater финальный cold boot подтвердил автоматический запуск worker без ручного API start.
@@ -65,6 +67,8 @@ Station overlay применён к официальному 0.3.12. Сохра�
 
 Последний адресный прогон: `70 passed, 2 skipped`.
 
+После финального ownership fix: `59 passed, 3 skipped` в updater/assistant/transactional-наборе.
+
 Предыдущий полный regression до финального overlay: `1004 passed, 48 skipped, 56 subtests passed`.
 
 ## Git
@@ -79,6 +83,7 @@ Station overlay применён к официальному 0.3.12. Сохра�
 - `13367e9` - retry автозапуска assistant после Android boot;
 - `182c6bf` - корректный target file для maintenance patch CLI.
 - `41d95b1` - сохранение owner/mode updater при атомарных записях.
+- `41d95b1` - сохранение owner/mode updater при атомарных записях.
 
 Рабочее дерево также содержит ранее существовавшие несвязанные изменения и локальные диагностические каталоги; они не входят в эти коммиты.
 
@@ -91,6 +96,7 @@ Station overlay применён к официальному 0.3.12. Сохра�
 - Аппаратные проверки TTS, StationAudio, DSP, Bluetooth, Zigbee и голосового сценария Алисы требуют ручного smoke-test.
 - Полный rollback реального рабочего релиза искусственно не провоцировался; его fault-injection покрыт fixture.
 - Веб-панель оставлена без пароля по временному техническому решению. После завершения работ необходимо восстановить пароль администратора и проверить доступ только из локальной сети.
+- Визуальное отсутствие красного предупреждения в браузере отдельно не автоматизировалось; API-контракт подтверждает `possible=false`, `broken=false`, а frontend overlay использует этот статус.
 
 ## Инструкция переноса
 
