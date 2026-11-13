@@ -18,6 +18,10 @@ jobs:
         python: ['3.9', '3.11', '3.14']
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Получаем upstream release-теги для compatibility fixtures
+        run: git fetch --no-recurse-submodules https://github.com/Timobzdecc/yapanel-web_max.git "refs/tags/v0.3.*:refs/tags/v0.3.*"
       - uses: actions/setup-python@v7
         id: setup-python
         continue-on-error: true
