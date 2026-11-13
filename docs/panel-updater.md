@@ -68,6 +68,14 @@ symlink, затем hard links. `panel/...` и `state/data/...` linkname при�
 4. baseline и локальные hash-конфликты;
 5. наличие внешнего updater при наличии station overlay.
 
+В Android init YaPanel запускается от пользователя `shell`. Поэтому внешний
+updater-каталог перед подготовкой wrapper передаётся во владение `shell:shell`,
+каталоги получают режим `0700`, а файлы - `0600`. Доступ проверяется отдельным
+ADB shell-сеансом с тем же UID до handoff. `updater_bootstrap.py` и
+`update_agent.py` также запускаются через этот shell-сеанс, чтобы новые journal,
+backup и staging-файлы не создавались недоступными для последующего bootstrap.
+Если проверка доступа не проходит, activation и handoff не выполняются.
+
 Для исторических generated artifacts используется только явная lineage-база
 `tools/station-max-generated-lineage.json`. Она разрешает текущие официальные
 бинарники `v0.3.4` по точным hashes и provenance. Неизвестные или изменённые

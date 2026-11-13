@@ -40,8 +40,11 @@ def _load_state():
             "bootstrap_started": False,
             "handoff_attempted": False,
             "rollback_owner": None,
+            "updater_access_ready": False,
         }
-    return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    state.setdefault("updater_access_ready", False)
+    return state
 
 
 def _save_state(value):
@@ -240,6 +243,13 @@ def _execute_shell(command):
         pass
     if command.startswith("echo VERSION="):
         return _snapshot().encode(), b"", 0
+    if "chown -R shell:shell" in command and "/data/yapanel-state/updater" in command:
+        if SCENARIO == "updater_permissions_failure":
+            return b"", b"fixture updater permission failure", 42
+        state = _load_state()
+        state["updater_access_ready"] = True
+        _save_state(state)
+        return b"", b"", 0
     if command.startswith("test -d /data/yapanel"):
         return b"", b"", 0
     if "tar -C /data -czf - yapanel yapanel-state" in command:
@@ -371,9 +381,20 @@ def adb_main(argv):
         return 0
     command = args[args.index("shell") + 1:]
     shell = " ".join(command)
+    if "printf %s " in shell and "/system/bin/base64 -d" in shell:
+        encoded = shell.split("printf %s ", 1)[1].split(" |", 1)[0]
+        shell = base64.b64decode(encoded).decode("utf-8")
+        stdout, stderr, code = _execute_shell(shell)
+        sys.stdout.buffer.write(stdout)
+        sys.stderr.buffer.write(stderr)
+        return code
     if shell == "id":
         print("uid=2000(shell) gid=2000(shell) groups=2000(shell)")
         return 0
+    match = re.match(r"test -[rx] (.+)$", shell)
+    if match:
+        state = _load_state()
+        return 0 if state.get("updater_access_ready") and "/data/yapanel-state/updater" in match.group(1) else 1
     match = re.search(r"\[ -f '([^']+)' \]", shell)
     if match:
         return 0 if _map_path(match.group(1)).is_file() else 1

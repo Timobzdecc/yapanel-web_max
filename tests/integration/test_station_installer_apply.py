@@ -153,7 +153,10 @@ def test_production_installer_apply_runs_real_activation_paths(tmp_path, scenari
 
 
 @pytest.mark.skipif(not POWERSHELL.is_file(), reason="Windows PowerShell 5.1 недоступен")
-@pytest.mark.parametrize("scenario", ("baseline_conflict", "wrapper_install_failure", "supervisor_unavailable"))
+@pytest.mark.parametrize(
+    "scenario",
+    ("baseline_conflict", "wrapper_install_failure", "supervisor_unavailable", "updater_permissions_failure"),
+)
 def test_production_installer_apply_failures_preserve_safe_boundary(tmp_path, scenario):
     result, fixture = _run_installer(tmp_path, scenario, health="failed" if scenario == "supervisor_unavailable" else "healthy")
     panel = fixture / "data/yapanel"
@@ -166,6 +169,9 @@ def test_production_installer_apply_failures_preserve_safe_boundary(tmp_path, sc
     assert _sha(panel / "start.sh") == expected_start
     if scenario != "supervisor_unavailable":
         assert (panel / "VERSION").read_text(encoding="utf-8").strip() == "0.3.5"
+        if scenario == "updater_permissions_failure":
+            assert _state(fixture)["handoff_count"] == 0
+            assert _state(fixture).get("updater_access_ready", False) is False
     else:
         assert (panel / "VERSION").read_text(encoding="utf-8").strip() == "0.3.11"
         assert _state(fixture)["bootstrap_started"] is True
@@ -183,3 +189,4 @@ def test_production_installer_uses_binary_backup_and_real_json_contract(tmp_path
         names = {member.name for member in archive.getmembers()}
     assert {"yapanel/VERSION", "yapanel/start.sh", "yapanel/server.py"}.issubset(names)
     assert any(item.get("state") == "healthy" for item in _journal_states(fixture))
+    assert _state(fixture)["updater_access_ready"] is True

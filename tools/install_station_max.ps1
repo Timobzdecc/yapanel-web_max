@@ -41,6 +41,42 @@ function Invoke-StationSsh {
     return @($output)
 }
 
+function Invoke-StationAdbShell {
+    param([string]$RemoteCommand)
+    $commandBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($RemoteCommand))
+    $transport = "printf %s $commandBase64 | /system/bin/base64 -d | /system/bin/sh"
+    $output = & $AdbExecutable -s $AdbSerial shell $transport 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("ADB shell-команда завершилась с кодом " + $LASTEXITCODE + ": " + ($output -join [Environment]::NewLine))
+    }
+    return @($output)
+}
+
+function Prepare-StationUpdaterAccess {
+    $command = @'
+set -eu
+updater=/data/yapanel-state/updater
+test -d "$updater"
+chown -R shell:shell "$updater"
+find "$updater" -type d -exec chmod 0700 {} \;
+find "$updater" -type f -exec chmod 0600 {} \;
+test -x "$updater"
+'@
+    Invoke-StationSsh $command | Out-Null
+    foreach ($path in @(
+        "/data/yapanel-state/updater",
+        "/data/yapanel-state/updater/updater_bootstrap.py",
+        "/data/yapanel-state/updater/update_agent.py",
+        "/data/yapanel-state/updater/baseline.json",
+        "/data/yapanel-state/updater/yapanel-station-0.3.11.zip"
+    )) {
+        $probe = & $AdbExecutable -s $AdbSerial shell test -r $path 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Пользователь shell не может прочитать $path"
+        }
+    }
+}
+
 . (Join-Path $PSScriptRoot "station_apply_contract.ps1")
 
 function Send-StationFile {
@@ -478,6 +514,7 @@ try {
     }
     Send-StationFile $baseline "/data/yapanel-state/updater/baseline.json"
     Send-StationFile $initial "/data/yapanel-state/updater/yapanel-station-0.3.11.zip"
+    Prepare-StationUpdaterAccess
     $bootstrapInstalled = $true
 
     $wrapperMetadata = (@{
@@ -493,7 +530,7 @@ try {
 
     # Wrapper устанавливается до apply. Startup intent позволяет bootstrap
     # восстановить исходный запуск, если питание пропадёт до активации.
-    Invoke-StationSsh ("/data/python/bin/python3 /data/yapanel-state/updater/updater_bootstrap.py --prepare-wrapper --root /data/yapanel --state /data/yapanel-state --python /data/python/bin/python3 --original-sha256 " + $startDigest + " --patched-sha256 " + $patchedStartDigest + " --target-version " + $ExpectedVersion)
+    Invoke-StationAdbShell ("/data/python/bin/python3 /data/yapanel-state/updater/updater_bootstrap.py --prepare-wrapper --root /data/yapanel --state /data/yapanel-state --python /data/python/bin/python3 --original-sha256 " + $startDigest + " --patched-sha256 " + $patchedStartDigest + " --target-version " + $ExpectedVersion) | Out-Null
     $wrapperPrepared = $true
     $installWrapper = @'
 set -eu
@@ -506,7 +543,7 @@ test "$(sha256sum /data/yapanel/start.sh | sed 's/ .*//')" = "__PATCHED_SHA256__
     Invoke-StationSsh $installWrapper
     $startPatched = $true
 
-    $applyOutput = Invoke-StationSsh ("/data/python/bin/python3 /data/yapanel-state/updater/update_agent.py apply --root /data/yapanel --state /data/yapanel-state --archive /data/yapanel-state/updater/yapanel-station-0.3.11.zip --version " + $ExpectedVersion + " --sha256 " + $initialDigest)
+    $applyOutput = Invoke-StationAdbShell ("/data/python/bin/python3 /data/yapanel-state/updater/update_agent.py apply --root /data/yapanel --state /data/yapanel-state --archive /data/yapanel-state/updater/yapanel-station-0.3.11.zip --version " + $ExpectedVersion + " --sha256 " + $initialDigest)
     try {
         $applyResult = (($applyOutput -join [Environment]::NewLine) | ConvertFrom-Json)
     } catch {
