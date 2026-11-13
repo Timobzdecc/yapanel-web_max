@@ -480,6 +480,8 @@ class MaxProfileTests(unittest.TestCase):
 
             def fake_shell(cmd, *a, **k):
                 cmds.append(cmd)
+                if "adbd_watchdog.sh" in cmd and "boot_hook.sh" in cmd:
+                    return ("watchdog\n", "", 0)
                 if "dumpsys bluetooth_manager" in cmd:
                     return (dumpsys_out, "", 0)
                 return ("", "", 0)
