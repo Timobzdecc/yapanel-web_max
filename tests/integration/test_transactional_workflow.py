@@ -52,6 +52,10 @@ class PanelUpdater:
     pass
 
 
+def _max_assistant_autostart_worker():
+    pass
+
+
 if False:
     from panel_update_integration import install as _install_station_updater
     _install_station_updater(PanelUpdater)
@@ -59,6 +63,11 @@ if False:
 
 def _supervised_restart(_args):
     os._exit(75)
+
+
+def _start_panel(model, adb):
+    if model == "max" and adb.is_local is True and Path("/system/bin/sh").is_file() and Path("/data/quasar").is_dir():
+        _max_assistant_autostart_worker()
 
 
 def _serve(version, mode):
