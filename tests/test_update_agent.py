@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import update_agent
 from update_agent import UpdateAgent, UpdateFailure
 import station_overlay
 import updater_bootstrap
@@ -976,6 +977,19 @@ def test_apply_patch_cli_targets_requested_server_file(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["file"] == "server.py"
     assert agent.sha256(panel / "server.py") == target_sha
+
+
+def test_durable_write_preserves_existing_file_mode(tmp_path):
+    if os.name == "nt":
+        pytest.skip("Windows ACL emulation does not expose POSIX file modes")
+    target = tmp_path / "status.json"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(0o640)
+
+    update_agent.durable_write(target, "new\n")
+
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert target.stat().st_mode & 0o777 == 0o640
 
 
 def test_station_start_patch_preserves_launch_parameters_and_is_idempotent():

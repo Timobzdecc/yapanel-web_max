@@ -42,10 +42,21 @@ def fsync_directory(path):
         os.close(descriptor)
 
 
+def inherit_owner(path, reference):
+    """Наследуем владельца каталога состояния при запуске updater от root."""
+    chown = getattr(os, "chown", None)
+    if chown is None or os.name == "nt":
+        return
+    reference_stat = Path(reference).stat()
+    chown(str(path), reference_stat.st_uid, reference_stat.st_gid)
+
+
 def durable_write(path, data, mode="w", encoding="utf-8"):
     """Атомарно записываем небольшой файл и фиксируем файл и его каталог."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    owner_reference = target if target.exists() else target.parent
+    existing_mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
     temporary = target.with_name(target.name + ".tmp")
     if "b" in mode:
         with temporary.open(mode) as stream:
@@ -57,6 +68,9 @@ def durable_write(path, data, mode="w", encoding="utf-8"):
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+    if existing_mode is not None:
+        os.chmod(temporary, existing_mode)
+    inherit_owner(temporary, owner_reference)
     os.replace(temporary, target)
     fsync_directory(target.parent)
 
@@ -435,6 +449,8 @@ class UpdateAgent:
         transaction_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         transaction_dir = self.updater_dir / "transactions" / transaction_id
         transaction_dir.parent.mkdir(parents=True, exist_ok=True)
+        transaction_dir.mkdir(parents=True, exist_ok=False)
+        inherit_owner(transaction_dir, self.updater_dir)
         archive_path = transaction_dir.with_suffix(".zip")
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         durable_write(archive_path, blob, mode="wb")
@@ -488,9 +504,14 @@ class UpdateAgent:
 
         transaction_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         transaction_dir = self.updater_dir / "transactions" / transaction_id
+        transaction_dir.parent.mkdir(parents=True, exist_ok=True)
+        transaction_dir.mkdir(parents=True, exist_ok=False)
+        inherit_owner(transaction_dir, self.updater_dir)
         stage = transaction_dir / "stage"
         try:
             patch_path = stage / filename
+            stage.mkdir(parents=True, exist_ok=False)
+            inherit_owner(stage, transaction_dir)
             durable_write(patch_path, blob, mode="wb")
             manifest = {
                 "version": str(version),
@@ -608,6 +629,7 @@ class UpdateAgent:
                 "Backup не может прочитать managed-файлы: " + ", ".join(sorted(unavailable_managed))
             )
         backup_dir.mkdir(parents=True, exist_ok=False)
+        inherit_owner(backup_dir, self.updater_dir)
         archive = backup_dir / "panel-backup.tar.gz"
         original_files = []
         original_state_files = []
@@ -653,6 +675,8 @@ class UpdateAgent:
         temporary = destination.with_name(destination.name + ".update-tmp")
         shutil.copyfile(source, temporary)
         shutil.copystat(source, temporary, follow_symlinks=False)
+        owner_reference = destination if destination.exists() else destination.parent
+        inherit_owner(temporary, owner_reference)
         with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
