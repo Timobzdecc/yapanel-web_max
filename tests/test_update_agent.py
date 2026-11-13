@@ -996,12 +996,19 @@ class Handler:
 class PanelUpdater:
     pass
 
+def _max_assistant_autostart_worker():
+    pass
+
 def main():
     args = type("Args", (), {"port": 8765})()
     srv = type("Server", (), {"server_address": ("127.0.0.1", 8765)})()
     args.port = srv.server_address[1]
 
 RESTART_HOOK = None   # (аргументы без имени скрипта) → перезапуск снаружи, см. android/
+
+def start_panel(model, adb):
+    if model == "max" and adb.is_local is True and Path("/system/bin/sh").is_file() and Path("/data/quasar").is_dir():
+        _max_assistant_autostart_worker()
 
 # Платформа колонки Станция Макс
 """
@@ -1018,6 +1025,7 @@ loadPanelVersion().catch(() => {});
     assert station_overlay.SERVER_MARKER in (panel / "server.py").read_text(encoding="utf-8")
     assert station_overlay.BRIDGE_CALL in (panel / "server.py").read_text(encoding="utf-8")
     assert station_overlay.SUPERVISOR_MARKER in (panel / "server.py").read_text(encoding="utf-8")
+    assert station_overlay.ASSISTANT_AUTOSTART_MARKER in (panel / "server.py").read_text(encoding="utf-8")
     assert station_overlay.STATIC_MARKER in (panel / "static" / "app.js").read_text(encoding="utf-8")
     assert (panel / "panel_update_integration.py").is_file()
 

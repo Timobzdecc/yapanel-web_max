@@ -468,8 +468,8 @@ class UpdateAgent:
     def stage_patch(self, blob, version, filename="max_profile.py",
                     expected_sha256=None, expected_current_sha256=None, commit=None):
         """Готовим узкий patch как полноценную durable transaction."""
-        if filename != "max_profile.py":
-            raise UpdateFailure("Разрешён только maintenance patch max_profile.py")
+        if filename not in {"max_profile.py", "server.py"}:
+            raise UpdateFailure("Разрешены только maintenance patch max_profile.py и server.py")
         blob = bytes(blob)
         if expected_sha256 and hashlib.sha256(blob).hexdigest().lower() != expected_sha256.lower():
             raise UpdateFailure("Контрольная сумма patch не совпадает")

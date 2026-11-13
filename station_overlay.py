@@ -11,6 +11,7 @@ SERVER_MARKER = "# station-max-update-overlay-v2"
 SUPERVISOR_MARKER = "# station-max-supervisor-v1"
 HEALTH_MARKER = "# station-max-health-overlay-v1"
 STATIC_MARKER = "/* station-max-update-ui-v2 */"
+ASSISTANT_AUTOSTART_MARKER = "# station-max-assistant-autostart-v1"
 MAX_PROFILE_UPSTREAM_SHA256 = {
     "0.3.11": "49e7ea5e6d132abb9b91134f85d7ebd5d49159dde38abf02737cbe486018b098",
     "0.3.12": "3082ba1c1d2df2334a1ef66fbc9f5cdf262f1d8ec157c833a973d0c66734c90a",
@@ -223,9 +224,29 @@ def _inject_supervisor(source):
     return source.replace(anchor, block, 1)
 
 
+def _inject_assistant_autostart(source):
+    """Запускаем retry-worker даже если /data/quasar ещё не смонтирован при boot."""
+    if ASSISTANT_AUTOSTART_MARKER in source:
+        return source
+    if "_max_assistant_autostart_worker" not in source:
+        raise RuntimeError("Overlay Station Max не нашёл worker автозапуска ассистента")
+    anchor = (
+        '    if model == "max" and adb.is_local is True and '
+        'Path("/system/bin/sh").is_file() and Path("/data/quasar").is_dir():'
+    )
+    if source.count(anchor) != 1:
+        raise RuntimeError("Overlay Station Max не нашёл проверяемое условие worker ассистента")
+    replacement = (
+        f"    {ASSISTANT_AUTOSTART_MARKER}\n"
+        '    if model == "max" and adb.is_local is True and Path("/system/bin/sh").is_file():'
+    )
+    return source.replace(anchor, replacement, 1)
+
+
 def _inject_server(source, version, server_path):
     source = _inject_bridge(source)
     source = _inject_supervisor(source)
+    source = _inject_assistant_autostart(source)
     if BRIDGE_CALL not in source or not _has_supervisor_protocol(source):
         raise RuntimeError("Overlay Station Max не подтвердил bridge и supervisor protocol")
 
