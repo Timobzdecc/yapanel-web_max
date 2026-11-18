@@ -50,6 +50,33 @@ def _yt_dislike(req, svc):
     return svc.yt_dislike(vid, skip=skip)
 
 
+def _yt_playlist_create(req, svc):
+    d = req.data
+    vids = d.get("video_ids")
+    if vids is None:
+        vids = d.get("ids")
+    return svc.yt_playlist_create(
+        title=str(d.get("title") or d.get("name") or ""),
+        video_ids=vids,
+        description=str(d.get("description") or ""),
+        privacy=str(d.get("privacy") or "PRIVATE"),
+        from_queue=bool(d.get("from_queue")),
+    )
+
+
+def _yt_playlist_add(req, svc):
+    d = req.data
+    pid = str(d.get("playlist_id") or d.get("browse_id") or d.get("id") or "")
+    vids = d.get("video_ids")
+    if vids is None:
+        vids = d.get("video_id")
+    if vids is None:
+        vids = d.get("track_id")
+    if vids is None:
+        vids = d.get("ids")
+    return svc.yt_playlist_add(pid, vids)
+
+
 def _shuffle(req, svc):
     d = req.data
     val = d["enable"] if "enable" in d else d.get("enabled")
@@ -174,6 +201,8 @@ def register(router: Router):
     ))
     router.post("/api/extmusic/yt/like", lambda r: _yt_like(r, service(r)))
     router.post("/api/extmusic/yt/dislike", lambda r: _yt_dislike(r, service(r)))
+    router.post("/api/extmusic/yt/playlist/create", lambda r: _yt_playlist_create(r, service(r)))
+    router.post("/api/extmusic/yt/playlist/add", lambda r: _yt_playlist_add(r, service(r)))
     router.get("/api/extmusic/thumb", _thumb)
     router.get("/api/extmusic/screen/frame", lambda r: service(r).screen_frame())
     router.post("/api/extmusic/screen/start", lambda r: service(r).screen_start())

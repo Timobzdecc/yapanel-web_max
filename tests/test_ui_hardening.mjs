@@ -188,5 +188,9 @@ logCtx.__recordJsError('error', 'boom');
 logCtx.__recordJsError('error', 'boom');
 assert(logCtx.__formatJsErrors().includes('(×2)'), 'recordJsError must collapse consecutive duplicates');
 assert(html.includes('id="log-copy"') && html.includes('data-report="log-report"'), 'Logs tab must expose Copy log and Issue report buttons');
+assert(app.includes("const qs = new URLSearchParams({ source: 'yt', track_id: id })"), 'Player artist card must fall back to source=yt/track_id/artist resolution when artistList[0].id is empty');
+assert(app.includes('class="btn sm yt-nav" href="${esc(artistHref)}"'), 'YouTube Music artist button must carry .yt-nav class');
+assert(app.includes('href="#yt?album=${encodeURIComponent(albBid)}"'), 'Player album badge must link to #yt?album= when album id exists');
+assert(html.includes('id="pl-q-save-yt"') && html.includes('id="yt-playlist-new"'), 'UI must expose playlist creation and save-queue buttons');
 
 console.log('Scheduler visibility, escaping, list rendering, ARIA and confirmation cases passed');

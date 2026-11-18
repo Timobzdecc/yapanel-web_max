@@ -256,6 +256,9 @@
     const libAcc = $('yt-library-account');
     if (libAcc) libAcc.textContent = auth ? acctLabel : 'Аккаунт не подключён';
 
+    const newPlBtn = $('yt-playlist-new');
+    if (newPlBtn) newPlBtn.hidden = !auth;
+
     const loginBtn = $('yt-account-login');
     if (loginBtn) loginBtn.hidden = auth;
 
@@ -382,7 +385,13 @@
       const artistHtml = artistId
         ? `<a class="yt-nav" href="#yt?artist=${encodeURIComponent(artistId)}" data-yt-artist="${esc(artistId)}">${esc(artist)}</a>`
         : esc(artist);
-      const subHtml = artistHtml + (track.album ? ` · ${esc(track.album)}` : '');
+      const albumId = stripExtYt(track.album_id || '');
+      const albumHtml = track.album
+        ? (albumId
+          ? `<a class="yt-nav" href="#yt?album=${encodeURIComponent(albumId)}" data-yt-album="${esc(albumId)}">${esc(track.album)}</a>`
+          : esc(track.album))
+        : '';
+      const subHtml = artistHtml + (albumHtml ? ` · ${albumHtml}` : '');
       const dur = Number(track.duration) > 0 ? fmt(Number(track.duration) * 1000) : '';
 
       return `<div class="trow trow-with-acts${isCur ? ' cur' : ''}" data-yt-vid="${esc(vid)}">
@@ -396,6 +405,7 @@
         </div>
         <span class="trow-acts">
           <button type="button" class="cbtn sm" data-yt-radio-track="${esc(listKey)}" data-yt-idx="${idx}" title="Радио по треку" aria-label="Радио по треку: ${esc(title)}">📻</button>
+          <button type="button" class="cbtn sm" data-yt-pl-add="${esc(vid)}" data-yt-title="${esc(title)}" title="Добавить в плейлист" aria-label="Добавить в плейлист: ${esc(title)}">➕</button>
           <button type="button" class="cbtn sm${isLiked ? ' liked' : ''}" data-yt-like="${esc(vid)}" data-yt-title="${esc(title)}" aria-pressed="${isLiked ? 'true' : 'false'}" title="Нравится" aria-label="${isLiked ? 'Убрать лайк' : 'Лайк'}: ${esc(title)}"><svg width="15" height="15" aria-hidden="true"><use href="#i-like"/></svg></button>
           <button type="button" class="cbtn sm" data-yt-next="${esc(listKey)}" data-yt-idx="${idx}" title="Играть следующим" aria-label="Играть следующим: ${esc(title)}">⏭+</button>
           <button type="button" class="cbtn sm" data-yt-queue="${esc(listKey)}" data-yt-idx="${idx}" title="Добавить в очередь" aria-label="Добавить в очередь: ${esc(title)}">☰+</button>
@@ -547,6 +557,84 @@
     } finally {
       if (btn) btn.disabled = false;
     }
+  }
+
+  async function createPlaylistPrompt(videoIds = [], defaultTitle = '') {
+    const raw = typeof prompt === 'function'
+      ? prompt('Название нового плейлиста YouTube Music:', defaultTitle || '')
+      : '';
+    const title = String(raw || '').trim();
+    if (!title) return null;
+    showError('');
+    try {
+      const body = { title };
+      if (Array.isArray(videoIds) && videoIds.length) body.video_ids = videoIds;
+      const res = await call('/api/extmusic/yt/playlist/create', body);
+      libraryLoaded = false;
+      if (activeSection === 'library' && !currentDetail) loadLibrary(true);
+      notify(`Плейлист «${res?.title || title}» создан`);
+      return res;
+    } catch (e) {
+      const msg = e?.message || 'Не удалось создать плейлист';
+      showError(msg);
+      notify(msg, true);
+      return null;
+    }
+  }
+
+  async function addTrackToPlaylistPrompt(vid, title = '') {
+    const cleanId = stripExtYt(vid);
+    if (!cleanId) return;
+    if (!status?.sources?.yt?.authenticated) {
+      notify('Подключите аккаунт Google или cookies во вкладке «Аккаунт»', true);
+      return;
+    }
+    showError('');
+    try {
+      if (!libraryData || !Array.isArray(libraryData.playlists)) {
+        try {
+          libraryData = await call('/api/extmusic/yt/account/library');
+          libraryLoaded = true;
+        } catch (_) {}
+      }
+      const playlists = (Array.isArray(libraryData?.playlists) ? libraryData.playlists : [])
+        .filter(pl => {
+          const bid = String(pl?.playlist_id || pl?.browse_id || '');
+          return bid && bid !== 'VLLM' && bid !== 'LM' && !bid.startsWith('MPREb_');
+        });
+      if (!playlists.length) {
+        await createPlaylistPrompt([cleanId], title || 'Мой плейлист');
+        return;
+      }
+      const lines = playlists.slice(0, 15).map((pl, idx) => `${idx + 1}. ${pl.title || 'Без названия'}`);
+      lines.push('0. + Создать новый плейлист');
+      const hint = `Добавить «${title || 'трек'}» в плейлист:\n${lines.join('\n')}`;
+      const choiceRaw = typeof prompt === 'function' ? prompt(hint, '1') : '';
+      if (choiceRaw === null || String(choiceRaw).trim() === '') return;
+      const choice = Number(String(choiceRaw).trim());
+      if (choice === 0) {
+        await createPlaylistPrompt([cleanId], title || 'Новый плейлист');
+        return;
+      }
+      const picked = Number.isInteger(choice) && choice >= 1 && choice <= Math.min(playlists.length, 15)
+        ? playlists[choice - 1]
+        : playlists.find(pl => String(pl.title || '').toLowerCase() === String(choiceRaw).trim().toLowerCase());
+      if (!picked) {
+        notify('Неверный номер плейлиста', true);
+        return;
+      }
+      const targetId = picked.playlist_id || picked.browse_id;
+      await call('/api/extmusic/yt/playlist/add', { playlist_id: targetId, video_ids: [cleanId] });
+      notify(`Добавлено в «${picked.title || 'плейлист'}»`);
+    } catch (e) {
+      const msg = e?.message || 'Не удалось добавить в плейлист';
+      showError(msg);
+      notify(msg, true);
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.ytInvalidateLibrary = () => { libraryLoaded = false; };
   }
 
   // ---------- Home ----------
@@ -1512,6 +1600,22 @@
         return;
       }
 
+      const albumLink = e.target.closest('[data-yt-album]');
+      if (albumLink) {
+        e.preventDefault();
+        e.stopPropagation();
+        const albId = stripExtYt(albumLink.dataset.ytAlbum);
+        if (albId) openCollection({ browseId: albId, kind: 'album', title: albumLink.textContent || '' });
+        return;
+      }
+
+      const plAddBtn = e.target.closest('[data-yt-pl-add]');
+      if (plAddBtn) {
+        e.stopPropagation();
+        addTrackToPlaylistPrompt(plAddBtn.dataset.ytPlAdd, plAddBtn.dataset.ytTitle || '');
+        return;
+      }
+
       const likeBtn = e.target.closest('[data-yt-like]');
       if (likeBtn) {
         e.stopPropagation();
@@ -1665,7 +1769,8 @@
       if (btn) setSearchKind(btn.dataset.ytKind);
     });
 
-    // Library actions (read-only)
+    // Library actions
+    $('yt-playlist-new')?.addEventListener('click', () => createPlaylistPrompt());
     $('yt-library-refresh')?.addEventListener('click', () => { libraryLoaded = false; loadLibrary(true); });
     $('yt-account-login')?.addEventListener('click', () => setSection('account'));
     $('yt-library-filters')?.addEventListener('click', e => {

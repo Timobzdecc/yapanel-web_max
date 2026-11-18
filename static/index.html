@@ -1877,6 +1877,7 @@
           <h2>Библиотека</h2>
           <div class="row" style="gap:8px">
             <span class="badge" id="yt-library-badge">не подключён</span>
+            <button type="button" class="btn sm" id="yt-playlist-new" hidden>+ Плейлист</button>
             <button type="button" class="btn sm" id="yt-library-refresh">↻ Обновить</button>
             <button type="button" class="btn sm primary" id="yt-account-login">Подключить аккаунт</button>
           </div>
@@ -2034,6 +2035,7 @@
               <h2 id="pl-q-title">Очередь</h2>
               <div class="row" style="gap:8px">
                 <label class="row" id="pl-autoradio-wrap" style="gap:6px;font-size:12.5px" hidden><input type="checkbox" class="switch" id="pl-autoradio"><span>Авто-радио</span></label>
+                <button type="button" class="btn sm" id="pl-q-save-yt" title="Сохранить очередь как плейлист YouTube Music" hidden>В плейлист</button>
                 <button type="button" class="btn sm" id="pl-q-clear" hidden>Очистить</button>
                 <span class="meta" id="pl-q-count"></span>
               </div>
@@ -3005,8 +3007,8 @@
 
 <script src="static/vendor/qrcode.js"></script>
 <script src="static/anim-presets.js?v=0.3.11"></script>
-<script src="static/app.js?v=0.3.30"></script>
-<script src="static/extmusic.js?v=0.3.32"></script>
+<script src="static/app.js?v=0.4.4"></script>
+<script src="static/extmusic.js?v=0.4.4"></script>
 <script type="module">
 import { bindVoiceInput } from './static/voice-input.js';
 import { startAsciiBackground } from './static/ascii-background.js';

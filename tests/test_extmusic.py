@@ -1261,3 +1261,187 @@ def test_server_music_bridge_controls_extras_artist_and_non_queue_play(tmp_path,
     finally:
         svc.current = None
         svc.stop()
+
+
+def test_yt_resolve_artist_id_caches_and_backfills_music_info(tmp_path, monkeypatch):
+    import server
+    from extmusic import ytmusic
+
+    panel = object.__new__(server.Panel)
+    panel.auth = type("Auth", (), {"music_token": "", "info": staticmethod(lambda: {"logged_in": False})})()
+    panel.glagol = type("Glagol", (), {"ws": None, "state": {}, "info": staticmethod(lambda: {"connected": False, "state": {}})})()
+    panel.ymusic = type("YM", (), {})()
+    svc = _make_gst_test_service(tmp_path, monkeypatch, panel=panel)
+    panel._extmusic_service = svc
+
+    next_calls = []
+    search_calls = []
+
+    def fake_next_info(vid):
+        next_calls.append(vid)
+        if vid == "OYjZK_6i37M":
+            return {"artist_id": "UCAekf1Wstvqk5LeNNHuMlDg", "artist": "Godsmack", "album_id": "", "album": "Faceless"}
+        return {}
+
+    def fake_find_artist(artist="", title=""):
+        search_calls.append((artist, title))
+        if artist == "Disturbed":
+            return {"artist_id": "UCdisturbed", "artist": "Disturbed"}
+        return {}
+
+    monkeypatch.setattr(ytmusic, "track_artist_info", fake_next_info)
+    monkeypatch.setattr(ytmusic, "find_artist_id", fake_find_artist)
+    monkeypatch.setattr(svc, "yt_track_liked", lambda vid: False)
+
+    try:
+        # 1. Track played from OAuth personal mix has NO artist_id initially
+        mix_track = {
+            "source": "yt",
+            "id": "OYjZK_6i37M",
+            "title": "I Stand Alone",
+            "artist": "Godsmack",
+            "duration": 245,
+        }
+        svc.play(mix_track, [mix_track])
+        info = panel.music_info("ext:yt:OYjZK_6i37M")
+        assert info["artistList"] == [{"id": "ext:yt:UCAekf1Wstvqk5LeNNHuMlDg", "name": "Godsmack"}]
+        assert next_calls == ["OYjZK_6i37M"]
+        # Backfilled into active current track and cache so second lookup hits 0 network calls
+        assert svc.current["artist_id"] == "UCAekf1Wstvqk5LeNNHuMlDg"
+        info2 = panel.music_info("ext:yt:OYjZK_6i37M")
+        assert info2["artistList"][0]["id"] == "ext:yt:UCAekf1Wstvqk5LeNNHuMlDg"
+        assert next_calls == ["OYjZK_6i37M"]
+        # Same artist on synthetic native track reuses cached art:godsmack without network calls
+        assert svc.yt_resolve_artist_id("na000000000000001", artist="Godsmack", title="Awake") == "UCAekf1Wstvqk5LeNNHuMlDg"
+        assert search_calls == []
+
+        # 2. Uncached synthetic native MediaSession track skips track_artist_info and resolves by artist name
+        nat_aid = svc.yt_resolve_artist_id("n1234567890abcdef", artist="Disturbed", title="Stupify")
+        assert nat_aid == "UCdisturbed"
+        assert next_calls == ["OYjZK_6i37M"]
+        assert search_calls == [("Disturbed", "Stupify")]
+        # Second search for same artist uses positive artist cache
+        assert svc.yt_resolve_artist_id("nf000000000000001", artist="Disturbed", title="Voices") == "UCdisturbed"
+        assert len(search_calls) == 1
+    finally:
+        svc.current = None
+        svc.stop()
+
+
+def test_v044_synced_lyrics_clickable_album_disk_cache_failover_and_playlists(tmp_path, monkeypatch):
+    import server
+    from extmusic import gstbridge, ytmusic
+
+    class SyncStubYMusic:
+        def __init__(self, synced=True):
+            self.synced = synced
+
+        def lyrics_by_name(self, title, artist, album=None, duration=0):
+            if self.synced:
+                return {"sync": [[1.5, "Sync line 1"]], "text": "Sync line 1", "source": "LRCLIB"}
+            return {"sync": None, "text": None}
+
+    panel = object.__new__(server.Panel)
+    panel.auth = type("Auth", (), {"music_token": "", "info": staticmethod(lambda: {"logged_in": False})})()
+    panel.glagol = type("Glagol", (), {"ws": None, "state": {}, "info": staticmethod(lambda: {"connected": False, "state": {}})})()
+    panel.ymusic = SyncStubYMusic(synced=True)
+    svc = _make_gst_test_service(tmp_path, monkeypatch, panel=panel)
+    panel._extmusic_service = svc
+
+    try:
+        # 1. Plain YT lyrics upgrades to LRCLIB synced karaoke when LRCLIB has timestamps,
+        #    and falls back to YT plain text when LRCLIB has no sync.
+        t_al = {
+            "source": "yt",
+            "id": "OYjZK_6i37M",
+            "title": "I Stand Alone",
+            "artist": "Godsmack",
+            "artist_id": "UCAekf1Wstvqk5LeNNHuMlDg",
+            "album": "Faceless",
+            "album_id": "MPREb_faceless",
+            "duration": 245,
+        }
+        svc.play(t_al, [t_al])
+        monkeypatch.setattr(ytmusic, "lyrics", lambda vid: {"sync": None, "text": "Plain YT", "source": "YouTube Music"})
+        ly_up = svc.yt_lyrics("OYjZK_6i37M")
+        assert ly_up["source"] == "LRCLIB" and ly_up["sync"] == [[1.5, "Sync line 1"]]
+
+        panel.ymusic.synced = False
+        ly_keep = svc.yt_lyrics("OYjZK_6i37M")
+        assert ly_keep == {"sync": None, "text": "Plain YT", "source": "YouTube Music"}
+
+        # 2. Clickable album.id is propagated in _ext_track_payload & store.recent_yt
+        info = panel.music_info("ext:yt:OYjZK_6i37M")
+        assert info["album"] == {"id": "ext:yt:MPREb_faceless", "title": "Faceless"}
+        assert svc.store.recent_yt()[0]["album_id"] == "MPREb_faceless"
+
+        # 3. Persistent disk artist cache survives a brand-new ExtMusicService instance
+        monkeypatch.setattr(
+            ytmusic,
+            "find_artist_id",
+            lambda artist="", title="": {"artist_id": "UCPersist123", "artist": "Korn"},
+        )
+        assert svc.yt_resolve_artist_id("n_korn_1", artist="Korn", title="Blind") == "UCPersist123"
+        assert svc.store.artist_cache().get("art:korn") == "UCPersist123"
+
+        svc2 = _make_gst_test_service(tmp_path, monkeypatch, panel=panel)
+        try:
+            monkeypatch.setattr(
+                ytmusic,
+                "find_artist_id",
+                lambda artist="", title="": (_ for _ in ()).throw(AssertionError("should hit persistent disk cache")),
+            )
+            assert svc2.yt_resolve_artist_id("n_korn_2", artist="Korn", title="Freak") == "UCPersist123"
+        finally:
+            svc2.stop()
+
+        # 4. GstBridge _open_upstream promotes backup URL on primary timeout
+        monkeypatch.setattr(gstbridge, "PROXY_PORT", 0)
+        monkeypatch.setattr(gstbridge, "OVERRIDE_PATH", str(tmp_path / "ov.txt"))
+        br = gstbridge.GstBridge(panel)
+        try:
+            br._last_url = "https://primary.fail/audio"
+            br._fallback_urls = ["https://backup.ok/audio"]
+            tried = []
+
+            class FakeResp:
+                headers = {"Content-Range": "bytes 0-3/10"}
+
+                def close(self):
+                    pass
+
+            def fake_open_range(url, start, end=None, attempts=12, timeout=2.5, max_elapsed=6.0):
+                tried.append(url)
+                if "primary.fail" in url:
+                    raise TimeoutError("handshake timed out")
+                return FakeResp()
+
+            monkeypatch.setattr(gstbridge, "_open_range", fake_open_range)
+            resp = gstbridge._StreamRequestHandler._open_upstream(br, "https://primary.fail/audio", 0, 3)
+            assert isinstance(resp, FakeResp)
+            assert tried == ["https://primary.fail/audio", "https://backup.ok/audio"]
+            assert br._last_url == "https://backup.ok/audio"
+        finally:
+            br.close()
+
+        # 5. yt_playlist_create from_queue and yt_playlist_add
+        svc.queue = [t_al]
+        monkeypatch.setattr(
+            svc.yt_account,
+            "create_playlist",
+            lambda title, video_ids=None, description="", privacy="PRIVATE": {
+                "ok": True, "playlist_id": "PLq1", "browse_id": "VLPLq1", "title": title, "added": len(video_ids or [])
+            },
+        )
+        monkeypatch.setattr(
+            svc.yt_account,
+            "add_to_playlist",
+            lambda pid, vids: {"ok": True, "playlist_id": pid, "browse_id": f"VL{pid}", "added": 1, "video_ids": vids},
+        )
+        pl_res = svc.yt_playlist_create("Очередь", from_queue=True)
+        assert pl_res["playlist_id"] == "PLq1" and pl_res["added"] == 1
+        add_res = svc.yt_playlist_add("PLq1", ["OYjZK_6i37M"])
+        assert add_res["ok"] is True and add_res["added"] == 1
+    finally:
+        svc.current = None
+        svc.stop()

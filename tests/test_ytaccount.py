@@ -4,7 +4,7 @@ import urllib.error
 import pytest
 
 from extmusic.store import ExtMusicStore
-from extmusic.ytaccount import YTAccount, YTAccountError, _tracks, _two_column
+from extmusic.ytaccount import YTAccount, YTAccountError, _tracks, _two_column, _two_row
 from extmusic.ytmusic import YTMusicError
 
 
@@ -1039,6 +1039,137 @@ def test_home_resolves_core_personal_mixes_even_when_topics_omits_vlrdtmak_shelf
     titles = [m["title"] for m in res["mixes"]]
     assert titles[:3] == ["Мой супермикс", "Понравившаяся музыка", "Мой микс 1"]
     assert all(not m["browse_id"].startswith("VLRDCLAK") for m in res["mixes"])
+
+
+def test_ytaccount_track_parsers_extract_artist_id_and_album():
+    def artist_run(name, bid):
+        return {
+            "text": name,
+            "navigationEndpoint": {
+                "browseEndpoint": {
+                    "browseId": bid,
+                    "browseEndpointContextSupportedConfigs": {
+                        "browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}
+                    },
+                }
+            },
+        }
+
+    def album_run(name, bid):
+        return {
+            "text": name,
+            "navigationEndpoint": {
+                "browseEndpoint": {
+                    "browseId": bid,
+                    "browseEndpointContextSupportedConfigs": {
+                        "browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}
+                    },
+                }
+            },
+        }
+
+    payload = {
+        "contents": [
+            {
+                "musicTwoColumnItemRenderer": {
+                    "title": {"runs": [{"text": "I Stand Alone", "navigationEndpoint": {"watchEndpoint": {"videoId": "vid_tc1"}}}]},
+                    "subtitle": {"runs": [artist_run("Godsmack", "UCgod"), {"text": " • "}, album_run("Faceless", "MPREb_face"), {"text": " • 4:05"}]},
+                }
+            },
+            {
+                "musicTwoRowItemRenderer": {
+                    "title": {"runs": [{"text": "In the End"}]},
+                    "navigationEndpoint": {"watchEndpoint": {"videoId": "vid_tr1"}},
+                    "subtitle": {"runs": [artist_run("Linkin Park", "UClp"), {"text": " • 3:36"}]},
+                }
+            },
+            {
+                "musicResponsiveListItemRenderer": {
+                    "playlistItemData": {"videoId": "vid_resp1"},
+                    "flexColumns": [
+                        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Down With The Sickness"}]}}},
+                        {
+                            "musicResponsiveListItemFlexColumnRenderer": {
+                                "text": {
+                                    "runs": [
+                                        artist_run("Disturbed", "UCdist"),
+                                        {"text": " • "},
+                                        album_run("The Sickness", "MPREb_sick"),
+                                        {"text": " • 4:38"},
+                                    ]
+                                }
+                            }
+                        },
+                    ],
+                }
+            },
+        ]
+    }
+    tracks = _tracks(payload)
+    assert len(tracks) == 2
+    by_id = {t["video_id"]: t for t in tracks}
+    assert by_id["vid_tc1"]["artist_id"] == "UCgod"
+    assert by_id["vid_tc1"]["album"] == "Faceless"
+    assert by_id["vid_resp1"]["artist_id"] == "UCdist"
+    assert by_id["vid_resp1"]["album_id"] == "MPREb_sick"
+
+    two_row = _two_row(payload["contents"][1]["musicTwoRowItemRenderer"])
+    assert two_row is not None and two_row["artist_id"] == "UClp"
+
+
+def test_ytaccount_create_playlist_and_add_to_playlist(tmp_path, monkeypatch):
+    store = ExtMusicStore(tmp_path / "c.json")
+    store.save_oauth({"access_token": "tok", "expires_at": 9999999999})
+    acc = YTAccount(store=store)
+    posts = []
+
+    def fake_post(body, retry=True, endpoint="browse"):
+        posts.append((endpoint, body))
+        if endpoint == "playlist/create":
+            return {"playlistId": "PLnew12345"}
+        if endpoint == "browse/edit_playlist":
+            return {"status": "STATUS_SUCCEEDED"}
+        if endpoint == "like/like":
+            return {"actions": []}
+        return {}
+
+    monkeypatch.setattr(acc, "_post", fake_post)
+
+    created = acc.create_playlist("Моя подборка", video_ids=["ext:yt:abc12345678", "def12345678", "abc12345678"])
+    assert created == {
+        "ok": True,
+        "playlist_id": "PLnew12345",
+        "browse_id": "VLPLnew12345",
+        "title": "Моя подборка",
+        "added": 2,
+    }
+    assert posts[0][0] == "playlist/create"
+    assert posts[0][1]["videoIds"] == ["abc12345678", "def12345678"]
+
+    added = acc.add_to_playlist("VLPLnew12345", ["ext:yt:xyz12345678"])
+    assert added == {
+        "ok": True,
+        "playlist_id": "PLnew12345",
+        "browse_id": "VLPLnew12345",
+        "added": 1,
+        "video_ids": ["xyz12345678"],
+    }
+    assert posts[1] == (
+        "browse/edit_playlist",
+        {
+            "playlistId": "PLnew12345",
+            "actions": [{"addedVideoId": "xyz12345678", "action": "ACTION_ADD_VIDEO"}],
+        },
+    )
+
+    liked_pl = acc.add_to_playlist("VLLM", "xyz12345678")
+    assert liked_pl["playlist_id"] == "LM"
+    assert posts[2][0] == "like/like"
+
+    with pytest.raises(YTAccountError):
+        acc.create_playlist("   ")
+    with pytest.raises(YTAccountError):
+        acc.add_to_playlist("../bad", ["abc12345678"])
 
 
 

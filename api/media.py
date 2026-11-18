@@ -34,12 +34,14 @@ def _ext_artist_track(panel, track):
     cover = track.get("thumb") or ""
     artist_id = str(track.get("artist_id") or "").strip()
     aid = (artist_id if artist_id.startswith("ext:yt:") else f"ext:yt:{artist_id}") if artist_id else ""
+    album_id = str(track.get("album_id") or "").strip()
+    alid = (album_id if album_id.startswith("ext:yt:") else f"ext:yt:{album_id}") if album_id else ""
     return {
         "id": f"ext:yt:{vid}",
         "title": track.get("title") or "Без названия",
         "artists": artist,
         "artistList": [{"id": aid, "name": artist}],
-        "album": {"id": "", "title": album},
+        "album": {"id": alid, "title": album},
         "durationMs": duration,
         "cover": cover,
         "coverBig": cover,
@@ -50,11 +52,23 @@ def _ext_artist_track(panel, track):
 
 def _music_artist(req):
     raw_id = str(req.q("id", "") or "").strip()
-    if raw_id.startswith("ext:yt:"):
-        browse_id = raw_id[7:].strip()
+    source = str(req.q("source", "") or "").strip().lower()
+    track_id = str(req.q("track_id", "") or "").strip()
+    artist_name = str(req.q("artist", "") or "").strip()
+    track_title = str(req.q("title", "") or "").strip()
+    if raw_id.startswith("ext:yt:") or source == "yt" or track_id.startswith("ext:yt:"):
+        browse_id = raw_id[7:].strip() if raw_id.startswith("ext:yt:") else raw_id
+        svc = get_service(req.panel)
         if not browse_id:
-            raise ValueError("Не указан идентификатор исполнителя")
-        col = get_service(req.panel).yt_artist(browse_id)
+            if not (track_id or artist_name or track_title):
+                raise ValueError("Не указан идентификатор исполнителя")
+            resolver = getattr(svc, "yt_resolve_artist_id", None)
+            if callable(resolver):
+                vid = track_id[7:].strip() if track_id.startswith("ext:yt:") else track_id
+                browse_id = resolver(video_id=vid, artist=artist_name, title=track_title)
+            if not browse_id:
+                return Response({"error": "Исполнитель не найден в YouTube Music"}, status=404)
+        col = svc.yt_artist(browse_id)
         bid = str(col.get("browse_id") or browse_id)
         tracks = [t for t in (col.get("tracks") or []) if isinstance(t, dict)]
         albums = [a for a in (col.get("albums") or []) if isinstance(a, dict)]

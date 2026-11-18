@@ -1344,3 +1344,211 @@ def test_radio_play_song_radio_25_tracks_and_personal_mix_browse_id(tmp_path, mo
     res_mix_radio = service.radio_play(browse_id="VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY")
     assert len(res_mix_radio["queue"]) == 25
     assert res_mix_radio["queue"][0]["id"].startswith("sm0_r") or res_mix_radio["queue"][0]["id"] == "sm0"
+
+
+def test_track_artist_info_and_find_artist_id(monkeypatch):
+    calls = []
+
+    def fake_post(body, endpoint="search"):
+        calls.append((endpoint, body))
+        if endpoint == "next":
+            vid = body.get("videoId")
+            if vid == "OYjZK_6i37M":
+                return {
+                    "contents": {
+                        "singleColumnMusicWatchNextResultsRenderer": {
+                            "playlist": {
+                                "playlistPanelRenderer": {
+                                    "contents": [
+                                        {
+                                            "playlistPanelVideoRenderer": {
+                                                "videoId": "OYjZK_6i37M",
+                                                "title": {"runs": [{"text": "I Stand Alone"}]},
+                                                "longBylineText": {
+                                                    "runs": [
+                                                        {
+                                                            "text": "Godsmack",
+                                                            "navigationEndpoint": {
+                                                                "browseEndpoint": {
+                                                                    "browseId": "UCAekf1Wstvqk5LeNNHuMlDg",
+                                                                    "browseEndpointContextSupportedConfigs": {
+                                                                        "browseEndpointContextMusicConfig": {
+                                                                            "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                                                        }
+                                                                    },
+                                                                }
+                                                            },
+                                                        },
+                                                        {"text": " • "},
+                                                        {
+                                                            "text": "Faceless",
+                                                            "navigationEndpoint": {
+                                                                "browseEndpoint": {
+                                                                    "browseId": "MPREb_faceless",
+                                                                    "browseEndpointContextSupportedConfigs": {
+                                                                        "browseEndpointContextMusicConfig": {
+                                                                            "pageType": "MUSIC_PAGE_TYPE_ALBUM"
+                                                                        }
+                                                                    },
+                                                                }
+                                                            },
+                                                        },
+                                                    ]
+                                                },
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            return {}
+        if endpoint == "search":
+            q = body.get("query", "")
+            params = body.get("params", "")
+            if params == ytmusic.SEARCH_PARAMS["artists"]:
+                if q == "Miyagi & Andy Panda":
+                    return {"contents": []}
+                if q == "Miyagi":
+                    return {
+                        "contents": [
+                            {
+                                "musicResponsiveListItemRenderer": {
+                                    "navigationEndpoint": {
+                                        "browseEndpoint": {
+                                            "browseId": "UCmiyagi",
+                                            "browseEndpointContextSupportedConfigs": {
+                                                "browseEndpointContextMusicConfig": {
+                                                    "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                                }
+                                            },
+                                        }
+                                    },
+                                    "flexColumns": [
+                                        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Miyagi"}]}}}
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                if q == "Linkin Park":
+                    return {
+                        "contents": [
+                            {
+                                "musicResponsiveListItemRenderer": {
+                                    "navigationEndpoint": {
+                                        "browseEndpoint": {
+                                            "browseId": "UCxgN32UVVztKAQd2HkXzBtw",
+                                            "browseEndpointContextSupportedConfigs": {
+                                                "browseEndpointContextMusicConfig": {
+                                                    "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                                }
+                                            },
+                                        }
+                                    },
+                                    "flexColumns": [
+                                        {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Linkin Park"}]}}}
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+            if params == ytmusic.SEARCH_PARAMS["songs"] and "Numb" in q:
+                return {
+                    "contents": [
+                        {
+                            "musicResponsiveListItemRenderer": {
+                                "playlistItemData": {"videoId": "kXYiU_JCYtU"},
+                                "flexColumns": [
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Numb"}]}}},
+                                    {
+                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                            "text": {
+                                                "runs": [
+                                                    {
+                                                        "text": "Linkin Park",
+                                                        "navigationEndpoint": {
+                                                            "browseEndpoint": {
+                                                                "browseId": "UCxgN32UVVztKAQd2HkXzBtw",
+                                                                "browseEndpointContextSupportedConfigs": {
+                                                                    "browseEndpointContextMusicConfig": {
+                                                                        "pageType": "MUSIC_PAGE_TYPE_ARTIST"
+                                                                    }
+                                                                },
+                                                            }
+                                                        },
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                }
+        return {}
+
+    monkeypatch.setattr(ytmusic, "_post", fake_post)
+
+    info = ytmusic.track_artist_info("OYjZK_6i37M")
+    assert info["artist_id"] == "UCAekf1Wstvqk5LeNNHuMlDg"
+    assert info["artist"] == "Godsmack"
+    assert info["album_id"] == "MPREb_faceless"
+    assert info["album"] == "Faceless"
+
+    found_topic = ytmusic.find_artist_id(artist="Linkin Park - Topic", title="In the End")
+    assert found_topic == {"artist_id": "UCxgN32UVVztKAQd2HkXzBtw", "artist": "Linkin Park"}
+
+    found_split = ytmusic.find_artist_id(artist="Miyagi & Andy Panda", title="Track")
+    assert found_split == {"artist_id": "UCmiyagi", "artist": "Miyagi"}
+
+    found_from_title = ytmusic.find_artist_id(artist="YouTube Music", title="Numb (Official Video)")
+    assert found_from_title == {"artist_id": "UCxgN32UVVztKAQd2HkXzBtw", "artist": "Linkin Park"}
+
+
+def test_lyrics_extracts_timed_lyrics_timestamps(monkeypatch):
+    def fake_post(body, endpoint="browse"):
+        if endpoint == "next":
+            return {
+                "contents": {
+                    "singleColumnMusicWatchNextResultsRenderer": {
+                        "tabbedRenderer": {
+                            "watchNextTabbedResultsRenderer": {
+                                "tabs": [
+                                    {"tabRenderer": {"endpoint": {"browseEndpoint": {"browseId": "MPLYt_timed1"}}}},
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        if endpoint == "browse" and body.get("browseId") == "MPLYt_timed1":
+            return {
+                "contents": {
+                    "sectionListRenderer": {
+                        "contents": [
+                            {
+                                "musicTimedLyricsRenderer": {
+                                    "timedLyricsData": [
+                                        {"lyricLine": "", "cueRange": {"startTimeMilliseconds": "500"}},
+                                        {"lyricLine": "First line", "cueRange": {"startTimeMilliseconds": "12340"}},
+                                        {"lyricLine": "Second line", "cueRange": {"startTimeMilliseconds": "18500"}},
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        return {}
+
+    monkeypatch.setattr(ytmusic, "_post", fake_post)
+    res = ytmusic.lyrics("vidTimed123")
+    assert res["source"] == "YouTube Music"
+    assert res["sync"] == [[12.34, "First line"], [18.5, "Second line"]]
+    assert "First line\nSecond line" in res["text"]
+
+    assert ytmusic.clean_track_meta("Sting - Fields Of Gold", "StingVEVO") == ("Fields Of Gold", "Sting")
+    assert ytmusic.clean_track_meta("Linkin Park - Numb (Official Video)", "LinkinParkVEVO") == ("Numb", "Linkin Park")

@@ -29,9 +29,9 @@ assert.equal(manifest.scope,'./');assert.equal(manifest.start_url,'./#overview')
 // Exercise real service worker handlers without a browser or any network.
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
 const swSource=await readFile(new URL('../static/sw.js',import.meta.url),'utf8');
-assert(swSource.includes("panel-v18:"),'service worker must use panel-v18 namespace');
-assert(swSource.includes('static/app.js?v=0.3.30'),'sw.js must preload app.js v=0.3.30');
-assert(swSource.includes('static/extmusic.js?v=0.3.32'),'sw.js must preload extmusic.js v=0.3.32');
+assert(swSource.includes("panel-v20:"),'service worker must use panel-v20 namespace');
+assert(swSource.includes('static/app.js?v=0.4.4'),'sw.js must preload app.js v=0.4.4');
+assert(swSource.includes('static/extmusic.js?v=0.4.4'),'sw.js must preload extmusic.js v=0.4.4');
 for(const script of [...swSource.matchAll(/static\/[a-z0-9_.-]+\.js\?v=[^'"]+/g)].map(m=>m[0])){
   assert(html.includes(script),'index.html and sw.js script version must match: '+script);
 }
@@ -52,7 +52,7 @@ for(const path of ['/','/speaker/room-a/','/speaker/room-b/']){
     caches:{
       open:async()=>({put:async(key,response)=>puts.push({key,response})}),
       match:async()=>null,
-      keys:async()=>['panel-v17:'+new URL(path,base).pathname+':shell','panel-v18:'+new URL(path,base).pathname+':shell'],
+      keys:async()=>['panel-v19:'+new URL(path,base).pathname+':shell','panel-v20:'+new URL(path,base).pathname+':shell'],
       delete:async key=>deleted.push(key),
     },
     Response:{error:()=>({error:true})},
@@ -74,7 +74,7 @@ for(const path of ['/','/speaker/room-a/','/speaker/room-b/']){
   assert.notEqual(puts.at(-1).key,base);
   // Обновление namespace удаляет старый кэш.
   let activation;handlers.activate({waitUntil:p=>activation=p});await activation;
-  assert(deleted.some(key=>key.startsWith('panel-v17:')),'old panel cache is deleted');
-  assert(!deleted.some(key=>key.startsWith('panel-v18:')),'current cache is kept');
+  assert(deleted.some(key=>key.startsWith('panel-v19:')),'old panel cache is deleted');
+  assert(!deleted.some(key=>key.startsWith('panel-v20:')),'current cache is kept');
 }
 console.log('Page context, scoped storage, WebSocket, manifest, shell-only navigation cache and cache version cases passed');
