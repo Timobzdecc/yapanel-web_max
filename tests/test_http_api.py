@@ -347,6 +347,10 @@ class HttpApiTests(unittest.TestCase):
                     "similar": [{"kind": "artist", "browse_id": "UCsim", "title": "Muse", "thumb": "https://lh3.googleusercontent.com/m"}],
                 }
 
+            def yt_resolve_artist_id(self, video_id="", artist="", title=""):
+                self.calls.append(("yt_resolve_artist_id", video_id, artist, title))
+                return "UCresolved" if artist == "Godsmack" or video_id == "OYjZK_6i37M" else ""
+
             def yt_like(self, video_id, on=True):
                 self.calls.append(("yt_like", video_id, on))
                 return {"ok": True, "liked": bool(on), "video_id": video_id}
@@ -627,6 +631,22 @@ class HttpApiTests(unittest.TestCase):
             self.assertEqual(art["popular"][0]["durationMs"], 185000)
             self.assertEqual(art["similar"][0]["id"], "ext:yt:UCsim")
             self.assertEqual(login_calls, [])
+
+            # Fallback resolution when id is empty for YouTube Music tracks
+            st, body, _ = self.request(
+                "GET",
+                "/api/music/artist?id=&source=yt&track_id=ext%3Ayt%3AOYjZK_6i37M&artist=Godsmack&title=I%20Stand%20Alone",
+            )
+            self.assertEqual(st, 200)
+            res_art = self.json((st, body))
+            self.assertEqual(res_art["id"], "ext:yt:UCresolved")
+            self.assertEqual(svc.calls[-2:], [
+                ("yt_resolve_artist_id", "OYjZK_6i37M", "Godsmack", "I Stand Alone"),
+                ("yt_artist", "UCresolved"),
+            ])
+
+            st, _, _ = self.request("GET", "/api/music/artist?id=&source=yt&artist=UnknownXYZ")
+            self.assertEqual(st, 404)
 
             st, body, _ = self.request("GET", "/api/music/artist?id=999")
             self.assertEqual(st, 200)

@@ -3833,6 +3833,7 @@ function renderMusic() {
     if ($('#pl-ext-stop')) $('#pl-ext-stop').hidden = true;
     if ($('#pl-m-ext-stop')) $('#pl-m-ext-stop').hidden = true;
     if ($('#pl-autoradio-wrap')) $('#pl-autoradio-wrap').hidden = true;
+    if ($('#pl-q-save-yt')) { $('#pl-q-save-yt').hidden = true; $('#pl-q-save-yt').disabled = true; }
     if ($('#pl-q-clear')) { $('#pl-q-clear').hidden = true; $('#pl-q-clear').disabled = true; }
     if (!mu.qr && !$('#tab-overview').hidden) startQr();
     return;
@@ -3956,18 +3957,28 @@ function renderPlayerTab() {
     for (const m of [t.album?.year, t.album?.genre, t.album?.label, t.album?.trackCount && `${t.album.trackCount} треков в альбоме`, t.explicit && '18+'])
       if (m) meta.push(`<span class="badge">${esc(m)}</span>`);
   } else if (t && isExt && t.album?.title && t.album.title !== extLabel) {
-    meta.push(`<span class="badge">${esc(`Альбом «${t.album.title}»`)}</span>`);
+    const rawAlbId = String(t.album.id || '');
+    const albBid = rawAlbId.startsWith('ext:yt:') ? rawAlbId.slice(7).trim() : '';
+    meta.push(albBid
+      ? `<a class="badge yt-nav" href="#yt?album=${encodeURIComponent(albBid)}">${esc(`Альбом «${t.album.title}»`)}</a>`
+      : `<span class="badge">${esc(`Альбом «${t.album.title}»`)}</span>`);
   }
   setHtml($('#pl-meta'), meta.join(''));
   if ($('#pl-autoradio-wrap')) $('#pl-autoradio-wrap').hidden = !isYtNonNative;
   if ($('#pl-autoradio') && !$('#pl-autoradio').disabled) {
     $('#pl-autoradio').checked = Boolean(p?.autoplayRadio ?? mu.info?.extmusic?.autoplay_radio);
   }
-  if ($('#pl-q-clear')) {
+  if ($('#pl-q-clear') || $('#pl-q-save-yt')) {
     const qTracks = Array.isArray(q?.tracks) ? q.tracks : [];
     const qCur = q?.current;
-    $('#pl-q-clear').hidden = !isYtNonNative;
-    $('#pl-q-clear').disabled = !isYtNonNative || qTracks.length <= (qCur == null ? 0 : qCur + 1);
+    if ($('#pl-q-save-yt')) {
+      $('#pl-q-save-yt').hidden = !isYtNonNative;
+      $('#pl-q-save-yt').disabled = !isYtNonNative || !qTracks.length;
+    }
+    if ($('#pl-q-clear')) {
+      $('#pl-q-clear').hidden = !isYtNonNative;
+      $('#pl-q-clear').disabled = !isYtNonNative || qTracks.length <= (qCur == null ? 0 : qCur + 1);
+    }
   }
   if (isExt && mu.info?.extmusic?.current && mu.extras.for === mu.trackId) {
     const liveQ = extQueueData(mu.info.extmusic, extLabel);
@@ -4323,6 +4334,10 @@ function renderPlayerQueue(qVal, { scrollToCur = false } = {}) {
   if ($('#pl-autoradio') && !$('#pl-autoradio').disabled) {
     $('#pl-autoradio').checked = Boolean(p?.autoplayRadio ?? mu.info?.extmusic?.autoplay_radio);
   }
+  if ($('#pl-q-save-yt')) {
+    $('#pl-q-save-yt').hidden = !isYtNonNative;
+    $('#pl-q-save-yt').disabled = !isYtNonNative || !tracks.length;
+  }
   if ($('#pl-q-clear')) {
     $('#pl-q-clear').hidden = !isYtNonNative;
     $('#pl-q-clear').disabled = !isYtNonNative || tracks.length <= (cur == null ? 0 : cur + 1);
@@ -4396,6 +4411,7 @@ async function loadPlayerExtras() {
     renderPlayerQueue(q.value, { scrollToCur: true });
   } else {
     if ($('#pl-autoradio-wrap')) $('#pl-autoradio-wrap').hidden = true;
+    if ($('#pl-q-save-yt')) { $('#pl-q-save-yt').hidden = true; $('#pl-q-save-yt').disabled = true; }
     if ($('#pl-q-clear')) { $('#pl-q-clear').hidden = true; $('#pl-q-clear').disabled = true; }
     setListHtml($('#pl-queue'), `<div class="empty">${esc(q.reason?.message || 'Не удалось')}</div>`);
   }
@@ -4406,13 +4422,32 @@ async function loadPlayerExtras() {
   const waitTrack = async () => { for (let k = 0; k < 20 && !mu.track && mu.trackId === id; k++) await new Promise(r => setTimeout(r, 300)); };
   await waitTrack();
   if (mu.trackId !== id) return;
+  const curP = muPlayer();
+  const artistName = String(mu.track?.artists || curP?.subtitle || '').trim();
+  const trackTitle = String(mu.track?.title || curP?.title || '').trim();
   const aid = mu.track?.artistList?.[0]?.id;
-  if (!aid) { $('#pl-artist').innerHTML = '<div class="empty">—</div>'; return; }
+  if (!aid && !isYtExt) { $('#pl-artist').innerHTML = '<div class="empty">—</div>'; return; }
+  if (isYtExt && !aid && !id && (!artistName || artistName === 'YouTube Music') && !trackTitle) {
+    $('#pl-artist').innerHTML = '<div class="empty">—</div>';
+    return;
+  }
+  let artistUrl = '/api/music/artist?id=' + encodeURIComponent(aid || '');
+  if (isYtExt && !aid) {
+    const qs = new URLSearchParams({ source: 'yt', track_id: id });
+    if (artistName && artistName !== 'YouTube Music') qs.set('artist', artistName);
+    if (trackTitle) qs.set('title', trackTitle);
+    artistUrl = '/api/music/artist?' + qs.toString();
+  }
   try {
-    const a = await api('/api/music/artist?id=' + encodeURIComponent(aid));
+    const a = await api(artistUrl);
     if (mu.trackId !== id) return;
-    if (a.source === 'yt' || String(aid).startsWith('ext:yt:')) {
-      const bid = a.browse_id || (String(a.id || '').startsWith('ext:yt:') ? String(a.id).slice(7) : String(aid).slice(7));
+    if (isYtExt && a?.id && mu.track && mu.track.id === id && !mu.track.artistList?.[0]?.id) {
+      mu.track.artistList = [{ id: a.id, name: mu.track.artistList?.[0]?.name || a.name || artistName || 'YouTube Music' }];
+      renderMusic();
+    }
+    if (a.source === 'yt' || String(aid || a.id || '').startsWith('ext:yt:')) {
+      const rawAid = String(aid || a.id || '');
+      const bid = a.browse_id || (String(a.id || '').startsWith('ext:yt:') ? String(a.id).slice(7) : (rawAid.startsWith('ext:yt:') ? rawAid.slice(7) : ''));
       const artistHref = bid ? '#yt?artist=' + encodeURIComponent(bid) : '#yt';
       const artCover = safeImgUrl(a.cover ? proxyThumbUrl(a.cover) : '');
       $('#pl-artist').innerHTML = `<div class="artist-grid">
@@ -4426,7 +4461,7 @@ async function loadPlayerExtras() {
             const xBid = x.browse_id || (String(x.id || '').startsWith('ext:yt:') ? String(x.id).slice(7) : '');
             return xBid ? `<a class="yt-nav" href="#yt?artist=${encodeURIComponent(xBid)}">${esc(x.name)}</a>` : esc(x.name);
           }).join(', ')}</div>` : ''}
-          <div><a class="btn sm" href="${esc(artistHref)}">Открыть в YouTube Music</a></div>
+          <div><a class="btn sm yt-nav" href="${esc(artistHref)}">Открыть в YouTube Music</a></div>
           ${a.popular?.length ? `<b style="margin-top:6px">Популярное</b><div class="tlist">${a.popular.map(t => trackRow(t)).join('')}</div>` : ''}
         </div></div>`;
       return;
@@ -4510,6 +4545,20 @@ $('#pl-q-clear')?.addEventListener('click', e => act(e.currentTarget, async () =
   await api('/api/extmusic/queue/clear', {});
   await loadMusic();
 }, 'Предстоящие треки очищены'));
+$('#pl-q-save-yt')?.addEventListener('click', e => {
+  const tracks = Array.isArray(mu.extras?.queue?.tracks) ? mu.extras.queue.tracks : [];
+  if (!tracks.length) return;
+  const defName = String(mu.track?.title ? `Очередь · ${mu.track.title}` : 'Очередь из колонки').slice(0, 80);
+  const rawName = prompt('Название нового плейлиста YouTube Music:', defName);
+  const title = rawName ? rawName.trim() : '';
+  if (!title) return;
+  act(e.currentTarget, async () => {
+    const res = await api('/api/extmusic/yt/playlist/create', { title, from_queue: true });
+    window.ytInvalidateLibrary?.();
+    toast(`Плейлист «${res?.title || title}» создан (${res?.added || tracks.length} треков)`);
+    return res;
+  });
+});
 $('#pl-queue')?.addEventListener('click', e => {
   const del = e.target.closest('[data-q-del]');
   if (!del) return;

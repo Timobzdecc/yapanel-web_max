@@ -264,6 +264,43 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         return int(m.group(1)) if m else 0
 
     @staticmethod
+    def _open_upstream(
+        bridge: "GstBridge",
+        primary_url: str,
+        start: int,
+        end: Optional[int] = None,
+        attempts: int = 12,
+        timeout: float = 2.5,
+        max_elapsed: float = 6.0,
+    ):
+        try:
+            return _open_range(primary_url, start, end, attempts=attempts, timeout=timeout, max_elapsed=max_elapsed)
+        except urllib.error.HTTPError as first_err:
+            if first_err.code == 416:
+                raise
+            last_err: BaseException = first_err
+        except (OSError, TimeoutError, urllib.error.URLError, http.client.HTTPException) as first_err:
+            last_err = first_err
+
+        with bridge._lock:
+            backups = [u for u in (getattr(bridge, "_fallback_urls", None) or []) if u and u != primary_url]
+        for alt_url in backups:
+            try:
+                resp = _open_range(alt_url, start, end, attempts=4, timeout=timeout, max_elapsed=max_elapsed)
+                with bridge._lock:
+                    if bridge._last_url == primary_url:
+                        bridge._last_url = alt_url
+                        bridge._fallback_urls = [u for u in bridge._fallback_urls if u != alt_url]
+                return resp
+            except urllib.error.HTTPError as alt_err:
+                if alt_err.code == 416:
+                    raise
+                last_err = alt_err
+            except (OSError, TimeoutError, urllib.error.URLError, http.client.HTTPException) as alt_err:
+                last_err = alt_err
+        raise last_err
+
+    @staticmethod
     def _parse_upstream_sizes(resp: Any, start: int) -> Tuple[int, Optional[int]]:
         hdrs = getattr(resp, "headers", None) or {}
         cr = str(hdrs.get("Content-Range") or "")
@@ -401,7 +438,7 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if head_only and virtual_total == 0:
             try:
-                with _open_range(upstream_url, 0, 0, attempts=8, timeout=1.35, max_elapsed=3.5) as probe:
+                with self._open_upstream(bridge, upstream_url, 0, 0, attempts=8, timeout=2.5, max_elapsed=5.5) as probe:
                     probe_total, _ = self._parse_upstream_sizes(probe, 0)
                 if probe_total > 0:
                     virtual_total = probe_total
@@ -431,7 +468,9 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             upstream_start = cur_after if byte_off == 0 else byte_off + (cur_after - hdr_len)
             upstream_end = None if upstream_bytes_left is None else (upstream_start + upstream_bytes_left - 1)
             try:
-                upstream = _open_range(upstream_url, upstream_start, upstream_end, attempts=12, timeout=1.35, max_elapsed=3.5)
+                upstream = self._open_upstream(
+                    bridge, upstream_url, upstream_start, upstream_end, attempts=12, timeout=2.5, max_elapsed=6.0
+                )
             except urllib.error.HTTPError as err:
                 if err.code == 416:
                     self.send_response(416)
@@ -530,6 +569,7 @@ class GstBridge:
         self._last_title: str = ""
         self._last_artist: str = ""
         self._last_url: str = ""
+        self._fallback_urls: List[str] = []
         self._seek_offset_sec: float = 0.0
         self._seek_start_time: float = 0.0
         self._paused_pos: float = 0.0
@@ -706,15 +746,23 @@ class GstBridge:
             cur_url = self._last_url
             is_active = self._is_active
             done_evt = self._streamer_done
+            backups = [u for u in self._fallback_urls if u and u != url]
         try:
             if cur_url and cur_url != url:
                 return
-            try:
-                streamer = MP4Streamer(url)
-            except Exception as error:
-                print(f"[GST] Failed to parse MP4Streamer: {error}", flush=True)
-                return
-            if not getattr(streamer, "ready", False):
+            streamer = None
+            resolved_url = url
+            for cand in [url, *backups]:
+                try:
+                    cand_streamer = MP4Streamer(cand)
+                except Exception as error:
+                    print(f"[GST] Failed to parse MP4Streamer: {error}", flush=True)
+                    cand_streamer = None
+                if cand_streamer is not None and getattr(cand_streamer, "ready", False):
+                    streamer = cand_streamer
+                    resolved_url = cand
+                    break
+            if streamer is None or not getattr(streamer, "ready", False):
                 return
             with self._lock:
                 if self._stream_gen != gen:
@@ -723,6 +771,9 @@ class GstBridge:
                     # Never overwrite a healthy streamer already resolved by an urgent seek()
                     if not (self.streamer is not None and getattr(self.streamer, "ready", False)):
                         self.streamer = streamer
+                        if resolved_url != url and self._last_url == url:
+                            self._last_url = resolved_url
+                            self._fallback_urls = [u for u in self._fallback_urls if u != resolved_url]
         finally:
             done_evt.set()
 
@@ -747,16 +798,25 @@ class GstBridge:
         except Exception as error:
             print(f"[GST] Glagol playMusic failed on {context}: {error}", flush=True)
 
-    def play(self, url: str, title: str = "", artist: str = "", duration: int = 0) -> int:
+    def play(
+        self,
+        url: str,
+        title: str = "",
+        artist: str = "",
+        duration: int = 0,
+        fallback_urls: Optional[List[str]] = None,
+    ) -> int:
         if not url:
             raise GstBridgeError("Пустой адрес потока")
         self._ensure_server()
         if not self.ensure_injected():
             self.release()
             raise GstBridgeError("Не удалось подключить аудио-хук (frida-inject)")
+        backups = [str(u) for u in (fallback_urls or []) if u and str(u) != url][:4]
         with self._lock:
             self._stream_gen += 1
             self._last_url = url
+            self._fallback_urls = backups
             self._last_title = title
             self._last_artist = artist
             self._track_duration = float(duration or 0)
@@ -815,6 +875,7 @@ class GstBridge:
             self._is_active = False
             self._is_paused = False
             self._last_url = ""
+            self._fallback_urls = []
             self._seek_offset_sec = 0.0
             self._paused_pos = 0.0
             self._seek_start_time = 0.0

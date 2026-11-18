@@ -123,10 +123,16 @@ def fast_resolve(
     mp4_audio = [f for f in audio_formats if "audio/mp4" in f.get("mimeType", "")]
     if mp4_audio:
         mp4_audio.sort(key=lambda x: int(x.get("bitrate") or 0), reverse=True)
-        best = mp4_audio[0]
+        pool = mp4_audio
     else:
         audio_formats.sort(key=lambda x: int(x.get("bitrate") or 0), reverse=True)
-        best = audio_formats[0]
+        pool = audio_formats
+    best = pool[0]
+    fallback_urls = [
+        str(f["url"])
+        for f in pool[1:4]
+        if f.get("url") and f["url"] != best["url"]
+    ]
 
     details = data.get("videoDetails", {})
     duration = int(details.get("lengthSeconds") or 0)
@@ -139,6 +145,7 @@ def fast_resolve(
     res = {
         "id": video_id,
         "url": best["url"],
+        "fallback_urls": fallback_urls,
         "title": title,
         "artist": artist,
         "duration": duration,
