@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+_ARTIST_CACHE_LIMIT = 200
+
 AUTH_COOKIES = {
     "SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO",
     "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PAPISID", "__Secure-3PAPISID",
@@ -311,10 +313,44 @@ class ExtMusicStore:
             "title": str(track.get("title") or "Без названия")[:300],
             "artist": str(track.get("artist") or "YouTube Music")[:300],
             "album": str(track.get("album") or "")[:300],
+            "album_id": str(track.get("album_id") or "").strip()[:120],
             "duration": duration,
             "thumb": str(track.get("thumb") or "")[:1000],
             "artist_id": str(track.get("artist_id") or "")[:200],
         }
+
+    # ---------- YouTube Artist Browse-ID Persistent Cache ----------
+    def artist_cache(self) -> Dict[str, str]:
+        with self._lock:
+            raw = self.load().get("yt_artist_cache")
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k): str(v)
+            for k, v in raw.items()
+            if k and isinstance(v, str) and v.startswith("UC")
+        }
+
+    def save_artist_entry(self, key: str, artist_id: str) -> None:
+        k = str(key or "").strip()[:120]
+        aid = str(artist_id or "").strip()[:80]
+        if not k or not aid.startswith("UC"):
+            return
+        with self._lock:
+            data = self.load()
+            raw = data.get("yt_artist_cache")
+            cache: Dict[str, str] = (
+                {str(ck): str(cv) for ck, cv in raw.items() if ck and isinstance(cv, str) and cv.startswith("UC")}
+                if isinstance(raw, dict)
+                else {}
+            )
+            cache.pop(k, None)
+            cache[k] = aid
+            while len(cache) > _ARTIST_CACHE_LIMIT:
+                oldest = next(iter(cache))
+                cache.pop(oldest, None)
+            data["yt_artist_cache"] = cache
+            self._save(data)
 
     def recent_yt(self) -> List[Dict[str, Any]]:
         with self._lock:

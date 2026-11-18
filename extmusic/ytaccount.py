@@ -30,6 +30,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 CLIENT_VERSION = "1.20241111.01.00"
 _ENDPOINT_RE = re.compile(r"^[a-z0-9_/]+$")
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_PLAYLIST_ID_RE = re.compile(r"^(?:PL|OLAK5uy_|RD|LM|LL|WL)[A-Za-z0-9_-]{0,200}$")
 _BROWSE_COLLECTION_RE = re.compile(r"^(?:VL|PL|UC|MPREb_|OLAK5uy_|FE|RD)[A-Za-z0-9_-]{2,200}$")
 LIKED_THUMB_URL = "https://www.gstatic.com/youtube/media/ytm/images/pbg/liked-songs-delhi-576.png"
 
@@ -118,11 +119,26 @@ def _watch_endpoint(item: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _apply_track_run_links(track: Dict[str, Any], runs: Any) -> None:
+    if not isinstance(runs, list) or not runs:
+        return
+    artist_id, artist_from_run, album_id, album_from_run = ytmusic._extract_run_links(runs)
+    if artist_id:
+        track["artist_id"] = artist_id
+    if artist_from_run and (not track.get("artist") or track.get("artist") == "YouTube Music"):
+        track["artist"] = artist_from_run
+    if album_from_run and not track.get("album"):
+        track["album"] = album_from_run
+    if album_id and not track.get("album_id"):
+        track["album_id"] = album_id
+
+
 def _two_column(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(item, dict):
         return None
     title = _text(item.get("title") or {})
-    subtitle = _text(item.get("subtitle") or {})
+    subtitle_obj = item.get("subtitle") or {}
+    subtitle = _text(subtitle_obj)
     if not title:
         return None
     browse = _browse_endpoint(item)
@@ -143,6 +159,8 @@ def _two_column(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "artist": parts[0] if parts else "YouTube Music",
             "duration": _duration(parts[-1]) if parts else 0,
         })
+        if isinstance(subtitle_obj, dict):
+            _apply_track_run_links(base, subtitle_obj.get("runs"))
     else:
         base["kind"] = "artist" if browse["page_type"] == "MUSIC_PAGE_TYPE_ARTIST" else "playlist"
     return base
@@ -152,7 +170,8 @@ def _two_row(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(item, dict):
         return None
     title = _text(item.get("title") or {})
-    subtitle = _text(item.get("subtitle") or {})
+    subtitle_obj = item.get("subtitle") or {}
+    subtitle = _text(subtitle_obj)
     if not title or title.strip().lower() in ("новый", "создать"):
         return None
     browse = _browse_endpoint(item)
@@ -173,6 +192,8 @@ def _two_row(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "artist": parts[0] if parts else "YouTube Music",
             "duration": _duration(parts[-1]) if parts else 0,
         })
+        if isinstance(subtitle_obj, dict):
+            _apply_track_run_links(base, subtitle_obj.get("runs"))
     return base
 
 
@@ -184,12 +205,17 @@ def _responsive(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     title = _text(((columns[0] or {}).get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text") or {})
     parts: List[str] = []
-    if len(columns) > 1:
-        text = ((columns[1] or {}).get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text") or {}
-        for run in text.get("runs") or []:
-            value = _text((run or {}).get("text"))
-            if value and value not in ("•", ","):
-                parts.append(value)
+    all_runs: List[Any] = []
+    for col_idx, col in enumerate(columns[1:], start=1):
+        text = ((col or {}).get("musicResponsiveListItemFlexColumnRenderer") or {}).get("text") or {}
+        runs = text.get("runs") or []
+        if isinstance(runs, list):
+            all_runs.extend(runs)
+        if col_idx == 1:
+            for run in runs:
+                value = _text((run or {}).get("text"))
+                if value and value not in ("•", ","):
+                    parts.append(value)
     video_id = ""
     for endpoint in _walk(item, "watchEndpoint"):
         if isinstance(endpoint, dict) and endpoint.get("videoId"):
@@ -200,7 +226,7 @@ def _responsive(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not title or not video_id:
         return None
     artist = parts[0] if parts else "YouTube Music"
-    return {
+    track: Dict[str, Any] = {
         "kind": "track",
         "video_id": video_id,
         "title": title,
@@ -212,6 +238,8 @@ def _responsive(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "page_type": "",
         "subtitle": " • ".join(parts),
     }
+    _apply_track_run_links(track, all_runs)
+    return track
 
 
 def _tile_track(tile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1296,3 +1324,106 @@ class YTAccount:
                     "subtitle": subtitle,
                 })
         return {"tracks": tracks[:limit]}
+
+    def create_playlist(
+        self,
+        title: str,
+        video_ids: Optional[Iterable[str]] = None,
+        description: str = "",
+        privacy: str = "PRIVATE",
+    ) -> Dict[str, Any]:
+        """Create a YouTube Music playlist and optionally populate it with tracks."""
+        clean_title = _text(title, 150).strip()
+        if not clean_title:
+            raise YTAccountError("Введите название плейлиста")
+        priv = str(privacy or "PRIVATE").strip().upper()
+        if priv not in ("PRIVATE", "PUBLIC", "UNLISTED"):
+            priv = "PRIVATE"
+
+        vids: List[str] = []
+        seen: Set[str] = set()
+        for raw in (video_ids or []):
+            s = _text(raw, 60).strip()
+            if s.startswith("ext:yt:"):
+                s = s[7:].strip()
+            if not s:
+                continue
+            vid = self._validate_video_id(s)
+            if vid not in seen:
+                seen.add(vid)
+                vids.append(vid)
+
+        body: Dict[str, Any] = {"title": clean_title, "privacyStatus": priv}
+        clean_desc = _text(description, 500).strip()
+        if clean_desc:
+            body["description"] = clean_desc
+        if vids:
+            body["videoIds"] = vids
+
+        payload = self._post(body, endpoint="playlist/create")
+        pid = _text(payload.get("playlistId") or "", 120).strip()
+        if not pid:
+            for cand in _walk(payload, "playlistId"):
+                val = _text(cand, 120).strip()
+                if val:
+                    pid = val
+                    break
+        if not pid:
+            raise YTAccountError("YouTube Music не вернул ID созданного плейлиста")
+        raw_pid = pid[2:] if pid.startswith("VL") else pid
+        return {
+            "ok": True,
+            "playlist_id": raw_pid,
+            "browse_id": f"VL{raw_pid}",
+            "title": clean_title,
+            "added": len(vids),
+        }
+
+    def add_to_playlist(self, playlist_id: str, video_ids: Any) -> Dict[str, Any]:
+        """Add one or more tracks to a user's YouTube Music playlist."""
+        raw_pid = _text(playlist_id, 120).strip()
+        if raw_pid.startswith("ext:yt:"):
+            raw_pid = raw_pid[7:].strip()
+        if raw_pid.startswith("VL"):
+            raw_pid = raw_pid[2:].strip()
+        if not raw_pid or (not _PLAYLIST_ID_RE.fullmatch(raw_pid) and raw_pid != "FEmusic_liked_videos"):
+            raise YTAccountError("Некорректный ID плейлиста YouTube Music")
+
+        raw_list = [video_ids] if isinstance(video_ids, str) else list(video_ids or [])
+        vids: List[str] = []
+        seen: Set[str] = set()
+        for raw in raw_list:
+            s = _text(raw, 60).strip()
+            if s.startswith("ext:yt:"):
+                s = s[7:].strip()
+            if not s:
+                continue
+            vid = self._validate_video_id(s)
+            if vid not in seen:
+                seen.add(vid)
+                vids.append(vid)
+        if not vids:
+            raise YTAccountError("Не указаны треки для добавления в плейлист")
+
+        if raw_pid in ("LM", "FEmusic_liked_videos"):
+            for vid in vids:
+                self.like(vid, True)
+            return {
+                "ok": True,
+                "playlist_id": "LM",
+                "browse_id": "VLLM",
+                "added": len(vids),
+                "video_ids": vids,
+            }
+
+        actions = [{"addedVideoId": vid, "action": "ACTION_ADD_VIDEO"} for vid in vids]
+        payload = self._post({"playlistId": raw_pid, "actions": actions}, endpoint="browse/edit_playlist")
+        if str(payload.get("status") or "").upper().startswith("STATUS_FAILED"):
+            raise YTAccountError("YouTube Music отклонил добавление в плейлист")
+        return {
+            "ok": True,
+            "playlist_id": raw_pid,
+            "browse_id": f"VL{raw_pid}",
+            "added": len(vids),
+            "video_ids": vids,
+        }

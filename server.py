@@ -4954,18 +4954,62 @@ pidof com.yandex.io.sdk >/dev/null && echo quasar=running || echo quasar=stopped
             if (artist_id and source == "yt")
             else ""
         )
+        album_id = str(track.get("album_id") or "").strip()
+        alid = (
+            (album_id if album_id.startswith("ext:yt:") else f"ext:yt:{album_id}")
+            if (album_id and source == "yt")
+            else ""
+        )
         return {
             "id": self._ext_track_id(track),
             "title": track.get("title") or "Без названия",
             "artists": artist,
             "artistList": [{"id": aid, "name": artist}],
-            "album": {"id": "", "title": album},
+            "album": {"id": alid, "title": album},
             "durationMs": duration,
             "cover": cover,
             "coverBig": cover,
             "liked": self._ext_track_liked_cached(track),
             "available": True,
         }
+
+    def _build_ext_music_info(self, resolved_track, tid_s):
+        svc = getattr(self, "_extmusic_service", None)
+        vid = tid_s[7:].strip() if tid_s.startswith("ext:yt:") else ""
+        if vid and svc is not None and not str(resolved_track.get("artist_id") or "").strip():
+            resolver = getattr(svc, "yt_resolve_artist_id", None)
+            if callable(resolver):
+                try:
+                    aid = resolver(
+                        video_id=vid,
+                        artist=str(resolved_track.get("artist") or ""),
+                        title=str(resolved_track.get("title") or ""),
+                    )
+                    if aid:
+                        resolved_track = {**resolved_track, "artist_id": aid}
+                except Exception:  # noqa: BLE001 - artist lookup must not break track info
+                    pass
+        if vid and svc is not None:
+            known_fn = getattr(svc, "yt_resolve_known_track", None)
+            if callable(known_fn):
+                try:
+                    known = known_fn(vid)
+                    if isinstance(known, dict):
+                        patch = {}
+                        for key in ("artist_id", "album", "album_id"):
+                            if known.get(key) and not resolved_track.get(key):
+                                patch[key] = known[key]
+                        if patch:
+                            resolved_track = {**resolved_track, **patch}
+                except Exception:  # noqa: BLE001
+                    pass
+        payload = self._ext_track_payload(resolved_track)
+        if vid and payload.get("id") == tid_s and svc is not None and hasattr(svc, "yt_track_liked"):
+            try:
+                payload["liked"] = bool(svc.yt_track_liked(vid))
+            except Exception:  # noqa: BLE001
+                pass
+        return payload
 
     def music_info(self, tid):
         tid_s = str(tid or "")
@@ -4981,28 +5025,13 @@ pidof com.yandex.io.sdk >/dev/null && echo quasar=running || echo quasar=stopped
                 if svc is not None and hasattr(svc, "yt_resolve_known_track"):
                     target = svc.yt_resolve_known_track(tid_s[7:].strip())
             resolved_track = target or ext["current"]
-            payload = self._ext_track_payload(resolved_track)
-            if tid_s.startswith("ext:yt:") and payload.get("id") == tid_s:
-                vid = tid_s[7:].strip()
-                svc = getattr(self, "_extmusic_service", None)
-                if vid and svc is not None and hasattr(svc, "yt_track_liked"):
-                    try:
-                        payload["liked"] = bool(svc.yt_track_liked(vid))
-                    except Exception:  # noqa: BLE001
-                        pass
-            return payload
+            return self._build_ext_music_info(resolved_track, tid_s)
         if tid_s.startswith("ext:yt:"):
             vid = tid_s[7:].strip()
             svc = self._ext_svc()
             known = svc.yt_resolve_known_track(vid) if hasattr(svc, "yt_resolve_known_track") else None
             if known:
-                payload = self._ext_track_payload(known)
-                if vid and hasattr(svc, "yt_track_liked"):
-                    try:
-                        payload["liked"] = bool(svc.yt_track_liked(vid))
-                    except Exception:  # noqa: BLE001
-                        pass
-                return payload
+                return self._build_ext_music_info(known, tid_s)
             raise AdbError("Трек не найден")
         self._need_login()
         return self.ymusic.track(tid)
@@ -7013,6 +7042,52 @@ def _max_assistant_launch_local(assistant_dir=None, pid_path=None):
     raise RuntimeError("ассистент не опубликовал PID после запуска")
 
 
+def _max_assistant_ensure_default_files(assistant_dir=None):
+    """Разворачивает файлы демона голосового управления (assistant_max.py) по умолчанию."""
+    directory = Path(assistant_dir or ASSIST_DIR)
+    src_script = ROOT / "assistant_max.py"
+    if not src_script.is_file():
+        src_script = ASSIST_SRC / "assistant_max.py"
+    src_launcher = ASSIST_SRC / "assistantd"
+    src_socks = ROOT / "assistant_socks.py"
+    if not src_socks.is_file():
+        src_socks = ASSIST_SRC / "assistant_socks.py"
+    if not src_script.is_file() or not src_launcher.is_file():
+        return False
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.chmod(directory, 0o700)
+        dst_script = directory / "assistant_max.py"
+        if not dst_script.is_file():
+            shutil.copy2(src_script, dst_script)
+            with contextlib.suppress(OSError):
+                os.chmod(dst_script, 0o755)
+        dst_launcher = directory / "assistantd"
+        if not dst_launcher.is_file() or not os.access(dst_launcher, os.X_OK):
+            shutil.copy2(src_launcher, dst_launcher)
+            with contextlib.suppress(OSError):
+                os.chmod(dst_launcher, 0o755)
+        if src_socks.is_file() and not (directory / "assistant_socks.py").is_file():
+            dst_socks = directory / "assistant_socks.py"
+            shutil.copy2(src_socks, dst_socks)
+            with contextlib.suppress(OSError):
+                os.chmod(dst_socks, 0o644)
+        dst_conf = directory / "config.json"
+        if not dst_conf.is_file():
+            dst_conf.write_text('{"enabled": false}\n', encoding="utf-8")
+            with contextlib.suppress(OSError):
+                os.chmod(dst_conf, 0o600)
+    except OSError:
+        return False
+    return (
+        (directory / "config.json").is_file()
+        and (directory / "assistant_max.py").is_file()
+        and (directory / "assistantd").is_file()
+        and os.access(directory / "assistantd", os.X_OK)
+    )
+
+
 def _max_assistant_autostart_worker(assistant_dir=None, log_path=None, attempts=36,
                                     delay=5, sleep=None, launch=None, autostart_path=None):
     """Ожидаем файлы /data, запускаем ассистента и оставляем диагностический след."""
@@ -7035,6 +7110,12 @@ def _max_assistant_autostart_worker(assistant_dir=None, log_path=None, attempts=
         ready_script = (directory / "assistant_max.py").is_file()
         launcher = directory / "assistantd"
         ready_launcher = launcher.is_file() and os.access(launcher, os.X_OK)
+        if assistant_dir is None and not (ready_config and ready_script and ready_launcher):
+            if _max_assistant_ensure_default_files(directory):
+                record("DEFAULT_FILES_PROVISIONED")
+                ready_config = (directory / "config.json").is_file()
+                ready_script = (directory / "assistant_max.py").is_file()
+                ready_launcher = launcher.is_file() and os.access(launcher, os.X_OK)
         if not (ready_config and ready_script and ready_launcher):
             if attempt in (1, 3, 6, 12, 24, 36):
                 record("WAIT_FILES attempt={} config={} script={} launcher={}".format(

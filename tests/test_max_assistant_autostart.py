@@ -107,6 +107,15 @@ class TestMaxAssistantAutostart(unittest.TestCase):
             self.assertIn("WAIT_FILES attempt=1", log)
             self.assertIn("RETRIES_EXHAUSTED", log)
 
+    def test_default_files_are_provisioned_on_clean_dir(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "assistant"
+            ok = server._max_assistant_ensure_default_files(directory)
+            self.assertTrue(ok)
+            self.assertTrue((directory / "assistant_max.py").is_file())
+            self.assertTrue((directory / "assistantd").is_file())
+            self.assertEqual((directory / "config.json").read_text(encoding="utf-8").strip(), '{"enabled": false}')
+
     def test_direct_launcher_waits_for_daemon_pid_without_overwriting_it(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

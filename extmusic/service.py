@@ -30,6 +30,9 @@ from .ytdlp import YTDLPError
 from .ytmusic import YTMusicError
 
 _KNOWN_TRACKS_LIMIT = 500
+_YT_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_ARTIST_CACHE_TTL = 6 * 3600
+_ARTIST_NEGATIVE_TTL = 120
 _log = logging.getLogger("yapanel.extmusic")
 
 
@@ -57,6 +60,8 @@ class ExtMusicService:
         self.autoplay_radio: bool = True
         self._ext_started_at: float = 0.0
         self._known_tracks: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._artist_cache: "OrderedDict[str, Tuple[float, str]]" = OrderedDict()
+        self._artist_cache_loaded = False
         self._known_lock = threading.Lock()
         self.error = ""
         self.skipped: List[Dict[str, str]] = []
@@ -580,6 +585,163 @@ class ExtMusicService:
                 return dict(rec)
         return None
 
+    def _ensure_artist_cache_loaded(self) -> None:
+        if self._artist_cache_loaded:
+            return
+        loader = getattr(self.store, "artist_cache", None)
+        persisted: Dict[str, str] = {}
+        if callable(loader):
+            try:
+                persisted = loader() or {}
+            except (OSError, ValueError):
+                persisted = {}
+        with self._known_lock:
+            if not self._artist_cache_loaded:
+                exp = time.time() + _ARTIST_CACHE_TTL
+                for k, v in persisted.items():
+                    if k and v and k not in self._artist_cache:
+                        self._artist_cache[k] = (exp, v)
+                while len(self._artist_cache) > _KNOWN_TRACKS_LIMIT:
+                    self._artist_cache.popitem(last=False)
+                self._artist_cache_loaded = True
+
+    def _artist_cache_get(self, keys: List[str]) -> Optional[str]:
+        self._ensure_artist_cache_loaded()
+        now = time.time()
+        with self._known_lock:
+            for key in keys:
+                entry = self._artist_cache.get(key)
+                if not entry:
+                    continue
+                exp, val = entry
+                if exp > now:
+                    self._artist_cache.move_to_end(key)
+                    return val
+                self._artist_cache.pop(key, None)
+        return None
+
+    def _artist_cache_set(self, keys: List[str], value: str) -> None:
+        if not keys:
+            return
+        self._ensure_artist_cache_loaded()
+        ttl = _ARTIST_CACHE_TTL if value else _ARTIST_NEGATIVE_TTL
+        exp = time.time() + ttl
+        with self._known_lock:
+            for key in keys:
+                self._artist_cache[key] = (exp, value)
+                self._artist_cache.move_to_end(key)
+            while len(self._artist_cache) > _KNOWN_TRACKS_LIMIT:
+                self._artist_cache.popitem(last=False)
+        if value and str(value).startswith("UC"):
+            saver = getattr(self.store, "save_artist_entry", None)
+            if callable(saver):
+                for key in keys:
+                    if key.startswith("art:"):
+                        try:
+                            saver(key, str(value))
+                        except (OSError, ValueError):
+                            pass
+
+    def _backfill_yt_artist(self, video_id: str, artist_id: str, meta: Optional[Dict[str, str]] = None) -> None:
+        if not video_id or not artist_id:
+            return
+        clean_artist = str((meta or {}).get("artist") or "").strip()
+        clean_album = str((meta or {}).get("album") or "").strip()
+        album_id = str((meta or {}).get("album_id") or "").strip()
+        with self._known_lock:
+            cached = self._known_tracks.get(video_id)
+            if cached is not None:
+                cached["artist_id"] = artist_id
+                if clean_artist and (not cached.get("artist") or cached.get("artist") == "YouTube Music"):
+                    cached["artist"] = clean_artist
+                if clean_album and not cached.get("album"):
+                    cached["album"] = clean_album
+                if album_id and not cached.get("album_id"):
+                    cached["album_id"] = album_id
+        with self.lock:
+            targets: List[Any] = [self.current, *self.queue, *self._orig_queue]
+            for tr in targets:
+                if (
+                    isinstance(tr, dict)
+                    and str(tr.get("source") or "") == "yt"
+                    and str(tr.get("id") or "") == video_id
+                ):
+                    if not tr.get("artist_id"):
+                        tr["artist_id"] = artist_id
+                    if clean_artist and (not tr.get("artist") or tr.get("artist") == "YouTube Music"):
+                        tr["artist"] = clean_artist
+                    if clean_album and not tr.get("album"):
+                        tr["album"] = clean_album
+                    if album_id and not tr.get("album_id"):
+                        tr["album_id"] = album_id
+
+    def yt_resolve_artist_id(self, video_id: str = "", artist: str = "", title: str = "") -> str:
+        """Resolve a YouTube Music artist browse_id (`UC...`) for a track or artist name."""
+        vid = self._strip_ext_yt(video_id)[:40]
+        art_text = str(artist or "").strip()
+        title_text = str(title or "").strip()
+
+        if vid:
+            known = self.yt_resolve_known_track(vid)
+            if known:
+                known_aid = self._strip_ext_yt(known.get("artist_id") or "")
+                if known_aid:
+                    return known_aid
+                if not art_text or art_text == "YouTube Music":
+                    art_text = str(known.get("artist") or "").strip()
+                if not title_text:
+                    title_text = str(known.get("title") or "").strip()
+
+        cache_keys: List[str] = []
+        if vid:
+            cache_keys.append(f"vid:{vid}")
+        art_norm = re.sub(r"\s+", " ", art_text.casefold()).strip()
+        title_norm = re.sub(r"\s+", " ", title_text.casefold()).strip()
+        if art_norm and art_norm not in ("youtube music", "youtube", "various artists"):
+            cache_keys.append(f"art:{art_norm}")
+        elif title_norm:
+            cache_keys.append(f"title:{title_norm}")
+
+        cached_aid = self._artist_cache_get(cache_keys)
+        if cached_aid is not None:
+            if cached_aid and vid:
+                self._backfill_yt_artist(vid, cached_aid)
+            return cached_aid
+
+        meta: Dict[str, str] = {}
+        aid = ""
+        if vid and _YT_VIDEO_ID_RE.fullmatch(vid) and hasattr(self.ytmusic, "track_artist_info"):
+            try:
+                meta = self.ytmusic.track_artist_info(vid) or {}
+                aid = self._strip_ext_yt(meta.get("artist_id") or "")
+                if meta.get("artist") and (not art_text or art_text == "YouTube Music"):
+                    art_text = str(meta["artist"]).strip()
+            except (YTMusicError, OSError, ValueError):
+                meta = {}
+
+        if not aid and hasattr(self.ytmusic, "find_artist_id"):
+            try:
+                found = self.ytmusic.find_artist_id(artist=art_text, title=title_text) or {}
+                aid = self._strip_ext_yt(found.get("artist_id") or "")
+                if aid and not meta.get("artist") and found.get("artist"):
+                    meta["artist"] = str(found["artist"])
+            except (YTMusicError, OSError, ValueError):
+                aid = ""
+
+        if aid:
+            final_art_norm = re.sub(r"\s+", " ", art_text.casefold()).strip()
+            if final_art_norm and final_art_norm not in ("youtube music", "youtube", "various artists"):
+                k = f"art:{final_art_norm}"
+                if k not in cache_keys:
+                    cache_keys.append(k)
+            self._artist_cache_set(cache_keys, aid)
+            if vid:
+                self._backfill_yt_artist(vid, aid, meta=meta)
+            return aid
+
+        self._artist_cache_set(cache_keys, "")
+        return ""
+
     def yt_home(self, limit: int = 30, count: Optional[int] = None) -> Dict[str, Any]:
         eff = count if count is not None else limit
         recent = self.store.recent_yt()
@@ -741,6 +903,40 @@ class ExtMusicService:
         except YTAccountError:
             return False
 
+    def yt_playlist_create(
+        self,
+        title: str,
+        video_ids: Optional[List[str]] = None,
+        description: str = "",
+        privacy: str = "PRIVATE",
+        from_queue: bool = False,
+    ) -> Dict[str, Any]:
+        vids = list(video_ids) if video_ids else []
+        if from_queue and not vids:
+            with self.lock:
+                vids = [
+                    str(t.get("id") or "")
+                    for t in self.queue
+                    if isinstance(t, dict) and str(t.get("source") or "") == "yt" and t.get("id")
+                ]
+            if not vids:
+                raise ExtMusicError("Очередь YouTube Music пуста")
+        try:
+            return self.yt_account.create_playlist(
+                title=title,
+                video_ids=vids,
+                description=description,
+                privacy=privacy,
+            )
+        except YTAccountError as error:
+            raise ExtMusicError(str(error)) from error
+
+    def yt_playlist_add(self, playlist_id: str, video_ids: Any) -> Dict[str, Any]:
+        try:
+            return self.yt_account.add_to_playlist(playlist_id, video_ids)
+        except YTAccountError as error:
+            raise ExtMusicError(str(error)) from error
+
     def yt_lyrics(
         self,
         video_id: str,
@@ -757,11 +953,15 @@ class ExtMusicService:
                 artist = artist or str(known.get("artist") or "")
                 album = album or str(known.get("album") or "")
                 duration = duration or float(known.get("duration") or 0)
+        yt_plain: Optional[Dict[str, Any]] = None
         if vid:
             try:
                 ly = self.ytmusic.lyrics(vid)
-                if isinstance(ly, dict) and (ly.get("text") or ly.get("sync")):
-                    return ly
+                if isinstance(ly, dict):
+                    if ly.get("sync") and ly.get("text"):
+                        return ly
+                    if ly.get("text"):
+                        yt_plain = ly
             except (YTMusicError, Exception):  # noqa: BLE001 - fallback to LRCLIB
                 pass
         ym = getattr(self.panel, "ymusic", None)
@@ -771,9 +971,15 @@ class ExtMusicService:
                 try:
                     res = ym.lyrics_by_name(clean_title, clean_artist, album=album, duration=duration)
                     if isinstance(res, dict):
+                        if res.get("sync") and res.get("text"):
+                            return res
+                        if yt_plain is not None:
+                            return yt_plain
                         return res
                 except Exception:  # noqa: BLE001
                     pass
+        if yt_plain is not None:
+            return yt_plain
         return {"sync": None, "text": None, "source": None}
 
     def fetch_thumb(self, url: str) -> Tuple[bytes, str]:
@@ -1125,15 +1331,24 @@ class ExtMusicService:
                     try:
                         self._stop_station_player()
                         resolved = self._resolve_gst(normalized)
-                        self.gst.play(
-                            resolved["url"],
-                            str(normalized.get("title") or ""),
-                            str(normalized.get("artist") or ""),
-                            duration=int(resolved.get("duration") or normalized.get("duration") or 0),
-                        )
-                        resolved["duration"] = int(
-                            resolved.get("duration") or normalized.get("duration") or 0
-                        )
+                        fb_urls = list(resolved.pop("fallback_urls", None) or [])
+                        dur_sec = int(resolved.get("duration") or normalized.get("duration") or 0)
+                        try:
+                            self.gst.play(
+                                resolved["url"],
+                                str(normalized.get("title") or ""),
+                                str(normalized.get("artist") or ""),
+                                duration=dur_sec,
+                                fallback_urls=fb_urls,
+                            )
+                        except TypeError:
+                            self.gst.play(
+                                resolved["url"],
+                                str(normalized.get("title") or ""),
+                                str(normalized.get("artist") or ""),
+                                duration=dur_sec,
+                            )
+                        resolved["duration"] = dur_sec
                         self._native_loading_until = 0.0
                         self._native_force_loading_until = 0.0
                     except (GstBridgeError, YTDLPError, FastYTError, ExtMusicError) as error:

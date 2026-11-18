@@ -1081,6 +1081,47 @@ def browse_collection(browse_id: str, params: str = "", limit: int = 100) -> Dic
     }
 
 
+def _panel_track(panel_item: Dict[str, Any], fallback_playlist_id: str = "") -> Optional[Dict[str, Any]]:
+    if not isinstance(panel_item, dict):
+        return None
+    vid = _text(
+        panel_item.get("videoId")
+        or ((panel_item.get("navigationEndpoint") or {}).get("watchEndpoint") or {}).get("videoId"),
+        40,
+    )
+    if not vid:
+        return None
+    title = _node_text(panel_item.get("title"), 300) or "Без названия"
+    byline = panel_item.get("longBylineText") or panel_item.get("shortBylineText") or {}
+    runs = byline.get("runs") if isinstance(byline, dict) else []
+    artist_id, artist_from_run, album_id, album_from_run = _extract_run_links(runs or [])
+    byline_text = _node_text(panel_item.get("shortBylineText") or byline, 300)
+    parts = [p.strip() for p in byline_text.split("•") if p.strip()]
+    artist = artist_from_run or (parts[0] if parts else "YouTube Music")
+    duration = parse_duration(_node_text(panel_item.get("lengthText"), 20))
+    pl_id = _text(
+        ((panel_item.get("navigationEndpoint") or {}).get("watchEndpoint") or {}).get("playlistId"),
+        200,
+    ) or fallback_playlist_id
+
+    track: Dict[str, Any] = {
+        "source": "yt",
+        "id": vid,
+        "title": title,
+        "artist": artist,
+        "album": album_from_run,
+        "duration": duration,
+        "thumb": _thumbnail(panel_item),
+        "url": "",
+        "playlist_id": pl_id,
+    }
+    if artist_id:
+        track["artist_id"] = artist_id
+    if album_id:
+        track["album_id"] = album_id
+    return track
+
+
 def radio(video_id: str, playlist_id: str = "", limit: int = 30) -> List[Dict[str, Any]]:
     video_id = _text(video_id, 40)
     playlist_id = _text(playlist_id, 200)
@@ -1103,49 +1144,43 @@ def radio(video_id: str, playlist_id: str = "", limit: int = 30) -> List[Dict[st
     seen = set()
 
     for panel_item in _walk(payload, "playlistPanelVideoRenderer"):
-        if not isinstance(panel_item, dict):
+        track = _panel_track(panel_item, fallback_playlist_id=body["playlistId"])
+        if not track or track["id"] in seen:
             continue
-        vid = _text(
-            panel_item.get("videoId")
-            or ((panel_item.get("navigationEndpoint") or {}).get("watchEndpoint") or {}).get("videoId"),
-            40,
-        )
-        if not vid or vid in seen:
-            continue
-        seen.add(vid)
-        title = _node_text(panel_item.get("title"), 300) or "Без названия"
-        byline = panel_item.get("longBylineText") or panel_item.get("shortBylineText") or {}
-        runs = byline.get("runs") if isinstance(byline, dict) else []
-        artist_id, artist_from_run, album_id, album_from_run = _extract_run_links(runs or [])
-        byline_text = _node_text(panel_item.get("shortBylineText") or byline, 300)
-        parts = [p.strip() for p in byline_text.split("•") if p.strip()]
-        artist = artist_from_run or (parts[0] if parts else "YouTube Music")
-        duration = parse_duration(_node_text(panel_item.get("lengthText"), 20))
-        pl_id = _text(
-            ((panel_item.get("navigationEndpoint") or {}).get("watchEndpoint") or {}).get("playlistId"),
-            200,
-        ) or body["playlistId"]
-
-        track: Dict[str, Any] = {
-            "source": "yt",
-            "id": vid,
-            "title": title,
-            "artist": artist,
-            "album": album_from_run,
-            "duration": duration,
-            "thumb": _thumbnail(panel_item),
-            "url": "",
-            "playlist_id": pl_id,
-        }
-        if artist_id:
-            track["artist_id"] = artist_id
-        if album_id:
-            track["album_id"] = album_id
+        seen.add(track["id"])
         tracks.append(track)
         if len(tracks) >= limit:
             break
 
     return tracks
+
+
+def track_artist_info(video_id: str) -> Dict[str, str]:
+    """Fetch artist/album browse metadata for a YouTube video from InnerTube `next`."""
+    vid = _text(video_id, 40)
+    if not vid:
+        return {}
+    payload = _post({"context": _context(), "videoId": vid}, endpoint="next")
+    first: Optional[Dict[str, Any]] = None
+    chosen: Optional[Dict[str, Any]] = None
+    for panel_item in _walk(payload, "playlistPanelVideoRenderer"):
+        track = _panel_track(panel_item)
+        if not track:
+            continue
+        if first is None:
+            first = track
+        if track["id"] == vid:
+            chosen = track
+            break
+    target = chosen or first
+    if not target:
+        return {}
+    return {
+        "artist_id": str(target.get("artist_id") or ""),
+        "artist": str(target.get("artist") or ""),
+        "album_id": str(target.get("album_id") or ""),
+        "album": str(target.get("album") or ""),
+    }
 
 
 def _find_lyrics_browse_id(payload: Dict[str, Any]) -> str:
@@ -1159,6 +1194,32 @@ def _find_lyrics_browse_id(payload: Dict[str, Any]) -> str:
         if bid.startswith("MPLYt") or page_type == "MUSIC_PAGE_TYPE_TRACK_LYRICS" or title in ("текст", "lyrics"):
             return bid
     return ""
+
+
+def _extract_timed_lyrics(payload: Dict[str, Any]) -> Optional[List[List[Any]]]:
+    """Extract synced `[seconds, text]` lines from `musicTimedLyricsRenderer` when present."""
+    for timed in _walk(payload, "musicTimedLyricsRenderer"):
+        if not isinstance(timed, dict):
+            continue
+        lines: List[List[Any]] = []
+        for entry in timed.get("timedLyricsData") or []:
+            if not isinstance(entry, dict):
+                continue
+            line = _text(entry.get("lyricLine"), 500).strip()
+            cue = entry.get("cueRange") if isinstance(entry.get("cueRange"), dict) else {}
+            start_ms = cue.get("startTimeMilliseconds")
+            if start_ms is None:
+                continue
+            try:
+                sec = round(max(0.0, int(start_ms) / 1000.0), 2)
+            except (TypeError, ValueError):
+                continue
+            if not line and not lines:
+                continue
+            lines.append([sec, line])
+        if lines:
+            return lines
+    return None
 
 
 def _extract_lyrics_text(payload: Dict[str, Any]) -> str:
@@ -1190,16 +1251,20 @@ def lyrics(video_id: str) -> Dict[str, Any]:
     if not lyrics_bid:
         return {"sync": None, "text": None, "source": None}
     ly_payload = _post({"context": _context(), "browseId": lyrics_bid}, endpoint="browse")
+    sync = _extract_timed_lyrics(ly_payload)
     text = _extract_lyrics_text(ly_payload)
+    if sync and not text:
+        text = "\n".join(str(item[1]) for item in sync if len(item) > 1 and item[1])
     if not text:
         return {"sync": None, "text": None, "source": None}
-    return {"sync": None, "text": text, "source": "YouTube Music"}
+    return {"sync": sync, "text": text, "source": "YouTube Music"}
 
 
 def clean_track_meta(title: str, artist: str = "") -> Tuple[str, str]:
     """Normalize a YouTube title and artist for external lyrics lookup (e.g. LRCLIB)."""
     clean_artist = str(artist or "").strip()
     clean_artist = re.sub(r"\s*-\s*Topic$", "", clean_artist, flags=re.I)
+    clean_artist = re.sub(r"(?<=[A-Za-z0-9])VEVO$", "", clean_artist, flags=re.I)
     clean_artist = _TRAILING_FEAT_RE.sub("", clean_artist)
     clean_artist = re.sub(r"\s+", " ", clean_artist).strip()
 
@@ -1214,7 +1279,11 @@ def clean_track_meta(title: str, artist: str = "") -> Tuple[str, str]:
         left, right = match.group(1).strip(), match.group(2).strip()
         left_norm = re.sub(r"\s+", " ", left.lower())
         art_norm = re.sub(r"\s+", " ", clean_artist.lower())
+        left_compact = re.sub(r"\W+", "", left_norm)
+        art_compact = re.sub(r"\W+", "", art_norm)
         if not art_norm or art_norm in ("youtube music", "youtube", "various artists"):
+            clean_artist, clean_title = left, right
+        elif left_compact and art_compact and left_compact == art_compact:
             clean_artist, clean_title = left, right
         elif left_norm == art_norm or left_norm in art_norm or art_norm in left_norm:
             clean_title = right
@@ -1223,6 +1292,81 @@ def clean_track_meta(title: str, artist: str = "") -> Tuple[str, str]:
     clean_title = re.sub(r"\s+", " ", clean_title).strip(" -|/")
     clean_artist = re.sub(r"\s+", " ", clean_artist).strip(" -|/")
     return clean_title, clean_artist
+
+
+_GENERIC_ARTIST_NAMES = frozenset({
+    "",
+    "youtube music",
+    "youtube",
+    "various artists",
+    "разные исполнители",
+})
+_ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&|/|;|\b(?:feat\.?|ft\.?|featuring|with|x)\b)\s*", re.I)
+
+
+def _norm_artist_name(value: str) -> str:
+    text = re.sub(r"\s*-\s*Topic$", "", str(value or "").strip(), flags=re.I)
+    text = text.casefold().replace("ё", "е")
+    return re.sub(r"[^\w]+", " ", text).strip()
+
+
+def _pick_artist_match(entries: List[Dict[str, Any]], query: str) -> Optional[Dict[str, Any]]:
+    q_norm = _norm_artist_name(query)
+    if not q_norm:
+        return None
+    uc_entries = [
+        e for e in (entries or [])
+        if isinstance(e, dict) and str(e.get("browse_id") or "").startswith("UC")
+    ]
+    for entry in uc_entries:
+        if _norm_artist_name(entry.get("title") or "") == q_norm:
+            return entry
+    if len(q_norm) < 3:
+        return None
+    q_tokens = set(q_norm.split())
+    for entry in uc_entries:
+        e_norm = _norm_artist_name(entry.get("title") or "")
+        e_tokens = set(e_norm.split())
+        if e_tokens and (q_tokens <= e_tokens or e_tokens <= q_tokens):
+            return entry
+    return None
+
+
+def find_artist_id(artist: str = "", title: str = "") -> Dict[str, str]:
+    """Resolve a YouTube Music artist ``browse_id`` (`UC...`) by artist name or track title."""
+    clean_title, clean_artist = clean_track_meta(title, artist)
+    art_norm = _norm_artist_name(clean_artist)
+
+    if art_norm not in _GENERIC_ARTIST_NAMES and len(clean_artist) >= 2:
+        candidates = [clean_artist]
+        primary = _ARTIST_SPLIT_RE.split(clean_artist, maxsplit=1)[0].strip()
+        if len(primary) >= 2 and _norm_artist_name(primary) != art_norm:
+            candidates.append(primary)
+        for cand in candidates:
+            hit = _pick_artist_match(search(cand, count=5, kind="artists"), cand)
+            if hit:
+                return {
+                    "artist_id": str(hit.get("browse_id") or ""),
+                    "artist": str(hit.get("title") or cand),
+                }
+
+    if len(clean_title) >= 2:
+        song_q = f"{clean_artist} {clean_title}".strip() if art_norm not in _GENERIC_ARTIST_NAMES else clean_title
+        title_norm = _norm_artist_name(clean_title)
+        for song in search(song_q, count=5, kind="songs"):
+            bid = str(song.get("artist_id") or "").strip()
+            if not bid.startswith("UC"):
+                continue
+            s_title_norm = _norm_artist_name(song.get("title") or "")
+            s_art_norm = _norm_artist_name(song.get("artist") or "")
+            title_ok = bool(title_norm and s_title_norm and (title_norm in s_title_norm or s_title_norm in title_norm))
+            art_ok = art_norm in _GENERIC_ARTIST_NAMES or (art_norm and s_art_norm and (art_norm in s_art_norm or s_art_norm in art_norm))
+            if title_ok and art_ok:
+                return {
+                    "artist_id": bid,
+                    "artist": str(song.get("artist") or clean_artist),
+                }
+    return {}
 
 
 def is_allowed_thumb_url(url: str) -> bool:
