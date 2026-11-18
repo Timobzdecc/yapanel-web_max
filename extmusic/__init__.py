@@ -64,12 +64,10 @@ class _IPv4HTTPHandler(urllib.request.HTTPHandler):
 
 class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req: urllib.request.Request):
-        return self.do_open(
-            _IPv4HTTPSConnection,
-            req,
-            context=self._context,
-            check_hostname=self._check_hostname,
-        )
+        kwargs = {"context": getattr(self, "_context", None)}
+        if hasattr(self, "_check_hostname"):
+            kwargs["check_hostname"] = self._check_hostname
+        return self.do_open(_IPv4HTTPSConnection, req, **kwargs)
 
 
 def build_ipv4_opener(*handlers: Any) -> urllib.request.OpenerDirector:

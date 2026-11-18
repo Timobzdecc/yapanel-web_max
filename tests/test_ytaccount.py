@@ -148,10 +148,33 @@ def test_home_oauth_fallback(tmp_path, monkeypatch):
         return {}
 
     monkeypatch.setattr(account, "_browse", mock_browse)
+    import extmusic.ytmusic as _ytmusic
+    monkeypatch.setattr(_ytmusic, "home", lambda limit=30: (_ for _ in ()).throw(YTMusicError("offline")))
     res = account.home(limit=10)
     assert len(res["tracks"]) == 1
     assert res["tracks"][0]["title"] == "Cool Track"
     assert res["tracks"][0]["artist"] == "Band"
+
+
+def test_ipv4_https_handler_works_without_check_hostname_attr(monkeypatch):
+    import extmusic
+    import urllib.request
+
+    handler = extmusic._IPv4HTTPSHandler()
+    if hasattr(handler, "_check_hostname"):
+        delattr(handler, "_check_hostname")
+
+    captured = {}
+
+    def fake_do_open(cls, req, **kwargs):
+        captured["cls"] = cls
+        captured["kwargs"] = kwargs
+        return "ok"
+
+    monkeypatch.setattr(handler, "do_open", fake_do_open)
+    assert handler.https_open(urllib.request.Request("https://music.youtube.com/")) == "ok"
+    assert captured["cls"] is extmusic._IPv4HTTPSConnection
+    assert "check_hostname" not in captured["kwargs"]
 
 
 def test_post_uses_endpoint_for_oauth_and_cookies(tmp_path, monkeypatch):
