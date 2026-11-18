@@ -871,3 +871,174 @@ def test_liked_and_collection_follow_multipage_continuations_and_break_cycles(tm
     )
     assert hdr["title"] == "From EM"
 
+
+def test_collection_routes_personal_vlrd_mixes_through_private_browse(tmp_path, monkeypatch):
+    store = ExtMusicStore(tmp_path / "c.json")
+    store.save_oauth({"access_token": "tok", "expires_at": 9999999999})
+    acc = YTAccount(store=store)
+
+    pub_calls = []
+
+    def fake_pub(bid, params="", limit=100):
+        pub_calls.append(bid)
+        return {
+            "kind": "playlist",
+            "title": "Public Fallback",
+            "subtitle": "Public",
+            "description": "",
+            "thumb": "",
+            "browse_id": bid,
+            "playlist_id": bid[2:] if bid.startswith("VL") else bid,
+            "artist": "",
+            "artist_id": "",
+            "tracks": [{"source": "yt", "id": "pub1", "video_id": "pub1", "title": "Fallback Song", "artist": "Pub"}],
+            "albums": [],
+            "similar": [],
+        }
+
+    monkeypatch.setattr("extmusic.ytmusic.browse_collection", fake_pub)
+
+    priv_calls = []
+
+    def fake_browse(browse_id="", continuation=""):
+        priv_calls.append(browse_id)
+        if browse_id == "VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY":
+            return {
+                "header": {"overlayPanelHeaderRenderer": {"title": {"simpleText": "Мой супермикс"}}},
+                "contents": {
+                    "a": {
+                        "tileRenderer": {
+                            "contentId": "muse1",
+                            "onSelectCommand": {"watchEndpoint": {"videoId": "muse1", "playlistId": "RDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY"}},
+                            "header": {"tileHeaderRenderer": {"thumbnail": {"thumbnails": [{"url": "https://i.ytimg.com/vi/muse1/hqdefault.jpg"}]}}},
+                            "metadata": {"tileMetadataRenderer": {"title": {"simpleText": "Starlight"}, "lines": [{"lineRenderer": {"items": [{"lineItemRenderer": {"text": {"simpleText": "Muse"}}}]}}]}},
+                        }
+                    }
+                },
+            }
+        if browse_id == "VLRDTMAK5uy_empty":
+            return {"header": {}, "contents": {}}
+        return {}
+
+    monkeypatch.setattr(acc, "_browse", fake_browse)
+
+    supermix = acc.collection("VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY", limit=25)
+    assert supermix["title"] == "Мой супермикс"
+    assert [t["video_id"] for t in supermix["tracks"]] == ["muse1"]
+    assert pub_calls == [], "Personalized VLRDTMAK mix must NOT bypass OAuth via anonymous _public_collection"
+
+    fallback = acc.collection("VLRDTMAK5uy_empty", limit=25)
+    assert [t["id"] for t in fallback["tracks"]] == ["pub1"]
+    assert pub_calls == ["VLRDTMAK5uy_empty"]
+
+
+def test_home_includes_personal_topics_mixes_and_liked_collection(tmp_path, monkeypatch):
+    from extmusic.ytaccount import LIKED_THUMB_URL
+
+    store = ExtMusicStore(tmp_path / "c.json")
+    store.save_oauth({"access_token": "tok", "expires_at": 9999999999})
+    acc = YTAccount(store=store)
+    monkeypatch.setattr("extmusic.ytmusic.home", lambda limit=30: {"tracks": [], "shelves": [], "moods": []})
+
+    def _tile_mix(title, sub, bid, thumb):
+        return {
+            "tileRenderer": {
+                "header": {"tileHeaderRenderer": {"thumbnail": {"thumbnails": [{"url": thumb}]}}},
+                "metadata": {
+                    "tileMetadataRenderer": {
+                        "title": {"simpleText": title},
+                        "lines": [{"lineRenderer": {"items": [{"lineItemRenderer": {"text": {"simpleText": sub}}}]}}],
+                    }
+                },
+                "onSelectCommand": {
+                    "browseEndpoint": {
+                        "browseId": bid,
+                        "browseEndpointContextSupportedConfigs": {
+                            "browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_PLAYLIST"}
+                        },
+                    }
+                },
+            }
+        }
+
+    def mock_browse(browse_id="", continuation=""):
+        if browse_id == "FEtopics_music":
+            return {
+                "contents": {
+                    "s0": {
+                        "shelfRenderer": {
+                            "contents": [
+                                _tile_mix("Риплей Микс", "The Prodigy, ZVERI", "VLRDTMAK5uy_nilrsVWxrKskY0ZUpVZ3zpB0u4LwWTVJ4", "https://music.youtube.com/image/mixart?r=replay"),
+                                _tile_mix("Мой супермикс", "Muse, Animal ДжаZ", "VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY", "https://music.youtube.com/image/mixart?r=super"),
+                                _tile_mix("Presenting Muse", "Muse", "VLRDCLAK5uy_naybxK2mfNjMBwE3HilwFDPsgDbQkhPsU", "https://music.youtube.com/image/presenting"),
+                            ]
+                        }
+                    }
+                }
+            }
+        if browse_id == "VLRDTMAK5uy_nGQKSMIkpr4o9VI_2i56pkGliD6FQRo50":
+            return {
+                "header": {"overlayPanelHeaderRenderer": {"title": {"simpleText": "Мой микс 1"}}},
+                "contents": {
+                    "t1": {
+                        "tileRenderer": {
+                            "contentId": "faint1",
+                            "onSelectCommand": {"watchEndpoint": {"videoId": "faint1"}},
+                            "header": {"tileHeaderRenderer": {"thumbnail": {"thumbnails": [{"url": "https://music.youtube.com/image/mixart?r=mix1"}]}}},
+                            "metadata": {"tileMetadataRenderer": {"title": {"simpleText": "Faint"}, "lines": [{"lineRenderer": {"items": [{"lineItemRenderer": {"text": {"simpleText": "Linkin Park"}}}]}}]}},
+                        }
+                    }
+                },
+            }
+        return {}
+
+    monkeypatch.setattr(acc, "_browse", mock_browse)
+    res = acc.home(limit=20)
+    titles = [m["title"] for m in res["mixes"]]
+    assert titles[0] == "Мой супермикс"
+    assert titles[1] == "Понравившаяся музыка"
+    assert res["mixes"][1]["browse_id"] == "VLLM"
+    assert res["mixes"][1]["kind"] == "liked"
+    assert res["mixes"][1]["thumb"] == LIKED_THUMB_URL
+    assert "Мой микс 1" in titles
+    assert "Риплей Микс" in titles
+    assert titles.index("Мой микс 1") < titles.index("Риплей Микс")
+    # Public editorial "Presenting Muse" must not replace real personal mixes when personal mixes exist
+    assert all(m["browse_id"] != "VLRDCLAK5uy_naybxK2mfNjMBwE3HilwFDPsgDbQkhPsU" for m in res["mixes"][:4])
+
+
+def test_home_resolves_core_personal_mixes_even_when_topics_omits_vlrdtmak_shelf(tmp_path, monkeypatch):
+    store = ExtMusicStore(tmp_path / "c.json")
+    store.save_oauth({"access_token": "tok", "expires_at": 9999999999})
+    acc = YTAccount(store=store)
+    monkeypatch.setattr("extmusic.ytmusic.home", lambda limit=30: {"tracks": [], "shelves": [], "moods": []})
+
+    def _tile_item(title, sub, bid, vid=""):
+        nav = {"browseEndpoint": {"browseId": bid, "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_PLAYLIST"}}}} if bid else {"watchEndpoint": {"videoId": vid}}
+        return {
+            "tileRenderer": {
+                "contentId": vid,
+                "header": {"tileHeaderRenderer": {"thumbnail": {"thumbnails": [{"url": f"https://img/{bid or vid}.jpg"}]}}},
+                "metadata": {"tileMetadataRenderer": {"title": {"simpleText": title}, "lines": [{"lineRenderer": {"items": [{"lineItemRenderer": {"text": {"simpleText": sub}}}]}}]}},
+                "onSelectCommand": nav,
+            }
+        }
+
+    def mock_browse(browse_id="", continuation=""):
+        # FEtopics_music only returns public Presenting playlists (omits VLRDTMAK shelf)
+        if browse_id == "FEtopics_music":
+            return {"contents": {"s3": {"shelfRenderer": {"contents": [_tile_item("Presenting Muse", "Muse", "VLRDCLAK5uy_naybxK2mfNjMBwE3HilwFDPsgDbQkhPsU")]}}}}
+        if browse_id == "VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY":
+            return {"header": {"overlayPanelHeaderRenderer": {"title": {"simpleText": "Мой супермикс"}}}, "contents": {"a": _tile_item("Starlight", "Muse", "", "vid_m1")}}
+        if browse_id == "VLRDTMAK5uy_nGQKSMIkpr4o9VI_2i56pkGliD6FQRo50":
+            return {"header": {"overlayPanelHeaderRenderer": {"title": {"simpleText": "Мой микс 1"}}}, "contents": {"a": _tile_item("Faint", "Linkin Park", "", "vid_m2")}}
+        return {}
+
+    monkeypatch.setattr(acc, "_browse", mock_browse)
+    res = acc.home(limit=20)
+    titles = [m["title"] for m in res["mixes"]]
+    assert titles[:3] == ["Мой супермикс", "Понравившаяся музыка", "Мой микс 1"]
+    assert all(not m["browse_id"].startswith("VLRDCLAK") for m in res["mixes"])
+
+
+

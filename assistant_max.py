@@ -1184,6 +1184,34 @@ class AssistantDaemon:
         "что", "кто", "где", "когда", "почему", "зачем", "как", "сколько",
         "какой", "какая", "какие", "это", "не", "у", "про", "ли",
     })
+    _YT_QUEUE_LIMIT = 25
+    _MIX_NUM_WORDS = {
+        "1": 1, "один": 1, "первый": 1, "первую": 1,
+        "2": 2, "два": 2, "второй": 2, "вторую": 2,
+        "3": 3, "три": 3, "третий": 3, "третью": 3,
+        "4": 4, "четыре": 4, "четвертый": 4, "четвертую": 4,
+        "5": 5, "пять": 5, "пятый": 5, "пятую": 5,
+        "6": 6, "шесть": 6, "шестой": 6, "шестую": 6,
+    }
+    _MIX_TOKENS = frozenset({"микс", "mix", "супермикс", "supermix"})
+    _MIX_PERSONAL_WORDS = frozenset({"мой", "моя", "мое", "мои", "свой", "своя", "свое", "персональный", "личный"})
+    _MIX_NAMED_WORDS = frozenset({"риплей", "replay", "архивный", "архив", "фитнеса", "бодрости", "концентрации"})
+    _MIX_EXCLUDED_WORDS = frozenset({"рецепт", "миксер", "блендер", "салат"})
+    _QUESTION_WORDS = frozenset({"почему", "зачем", "когда", "сколько", "какой", "какая", "какие", "кто", "где", "что"})
+    _CURRENT_TRACK_PHRASES = (
+        ("под", "эту", "песню"), ("под", "этот", "трек"),
+        ("по", "этой", "песне"), ("по", "этому", "треку"),
+        ("по", "текущей", "песне"), ("по", "текущему", "треку"),
+        ("от", "этой", "песни"), ("от", "этот", "трек"), ("от", "этого", "трека"),
+        ("к", "этой", "песне"), ("к", "этому", "треку"),
+        ("на", "основе", "этой", "песни"), ("на", "основе", "этого", "трека"),
+    )
+    _RADIO_QUERY_PREFIXES = (
+        ("по", "песне"), ("по", "треку"), ("по", "музыке"), ("по", "исполнителю"),
+        ("под", "песню"), ("под", "трек"), ("от", "песни"), ("от", "трека"),
+        ("к", "песне"), ("к", "треку"), ("из", "песни"), ("на", "основе"),
+        ("похожий", "на"), ("похожую", "на"), ("похожие", "на"), ("похожее", "на"),
+    )
 
     def _ext_call(self, path, method="GET", body=None, timeout=30):
         data = None
@@ -1277,6 +1305,176 @@ class AssistantDaemon:
             return ""
         return " ".join(raw_words[items[tail_idx][0]:]).strip(" ,.:;!?—-")
 
+    @classmethod
+    def _strip_platform_tokens(cls, seq):
+        """Remove leading/trailing YouTube platform qualifiers (e.g. 'на ютубе', 'youtube music')."""
+        items = list(seq)
+        # Strip leading/trailing pairs or single tokens
+        changed = True
+        while changed and items:
+            changed = False
+            if items[0][1] in ("на", "в", "с", "из", "через") and len(items) >= 2:
+                if items[1][1] in ("you", "ю") and len(items) >= 3 and cls._YT_TWO_SECOND_RE.fullmatch(items[2][1]):
+                    items = items[3:]
+                    changed = True
+                elif cls._YT_SINGLE_RE.fullmatch(items[1][1]):
+                    items = items[2:]
+                    if items and items[0][1] in cls._YT_MUSIC_TAILS:
+                        items = items[1:]
+                    changed = True
+            elif items[0][1] in ("you", "ю") and len(items) >= 2 and cls._YT_TWO_SECOND_RE.fullmatch(items[1][1]):
+                items = items[2:]
+                if items and items[0][1] in cls._YT_MUSIC_TAILS:
+                    items = items[1:]
+                changed = True
+            elif cls._YT_SINGLE_RE.fullmatch(items[0][1]):
+                items = items[1:]
+                if items and items[0][1] in cls._YT_MUSIC_TAILS:
+                    items = items[1:]
+                changed = True
+            elif len(items) >= 2 and items[-1][1] in cls._YT_MUSIC_TAILS:
+                if len(items) >= 3 and items[-3][1] in ("you", "ю") and cls._YT_TWO_SECOND_RE.fullmatch(items[-2][1]):
+                    items = items[:-3]
+                    if items and items[-1][1] in ("на", "в", "с", "из"):
+                        items = items[:-1]
+                    changed = True
+                elif cls._YT_SINGLE_RE.fullmatch(items[-2][1]):
+                    items = items[:-2]
+                    if items and items[-1][1] in ("на", "в", "с", "из"):
+                        items = items[:-1]
+                    changed = True
+            elif len(items) >= 2 and items[-2][1] in ("you", "ю") and cls._YT_TWO_SECOND_RE.fullmatch(items[-1][1]):
+                items = items[:-2]
+                if items and items[-1][1] in ("на", "в", "с", "из"):
+                    items = items[:-1]
+                changed = True
+            elif cls._YT_SINGLE_RE.fullmatch(items[-1][1]):
+                items = items[:-1]
+                if items and items[-1][1] in ("на", "в", "с", "из"):
+                    items = items[:-1]
+                changed = True
+        return items
+
+    @classmethod
+    def _has_yt_platform(cls, toks):
+        return any(cls._YT_SINGLE_RE.fullmatch(t) for t in toks) or any(
+            toks[i] in ("you", "ю") and cls._YT_TWO_SECOND_RE.fullmatch(toks[i + 1])
+            for i in range(len(toks) - 1)
+        )
+
+    @classmethod
+    def _extract_youtube_mix(cls, phrase):
+        """Распознать голосовую команду запуска личного микса YouTube Music."""
+        raw_words = (phrase or "").split()
+        items = []
+        for raw_idx, raw_word in enumerate(raw_words):
+            for tok in re.findall(r"[\w]+", raw_word.lower().replace("ё", "е")):
+                items.append((raw_idx, tok))
+        if not items:
+            return None
+
+        toks = [tok for _, tok in items]
+        if any(t in cls._MIX_EXCLUDED_WORDS for t in toks):
+            return None
+        if toks[0] in cls._QUESTION_WORDS or (len(toks) >= 2 and toks[0] in cls._YT_LEAD_WORDS and toks[1] in cls._QUESTION_WORDS):
+            return None
+
+        has_platform = cls._has_yt_platform(toks)
+        if ("понравившаяся" in toks or "понравившуюся" in toks or "лайкнутая" in toks) and ("музыка" in toks or "музыку" in toks) and has_platform:
+            return {"name": "понравившаяся музыка"}
+
+        mix_pos = next((i for i, t in enumerate(toks) if t in cls._MIX_TOKENS), -1)
+        if mix_pos < 0:
+            return None
+        if any(toks[i] == "моя" and i + 1 < len(toks) and toks[i + 1] == "волна" for i in range(len(toks))):
+            return None
+        if "дня" in toks and not has_platform:
+            return None
+
+        mix_tok = toks[mix_pos]
+        has_verb = any(t in cls._YT_VERBS for t in toks[:mix_pos])
+        has_personal = any(t in cls._MIX_PERSONAL_WORDS for t in toks)
+        has_named = any(t in cls._MIX_NAMED_WORDS for t in toks)
+        mix_num = next((cls._MIX_NUM_WORDS[t] for t in toks if t in cls._MIX_NUM_WORDS), None)
+
+        if mix_tok in ("супермикс", "supermix"):
+            if not (has_verb or has_personal or has_platform or has_named or len(toks) <= 4):
+                return None
+            for t in ("фитнеса", "бодрости", "концентрации"):
+                if t in toks:
+                    return {"name": f"супермикс для {t}"}
+            return {"name": "мой супермикс"}
+
+        if not (has_personal or has_named or has_platform):
+            return None
+        if "риплей" in toks or "replay" in toks:
+            return {"name": "риплей микс"}
+        if "архивный" in toks or "архив" in toks:
+            return {"name": "архивный микс"}
+        if mix_num is not None:
+            return {"name": f"мой микс {mix_num}", "index": mix_num}
+        return {"name": "мой микс"}
+
+    @classmethod
+    def _extract_youtube_radio(cls, phrase):
+        """Распознать радио по песне / текущему треку (не перехватывая обычное FM-радио)."""
+        raw_words = (phrase or "").split()
+        items = []
+        for raw_idx, raw_word in enumerate(raw_words):
+            for tok in re.findall(r"[\w]+", raw_word.lower().replace("ё", "е")):
+                items.append((raw_idx, tok))
+        if not items:
+            return None
+
+        toks = [tok for _, tok in items]
+        if toks[0] in cls._QUESTION_WORDS or (len(toks) >= 2 and toks[0] in cls._YT_LEAD_WORDS and toks[1] in cls._QUESTION_WORDS):
+            return None
+
+        has_platform = cls._has_yt_platform(toks)
+        radio_pos = next((i for i, t in enumerate(toks) if t in ("радио", "radio")), -1)
+        if radio_pos >= 0:
+            tail = cls._strip_platform_tokens(items[radio_pos + 1:])
+            while tail and tail[0][1] in cls._YT_LEAD_WORDS:
+                tail = tail[1:]
+            tail_toks = tuple(t for _, t in tail)
+            pre_toks = tuple(toks[max(0, radio_pos - 4):radio_pos])
+
+            if any(tail_toks[:len(p)] == p for p in cls._CURRENT_TRACK_PHRASES) or any(
+                pre_toks[-len(p):] == p for p in cls._CURRENT_TRACK_PHRASES
+            ):
+                return ("current", "")
+
+            matched_prefix = False
+            for p in cls._RADIO_QUERY_PREFIXES:
+                if tail_toks[:len(p)] == p:
+                    tail = tail[len(p):]
+                    matched_prefix = True
+                    break
+            if matched_prefix:
+                query = " ".join(raw_words[i] for i in sorted({raw_i for raw_i, _ in tail})).strip(" ,.:;!?—-")
+                return ("query", query) if query else None
+
+            if not has_platform:
+                return None
+
+            query = " ".join(raw_words[i] for i in sorted({raw_i for raw_i, _ in tail})).strip(" ,.:;!?—-")
+            return ("query", query) if query else ("current", "")
+
+        # Similar-music voice phrasing without word "радио"
+        for idx, tok in enumerate(toks):
+            if tok in ("похожую", "похожие", "похожее") and idx + 1 < len(toks):
+                nxt = toks[idx + 1]
+                if nxt in ("на",) and idx + 2 < len(toks):
+                    tail = cls._strip_platform_tokens(items[idx + 2:])
+                    query = " ".join(raw_words[i] for i in sorted({raw_i for raw_i, _ in tail})).strip(" ,.:;!?—-")
+                    if query:
+                        return ("query", query)
+                if nxt in ("музыку", "музыка", "треки", "песни") and (
+                    any(t in cls._YT_VERBS for t in toks[:idx]) or has_platform
+                ):
+                    return ("current", "") if has_platform else ("current_if_yt", "")
+        return None
+
     def _say_async(self, text):
         threading.Thread(target=self.speak, args=(text,), daemon=True).start()
 
@@ -1291,13 +1489,36 @@ class AssistantDaemon:
         except Exception as error:
             print(f"внешняя музыка: {action}: {error}", flush=True)
 
+    def _ext_play_youtube_mix(self, body):
+        try:
+            self._ext_call("/api/extmusic/yt/mix", "POST", dict(body or {}), timeout=120)
+        except Exception as error:
+            self.speak("Не удалось включить микс на YouTube: " + str(error)[:120])
+
+    def _ext_play_youtube_radio(self, mode="current", query=""):
+        try:
+            if query:
+                found = self._ext_call(
+                    "/api/extmusic/search?source=yt&q=" + urllib.parse.quote(query) + "&count=1",
+                    timeout=30,
+                )
+                tracks = found.get("tracks") or []
+                if not tracks:
+                    self.speak("Не удалось найти песню на YouTube для радио.")
+                    return
+                self._ext_call("/api/extmusic/radio", "POST", {"track": tracks[0]}, timeout=120)
+                return
+            self._ext_call("/api/extmusic/radio", "POST", {}, timeout=120)
+        except Exception as error:
+            self.speak("Не удалось включить радио на YouTube: " + str(error)[:120])
+
     def _ext_play_youtube(self, query):
         try:
             found = self._ext_call(
-                "/api/extmusic/search?source=yt&q=" + urllib.parse.quote(query) + "&count=5",
+                "/api/extmusic/search?source=yt&q=" + urllib.parse.quote(query) + f"&count={self._YT_QUEUE_LIMIT}",
                 timeout=30,
             )
-            tracks = found.get("tracks") or []
+            tracks = (found.get("tracks") or [])[:self._YT_QUEUE_LIMIT]
             if not tracks:
                 self.speak("Ничего не нашлось на YouTube.")
                 return
@@ -1328,6 +1549,7 @@ class AssistantDaemon:
             if not tracks:
                 self.speak("В YouTube Music нет понравившейся музыки.")
                 return
+            tracks = list(tracks)[:self._YT_QUEUE_LIMIT]
             self._ext_call("/api/extmusic/play", "POST", {"track": tracks[0], "queue": tracks}, timeout=120)
         except Exception as error:
             self.speak("Не удалось включить YouTube Music: " + str(error)[:120])
@@ -1343,6 +1565,31 @@ class AssistantDaemon:
             if rest is not None and normalize(rest):
                 phrase, norm = rest, normalize(rest)
                 break
+        mix_cmd = self._extract_youtube_mix(phrase)
+        if mix_cmd is not None:
+            print(f"YouTube микс голосом: {mix_cmd}", flush=True)
+            self._alice_cancel()
+            label = mix_cmd.get("name") or "ваш микс"
+            self._say_async(f"Включаю {label} на YouTube.")
+            threading.Thread(target=self._ext_play_youtube_mix, args=(mix_cmd,), daemon=True).start()
+            return True
+        radio_cmd = self._extract_youtube_radio(phrase)
+        if radio_cmd is not None:
+            r_mode, r_query = radio_cmd
+            if r_mode == "current_if_yt":
+                status = self._ext_status()
+                cur = status.get("current") if isinstance(status, dict) else None
+                if not cur or cur.get("source") != "yt":
+                    return False
+                r_mode = "current"
+            print(f"YouTube радио голосом: mode={r_mode}", flush=True)
+            self._alice_cancel()
+            if r_query:
+                self._say_async("Включаю радио по песне на YouTube.")
+            else:
+                self._say_async("Включаю радио по этому треку.")
+            threading.Thread(target=self._ext_play_youtube_radio, args=(r_mode, r_query), daemon=True).start()
+            return True
         query = self._extract_youtube_query(phrase)
         if query is not None:
             print("YouTube голосом: поиск и запуск", flush=True)

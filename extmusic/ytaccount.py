@@ -474,6 +474,16 @@ def _extract_like_status(payload: Dict[str, Any], video_id: str) -> str:
 
 
 class YTAccount:
+    _PERSONAL_MIX_DEFS = (
+        ("VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY", "Мой супермикс"),
+        ("VLRDTMAK5uy_nGQKSMIkpr4o9VI_2i56pkGliD6FQRo50", "Мой микс 1"),
+        ("VLRDTMAK5uy_lz2owBgwWf1mjzyn_NbxzMViQzIg8IAIg", "Мой микс 2"),
+        ("VLRDTMAK5uy_k5UUl0lmrrfrjMpsT0CoMpdcBz1ruAO1k", "Мой микс 3"),
+        ("VLRDTMAK5uy_nTsa0Irmcu2li2-qHBoZxtrpG9HuC3k_Q", "Мой микс 4"),
+        ("VLRDTMAK5uy_lfZhS7zmIcmUhsKtkWylKzc0EN0LW90-s", "Мой микс 5"),
+    )
+    _PERSONAL_MIX_TTL = 1800
+
     def __init__(self, store: Optional[ExtMusicStore] = None, panel=None):
         self.store = store or ExtMusicStore()
         self.panel = panel
@@ -482,6 +492,7 @@ class YTAccount:
         self._liked_ids: Optional[Set[str]] = None
         self._optimistic_likes: Set[str] = set()
         self._optimistic_unlikes: Set[str] = set()
+        self._personal_mix_cache: Dict[str, Any] = {"at": 0.0, "entries": {}}
 
     def is_configured(self) -> bool:
         return self.store.is_yt_authenticated()
@@ -503,6 +514,7 @@ class YTAccount:
             self._liked_ids = None
             self._optimistic_likes.clear()
             self._optimistic_unlikes.clear()
+            self._personal_mix_cache = {"at": 0.0, "entries": {}}
 
     def logout(self) -> Dict[str, Any]:
         email = self.account().get("account") or ""
@@ -950,7 +962,8 @@ class YTAccount:
         norm_id = self._normalize_browse_id(browse_id)
         limit = max(1, min(300, int(limit or 100)))
         is_private_only = norm_id in ("VLLM", "FEmusic_liked_videos")
-        is_public_type = norm_id.startswith(("MPREb_", "UC", "VLOLAK5uy_", "VLRD"))
+        # Keep VLRD* (personal RDTMAK* mixes) private-first when configured: public client drops/mismatches them.
+        is_public_type = norm_id.startswith(("MPREb_", "UC", "VLOLAK5uy_"))
 
         if not self.is_configured():
             if is_private_only:
@@ -992,7 +1005,128 @@ class YTAccount:
     def playlist(self, browse_id: str, limit: int = 100) -> List[Dict[str, Any]]:
         return self.collection(browse_id, limit=limit)["tracks"]
 
-    def _collect_mixes(self, payload: Optional[Dict[str, Any]], feed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _resolve_personal_mix_entry(self, browse_id: str, fallback_title: str) -> Optional[Dict[str, Any]]:
+        try:
+            col = self._browse_collection_private(browse_id, limit=10)
+        except (YTAccountError, YTMusicError, KeyError, TypeError, ValueError):
+            return None
+        tracks = [t for t in (col.get("tracks") or []) if isinstance(t, dict)]
+        if not tracks:
+            return None
+        artists = list(dict.fromkeys(
+            str(t.get("artist") or "").strip()
+            for t in tracks
+            if str(t.get("artist") or "").strip() and str(t.get("artist") or "").strip() != "YouTube Music"
+        ))
+        subtitle = ", ".join(artists[:4]) or str(col.get("subtitle") or "").strip() or "Персональный микс"
+        thumb = str(col.get("thumb") or "").strip() or next((str(t.get("thumb") or "") for t in tracks if t.get("thumb")), "")
+        title = str(col.get("title") or "").strip()
+        if not title or title == "Плейлист":
+            title = fallback_title
+        return {
+            "kind": "playlist",
+            "title": title,
+            "subtitle": subtitle,
+            "browse_id": browse_id,
+            "playlist_id": browse_id[2:] if browse_id.startswith("VL") else browse_id,
+            "thumb": thumb,
+        }
+
+    def _collect_personal_mixes(
+        self, topics_payload: Optional[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        by_bid: Dict[str, Dict[str, Any]] = {}
+        topics_personal: List[Dict[str, Any]] = []
+        topics_other: List[Dict[str, Any]] = []
+
+        if topics_payload:
+            seen_t: Set[str] = set()
+            for entry in (
+                [_tile_playlist(item) for item in _walk(topics_payload, "tileRenderer")]
+                + [_two_row(item) for item in _walk(topics_payload, "musicTwoRowItemRenderer")]
+            ):
+                if not isinstance(entry, dict) or entry.get("kind") != "playlist":
+                    continue
+                bid = str(entry.get("browse_id") or "")
+                if not bid or bid in seen_t:
+                    continue
+                seen_t.add(bid)
+                if bid.startswith("VLRDTMAK"):
+                    by_bid[bid] = entry
+                    topics_personal.append(entry)
+                else:
+                    topics_other.append(entry)
+
+        if by_bid or (self.is_configured() and self.store.has_oauth()):
+            now = time.time()
+            with self._lock:
+                cache_fresh = now - float(self._personal_mix_cache.get("at") or 0.0) < self._PERSONAL_MIX_TTL
+                cached_entries = dict(self._personal_mix_cache.get("entries") or {}) if cache_fresh else {}
+
+            missing: List[Tuple[str, str]] = []
+            for core_bid, core_title in self._PERSONAL_MIX_DEFS:
+                if core_bid in by_bid:
+                    cached_entries[core_bid] = by_bid[core_bid]
+                elif core_bid in cached_entries:
+                    by_bid[core_bid] = cached_entries[core_bid]
+                else:
+                    missing.append((core_bid, core_title))
+
+            if missing:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=min(4, len(missing))) as pool:
+                    futures = [(core_bid, pool.submit(self._resolve_personal_mix_entry, core_bid, core_title))
+                               for core_bid, core_title in missing]
+                    for core_bid, fut in futures:
+                        try:
+                            resolved = fut.result(timeout=8)
+                        except Exception:
+                            resolved = None
+                        if isinstance(resolved, dict):
+                            by_bid[core_bid] = resolved
+                            cached_entries[core_bid] = resolved
+
+            with self._lock:
+                self._personal_mix_cache = {"at": now, "entries": cached_entries}
+
+        personal: List[Dict[str, Any]] = []
+        used: Set[str] = set()
+        super_bid = self._PERSONAL_MIX_DEFS[0][0]
+        if super_bid in by_bid:
+            personal.append(by_bid[super_bid])
+            used.add(super_bid)
+
+        if self.is_configured():
+            personal.append({
+                "kind": "liked",
+                "title": "Понравившаяся музыка",
+                "subtitle": "Создан автоматически",
+                "browse_id": "VLLM",
+                "playlist_id": "LM",
+                "thumb": LIKED_THUMB_URL,
+            })
+            used.add("VLLM")
+
+        for core_bid, _ in self._PERSONAL_MIX_DEFS[1:]:
+            if core_bid in by_bid and core_bid not in used:
+                personal.append(by_bid[core_bid])
+                used.add(core_bid)
+
+        for entry in topics_personal:
+            bid = str(entry.get("browse_id") or "")
+            if bid and bid not in used:
+                personal.append(entry)
+                used.add(bid)
+
+        return personal, topics_other
+
+    def _collect_mixes(
+        self,
+        payload: Optional[Dict[str, Any]],
+        feed: List[Dict[str, Any]],
+        topics_payload: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         mixes: List[Dict[str, Any]] = []
         seen: Set[str] = set()
 
@@ -1007,6 +1141,10 @@ class YTAccount:
             seen.add(key)
             mixes.append(entry)
 
+        personal_mixes, topics_other = self._collect_personal_mixes(topics_payload)
+        for entry in personal_mixes:
+            _add_mix(entry)
+
         if payload:
             for item in _walk(payload, "musicTwoRowItemRenderer"):
                 entry = _two_row(item)
@@ -1017,25 +1155,31 @@ class YTAccount:
                 if entry and entry.get("kind") == "playlist":
                     _add_mix(entry)
 
+        has_real_personal = any(str(m.get("browse_id") or "").startswith("VLRDTMAK") for m in mixes)
+        if not has_real_personal:
+            for entry in topics_other:
+                _add_mix(entry)
+
         if self.is_configured():
             try:
                 lib = self.library()
                 for pl in (lib.get("playlists") or [])[:4]:
                     _add_mix(pl)
-                for art in (lib.get("artists") or [])[:3]:
-                    art_id = str(art.get("browse_id") or "")
-                    art_name = str(art.get("title") or "").strip()
-                    if not art_id or not art_name:
-                        continue
-                    _add_mix({
-                        "kind": "artist",
-                        "title": f"Микс: {art_name}",
-                        "subtitle": "Персональный микс",
-                        "browse_id": art_id,
-                        "playlist_id": str(art.get("playlist_id") or ""),
-                        "artist_id": art_id,
-                        "thumb": str(art.get("thumb") or ""),
-                    })
+                if not has_real_personal:
+                    for art in (lib.get("artists") or [])[:3]:
+                        art_id = str(art.get("browse_id") or "")
+                        art_name = str(art.get("title") or "").strip()
+                        if not art_id or not art_name:
+                            continue
+                        _add_mix({
+                            "kind": "artist",
+                            "title": f"Микс: {art_name}",
+                            "subtitle": "Персональный микс",
+                            "browse_id": art_id,
+                            "playlist_id": str(art.get("playlist_id") or ""),
+                            "artist_id": art_id,
+                            "thumb": str(art.get("thumb") or ""),
+                        })
             except (YTAccountError, YTMusicError, KeyError, TypeError, ValueError):
                 pass
 
@@ -1050,7 +1194,7 @@ class YTAccount:
                     "playlist_id": f"RDAMVM{seed}",
                     "thumb": str(feed[0].get("thumb") or ""),
                 })
-        return mixes[:12]
+        return mixes[:16]
 
     def home(self, limit: int = 30) -> Dict[str, Any]:
         """Combine public quick picks/moods with personalized account mixes and home feed."""
@@ -1071,13 +1215,20 @@ class YTAccount:
             pass
 
         payload: Optional[Dict[str, Any]] = None
+        topics_payload: Optional[Dict[str, Any]] = None
         feed: List[Dict[str, Any]] = []
         if self.is_configured():
-            home_browse_id = "FEwhat_to_watch" if self.store.has_oauth() else "FEmusic_home"
+            has_oauth = self.store.has_oauth()
+            home_browse_id = "FEwhat_to_watch" if has_oauth else "FEmusic_home"
             try:
                 payload = self._browse(home_browse_id)
             except (YTAccountError, YTMusicError, KeyError, TypeError, ValueError):
                 payload = None
+            if has_oauth:
+                try:
+                    topics_payload = self._browse("FEtopics_music")
+                except (YTAccountError, YTMusicError, KeyError, TypeError, ValueError):
+                    topics_payload = None
 
             if payload:
                 feed = [_normalize_track(t) for t in _tracks(payload)]
@@ -1091,7 +1242,7 @@ class YTAccount:
                         seen_moods.add(title)
                         moods.append({"title": title, "token": _text(token, 4000)})
 
-        mixes = self._collect_mixes(payload, feed)
+        mixes = self._collect_mixes(payload, feed, topics_payload=topics_payload)
 
         tracks = list(feed) if feed else list(quick_picks)
         if not tracks and self.is_configured():

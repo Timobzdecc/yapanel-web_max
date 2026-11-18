@@ -1,4 +1,5 @@
 import time
+import urllib.parse
 from unittest.mock import Mock
 
 import assistant_max
@@ -153,3 +154,121 @@ def test_extmusic_youtube_default_does_not_resume_vk_and_falls_back():
     assert ("GET", "/api/extmusic/yt/account/home?count=10") in called_paths
     assert ("GET", "/api/extmusic/yt/home?count=10") in called_paths
     assert any(m == "POST" and p == "/api/extmusic/play" for m, p in called_paths)
+
+
+def test_extmusic_youtube_personal_mix_phrases():
+    cases = (
+        ("Алиса, включи мой супермикс", {"name": "мой супермикс"}),
+        ("включи пожалуйста супермикс", {"name": "мой супермикс"}),
+        ("включи мой микс", {"name": "мой микс"}),
+        ("включи мой микс 1", {"name": "мой микс 1", "index": 1}),
+        ("поставь второй мой микс", {"name": "мой микс 2", "index": 2}),
+        ("включи мой микс три", {"name": "мой микс 3", "index": 3}),
+        ("включи мой микс на ютубе", {"name": "мой микс"}),
+        ("поставь риплей микс на ютубе", {"name": "риплей микс"}),
+        ("включи понравившуюся музыку на ютубе", {"name": "понравившаяся музыка"}),
+    )
+    for phrase, expected_body in cases:
+        daemon = _bare_daemon()
+        daemon._ext_cache = {"current": {"source": "yt", "id": "cur1", "title": "Numb", "artist": "Linkin Park"}}
+        calls = []
+
+        def fake_call(path, method="GET", body=None, timeout=30):
+            calls.append((method, path, body))
+            return {"ok": True}
+
+        daemon._ext_call = fake_call
+        assert daemon.handle_extmusic(phrase) is True, f"Failed for personal mix phrase: {phrase}"
+        daemon._alice_cancel.assert_called_once()
+        time.sleep(0.08)
+        assert ("POST", "/api/extmusic/yt/mix", expected_body) in calls, f"Wrong API payload for {phrase}: {calls}"
+        assert not any(p.startswith("/api/extmusic/search") for _, p, _ in calls)
+
+
+def test_extmusic_youtube_song_radio_phrases():
+    song_tr = {"source": "yt", "id": "sonne1", "title": "Sonne", "artist": "Rammstein"}
+    # Query-based song radio searches YT track and posts to /api/extmusic/radio
+    for phrase, expected_q in (
+        ("Алиса, включи радио на ютубе Rammstein Sonne", "Rammstein Sonne"),
+        ("включи радио по песне Linkin Park Numb", "Linkin Park Numb"),
+        ("запусти на ютубе радио по треку Звери", "Звери"),
+    ):
+        daemon = _bare_daemon()
+        calls = []
+
+        def fake_call(path, method="GET", body=None, timeout=30):
+            calls.append((method, path, body))
+            if path.startswith("/api/extmusic/search"):
+                return {"tracks": [song_tr]}
+            return {"ok": True}
+
+        daemon._ext_call = fake_call
+        assert daemon.handle_extmusic(phrase) is True, f"Failed for song radio phrase: {phrase}"
+        daemon._alice_cancel.assert_called_once()
+        time.sleep(0.08)
+        assert any(m == "GET" and urllib.parse.quote(expected_q) in p for m, p, _ in calls), f"Missing search for {phrase}: {calls}"
+        assert ("POST", "/api/extmusic/radio", {"track": song_tr}) in calls, f"Missing radio POST for {phrase}: {calls}"
+
+    # Current-track song radio calls /api/extmusic/radio with {}
+    for phrase in (
+        "включи радио под эту песню",
+        "включи радио по текущему треку",
+        "включи похожую музыку",
+    ):
+        daemon = _bare_daemon()
+        daemon._ext_cache = {"current": {"source": "yt", "id": "cur1", "title": "Numb", "artist": "Linkin Park"}}
+        calls = []
+
+        def fake_call(path, method="GET", body=None, timeout=30):
+            calls.append((method, path, body))
+            return {"ok": True}
+
+        daemon._ext_call = fake_call
+        assert daemon.handle_extmusic(phrase) is True, f"Failed for current song radio: {phrase}"
+        daemon._alice_cancel.assert_called_once()
+        time.sleep(0.08)
+        assert ("POST", "/api/extmusic/radio", {}) in calls, f"Wrong payload for {phrase}: {calls}"
+
+
+def test_extmusic_does_not_steal_fm_radio_or_removed_jam_phrases():
+    for phrase in (
+        "Алиса, включи радио",
+        "включи радио Европа Плюс",
+        "включи радио Дача",
+        "включи мою волну",
+        "включи микс дня",
+        "включи похожую музыку",
+        "Алиса, включи мой джем",
+        "включи джем по песне Sonne",
+        "купи банку малинового джема",
+    ):
+        daemon = _bare_daemon()
+        assert daemon.handle_extmusic(phrase) is False, f"Falsely intercepted: {phrase}"
+        daemon._alice_cancel.assert_not_called()
+
+
+def test_extmusic_voice_youtube_requests_25_track_queue():
+    daemon = _bare_daemon()
+    # Restore real _ext_play_youtube and _ext_play_youtube_default methods (override _bare_daemon's Mock)
+    daemon._ext_play_youtube = assistant_max.AssistantDaemon._ext_play_youtube.__get__(daemon)
+    daemon._ext_play_youtube_default = assistant_max.AssistantDaemon._ext_play_youtube_default.__get__(daemon)
+    calls = []
+
+    def fake_call(path, method="GET", body=None, timeout=30):
+        calls.append((method, path, body))
+        if path.startswith("/api/extmusic/search"):
+            return {"tracks": [{"id": f"s{i}", "title": f"S{i}", "artist": "A"} for i in range(30)]}
+        if path == "/api/extmusic/yt/account/liked?count=50":
+            return {"tracks": [{"id": f"l{i}", "title": f"L{i}", "artist": "B"} for i in range(50)]}
+        return {"ok": True}
+
+    daemon._ext_call = fake_call
+    daemon._ext_play_youtube("Linkin Park")
+    assert ("GET", "/api/extmusic/search?source=yt&q=Linkin%20Park&count=25", None) in calls
+    play_bodies = [b for m, p, b in calls if p == "/api/extmusic/play"]
+    assert len(play_bodies[-1]["queue"]) == 25
+
+    calls.clear()
+    daemon._ext_play_youtube_default()
+    play_bodies = [b for m, p, b in calls if p == "/api/extmusic/play"]
+    assert len(play_bodies[-1]["queue"]) == 25

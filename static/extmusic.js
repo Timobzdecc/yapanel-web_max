@@ -395,6 +395,7 @@
           ${dur ? `<span class="td">${esc(dur)}</span>` : ''}
         </div>
         <span class="trow-acts">
+          <button type="button" class="cbtn sm" data-yt-radio-track="${esc(listKey)}" data-yt-idx="${idx}" title="Радио по треку" aria-label="Радио по треку: ${esc(title)}">📻</button>
           <button type="button" class="cbtn sm${isLiked ? ' liked' : ''}" data-yt-like="${esc(vid)}" data-yt-title="${esc(title)}" aria-pressed="${isLiked ? 'true' : 'false'}" title="Нравится" aria-label="${isLiked ? 'Убрать лайк' : 'Лайк'}: ${esc(title)}"><svg width="15" height="15" aria-hidden="true"><use href="#i-like"/></svg></button>
           <button type="button" class="cbtn sm" data-yt-next="${esc(listKey)}" data-yt-idx="${idx}" title="Играть следующим" aria-label="Играть следующим: ${esc(title)}">⏭+</button>
           <button type="button" class="cbtn sm" data-yt-queue="${esc(listKey)}" data-yt-idx="${idx}" title="Добавить в очередь" aria-label="Добавить в очередь: ${esc(title)}">☰+</button>
@@ -530,14 +531,15 @@
     }
   }
 
-  async function playRadio(opts, btn = null) {
+  async function playRadio(opts = {}, btn = null) {
     if (btn) btn.disabled = true;
     showError('');
     try {
       status = await call('/api/extmusic/radio', opts || {});
       renderStatus();
       refreshPanelPlayer();
-      notify('Радио запущено');
+      const title = opts?.track?.title;
+      notify(title ? `Радио по треку: ${title}` : 'Радио запущено');
     } catch (e) {
       const msg = e?.message || 'Не удалось запустить радио';
       showError(msg);
@@ -1517,6 +1519,15 @@
         return;
       }
 
+      const radioBtn = e.target.closest('[data-yt-radio-track]');
+      if (radioBtn) {
+        e.stopPropagation();
+        const items = listRegistry.get(radioBtn.dataset.ytRadioTrack) || [];
+        const tr = items[Number(radioBtn.dataset.ytIdx)];
+        if (tr) playRadio({ track: { ...tr, source: 'yt' } }, radioBtn);
+        return;
+      }
+
       const nextBtn = e.target.closest('[data-yt-next]');
       if (nextBtn) {
         e.stopPropagation();
@@ -1619,6 +1630,7 @@
     $('yt-detail-back')?.addEventListener('click', goBack);
 
     // Home actions
+    $('yt-mixes-refresh')?.addEventListener('click', () => { homeLoaded = false; loadHome(); });
     $('yt-home-refresh')?.addEventListener('click', () => { homeLoaded = false; loadHome(); });
     $('yt-home-warn-account')?.addEventListener('click', () => setSection('account'));
 

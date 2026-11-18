@@ -1383,6 +1383,163 @@ class ExtMusicService:
                     self._orig_queue = [t for t in self._orig_queue if self._track_key(t) not in rem_keys]
         return self.status()
 
+    _RADIO_QUEUE_SIZE = 25
+
+    def _append_unique_tracks(
+        self,
+        dest: List[Dict[str, Any]],
+        items: Iterable[Any],
+        seen: set,
+        limit: Optional[int] = None,
+    ) -> int:
+        added = 0
+        for raw in items or ():
+            if limit is not None and len(dest) >= limit:
+                break
+            nt = self._queue_track(raw)
+            if not nt:
+                continue
+            k = self._track_key(nt)
+            if k in seen:
+                continue
+            seen.add(k)
+            dest.append(nt)
+            added += 1
+        return added
+
+    def _load_mix_tracks(self, browse_id: str, limit: int = _RADIO_QUEUE_SIZE) -> List[Dict[str, Any]]:
+        bid = self._strip_ext_yt(browse_id)
+        if not bid:
+            return []
+        if bid in ("VLLM", "FEmusic_liked_videos") and self.yt_account.is_configured():
+            raw = self.yt_account.liked(limit=limit) or []
+        else:
+            col = self.yt_collection(bid, limit=limit)
+            raw = col.get("tracks") or []
+        queue: List[Dict[str, Any]] = []
+        self._append_unique_tracks(queue, raw, set(), limit=limit)
+        return queue
+
+    def _select_personal_mix_id(self, mixes: List[Dict[str, Any]], name: str = "", index: Any = None) -> str:
+        norm = " ".join(str(name or "").strip().lower().replace("ё", "е").split())
+        req_idx: Optional[int] = None
+        if index is not None and not isinstance(index, bool):
+            try:
+                val = int(index)
+                if 1 <= val <= 9:
+                    req_idx = val
+            except (TypeError, ValueError):
+                req_idx = None
+        if req_idx is None and norm:
+            last_tok = norm.split()[-1]
+            if last_tok.isdigit() and 1 <= int(last_tok) <= 9:
+                req_idx = int(last_tok)
+
+        def _bid_of(entry: Dict[str, Any]) -> str:
+            return str(entry.get("browse_id") or "").strip()
+
+        if req_idx is not None:
+            for m in mixes:
+                title = str(m.get("title") or "").strip().lower().replace("ё", "е")
+                if title in (f"мой микс {req_idx}", f"my mix {req_idx}", f"микс {req_idx}"):
+                    return _bid_of(m)
+            core_defs = getattr(self.yt_account, "_PERSONAL_MIX_DEFS", ())
+            if req_idx < len(core_defs):
+                return str(core_defs[req_idx][0])
+
+        if any(tok in norm for tok in ("понравив", "лайк", "liked")):
+            for m in mixes:
+                if _bid_of(m) in ("VLLM", "FEmusic_liked_videos") or m.get("kind") == "liked":
+                    return "VLLM"
+            return "VLLM"
+
+        if "супермикс" in norm or "supermix" in norm:
+            words = [w for w in norm.split() if w not in ("мой", "супермикс", "supermix", "для")]
+            if words:
+                for m in mixes:
+                    title = str(m.get("title") or "").strip().lower().replace("ё", "е")
+                    if "супермикс" in title and all(w in title for w in words):
+                        return _bid_of(m)
+            for m in mixes:
+                title = str(m.get("title") or "").strip().lower().replace("ё", "е")
+                if title in ("мой супермикс", "my supermix"):
+                    return _bid_of(m)
+            core_defs = getattr(self.yt_account, "_PERSONAL_MIX_DEFS", ())
+            if core_defs:
+                return str(core_defs[0][0])
+
+        if norm:
+            for m in mixes:
+                title = str(m.get("title") or "").strip().lower().replace("ё", "е")
+                if title == norm:
+                    return _bid_of(m)
+            if norm in ("мой микс", "my mix", "персональный микс", "личный микс"):
+                for m in mixes:
+                    title = str(m.get("title") or "").strip().lower().replace("ё", "е")
+                    if title in ("мой микс 1", "my mix 1"):
+                        return _bid_of(m)
+            for m in mixes:
+                title = str(m.get("title") or "").strip().lower().replace("ё", "е")
+                if norm in title:
+                    return _bid_of(m)
+
+        for m in mixes:
+            bid = _bid_of(m)
+            if bid.startswith("VLRDTMAK"):
+                return bid
+        for m in mixes:
+            bid = _bid_of(m)
+            if bid:
+                return bid
+        return ""
+
+    def yt_mix_play(
+        self,
+        name: str = "",
+        index: Any = None,
+        browse_id: str = "",
+        limit: int = _RADIO_QUEUE_SIZE,
+    ) -> Dict[str, Any]:
+        """Play a personalized YouTube Music mix ('Мой супермикс', 'Мой микс 1..5', 'Понравившаяся музыка')."""
+        with self.lock:
+            self._require_not_native()
+        target = max(1, min(100, int(limit or self._RADIO_QUEUE_SIZE)))
+        bid = self._strip_ext_yt(str(browse_id or ""))
+        queue: List[Dict[str, Any]] = []
+
+        if bid:
+            queue = self._load_mix_tracks(bid, limit=target)
+        elif self.yt_account.is_configured():
+            mixes: List[Dict[str, Any]] = []
+            try:
+                home_data = self.yt_account.home(limit=target) or {}
+                mixes = [m for m in (home_data.get("mixes") or []) if isinstance(m, dict)]
+            except (YTAccountError, YTMusicError, ExtMusicError):
+                mixes = []
+            picked_bid = self._select_personal_mix_id(mixes, name=name, index=index)
+            if picked_bid:
+                try:
+                    queue = self._load_mix_tracks(picked_bid, limit=target)
+                except (YTAccountError, YTMusicError, ExtMusicError):
+                    queue = []
+
+        if not queue:
+            try:
+                home_data = self.yt_home(limit=target)
+                fallback = (
+                    (home_data.get("tracks") or [])
+                    or (home_data.get("quick_picks") or [])
+                    or (home_data.get("feed") or [])
+                )
+                self._append_unique_tracks(queue, fallback, set(), limit=target)
+            except (YTAccountError, YTMusicError, ExtMusicError):
+                queue = []
+
+        if not queue:
+            raise ExtMusicError("Не удалось загрузить персональный микс YouTube Music")
+        self._cache_tracks(queue)
+        return self.play(queue[0], queue)
+
     def radio_play(self, track: Any = None, browse_id: str = "") -> Dict[str, Any]:
         with self.lock:
             self._require_not_native()
@@ -1402,24 +1559,25 @@ class ExtMusicService:
         seed_vid = ""
         seed_pl = ""
         fallback_tracks: List[Dict[str, Any]] = []
+        target_size = self._RADIO_QUEUE_SIZE
 
         if seed_track is not None:
             if seed_track.get("source") != "yt":
                 raise ExtMusicError("Радио доступно только для YouTube Music")
             seed_vid = str(seed_track.get("id") or "")
             pl_cand = str(seed_track.get("playlist_id") or "")
-            if pl_cand.startswith("RD"):
+            if pl_cand.startswith("RD") and not pl_cand.startswith("RDTMAK"):
                 seed_pl = pl_cand
         elif bid:
             norm_bid = bid[2:] if bid.startswith("VL") else bid
-            if norm_bid.startswith("RD"):
+            if norm_bid.startswith("RD") and not norm_bid.startswith("RDTMAK"):
                 seed_pl = norm_bid
             else:
-                col = self.yt_collection(bid, limit=30)
+                col = self.yt_collection(bid, limit=target_size)
                 col_tracks = [t for t in (col.get("tracks") or []) if isinstance(t, dict)]
                 fallback_tracks = col_tracks
                 col_pl = str(col.get("playlist_id") or "")
-                if col_pl.startswith("RD"):
+                if col_pl.startswith("RD") and not col_pl.startswith("RDTMAK"):
                     seed_pl = col_pl
                 elif col_tracks:
                     seed_vid = str(col_tracks[0].get("id") or col_tracks[0].get("video_id") or "")
@@ -1434,7 +1592,7 @@ class ExtMusicService:
             raise ExtMusicError("В коллекции нет треков для запуска радио")
 
         try:
-            radio_tracks = self.ytmusic.radio(seed_vid, seed_pl, 30) or []
+            radio_tracks = self.ytmusic.radio(seed_vid, seed_pl, target_size) or []
         except YTMusicError as error:
             if not fallback_tracks and seed_track is None:
                 raise ExtMusicError(str(error)) from error
@@ -1448,19 +1606,16 @@ class ExtMusicService:
                 None,
             )
             use_seed = matched if (matched and seed_track.get("title") in ("", "Без названия", "YouTube Music")) else seed_track
-            first = self._queue_track(use_seed)
-            if first:
-                seen.add(self._track_key(first))
-                queue.append(first)
-        for raw in (radio_tracks or fallback_tracks):
-            nt = self._queue_track(raw)
-            if not nt:
-                continue
-            k = self._track_key(nt)
-            if k in seen:
-                continue
-            seen.add(k)
-            queue.append(nt)
+            self._append_unique_tracks(queue, [use_seed], seen, limit=target_size)
+        self._append_unique_tracks(queue, radio_tracks or fallback_tracks, seen, limit=target_size)
+        if 10 <= len(queue) < target_size and radio_tracks:
+            tail_id = str(queue[-1].get("id") or "")
+            if tail_id and tail_id != seed_vid:
+                try:
+                    more = self.ytmusic.radio(tail_id, "", target_size) or []
+                    self._append_unique_tracks(queue, more, seen, limit=target_size)
+                except YTMusicError:
+                    pass
         if not queue:
             raise ExtMusicError("Не удалось подобрать радио-очередь")
         self._cache_tracks(queue)
@@ -1690,7 +1845,7 @@ class ExtMusicService:
         radio_error = ""
         radio_tracks: List[Dict[str, Any]] = []
         try:
-            radio_tracks = self.ytmusic.radio(seed_vid, seed_pl, 30) or []
+            radio_tracks = self.ytmusic.radio(seed_vid, seed_pl, self._RADIO_QUEUE_SIZE) or []
         except YTMusicError as error:
             radio_error = str(error)
         except Exception as error:  # noqa: BLE001
@@ -1709,15 +1864,7 @@ class ExtMusicService:
                 existing_keys = {self._track_key(t) for t in self.queue}
                 existing_keys.add(self._track_key(self.current))
                 new_tracks: List[Dict[str, Any]] = []
-                for raw in radio_tracks:
-                    nt = self._queue_track(raw)
-                    if not nt:
-                        continue
-                    k = self._track_key(nt)
-                    if k in existing_keys:
-                        continue
-                    existing_keys.add(k)
-                    new_tracks.append(nt)
+                self._append_unique_tracks(new_tracks, radio_tracks, existing_keys, limit=self._RADIO_QUEUE_SIZE)
                 if not new_tracks:
                     self._stop_locked()
                 else:
