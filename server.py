@@ -4778,6 +4778,7 @@ pidof com.yandex.io.sdk >/dev/null && echo quasar=running || echo quasar=stopped
                 "playlistType": "Track",
                 "playlistDescription": "YouTube Music" if source == "yt" else "VK Music",
                 "native": is_native,
+                "buffering": bool(player.get("buffering")),
                 "autoplayRadio": autoplay_radio,
                 "liked": self._ext_track_liked_cached(cur),
                 "entityInfo": {

@@ -528,6 +528,11 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
 
             if head_only:
                 return
+            if r_start == 0:
+                with bridge._lock:
+                    if bridge._is_active and not bridge._is_paused:
+                        bridge._seek_start_time = time.time() + 0.35
+                        bridge._stream_started = True
             if hdr_slice:
                 self.wfile.write(hdr_slice)
             if upstream is not None and (upstream_bytes_left is None or upstream_bytes_left > 0):
@@ -572,6 +577,7 @@ class GstBridge:
         self._fallback_urls: List[str] = []
         self._seek_offset_sec: float = 0.0
         self._seek_start_time: float = 0.0
+        self._stream_started: bool = False
         self._paused_pos: float = 0.0
         self._track_duration: float = 0.0
         self.streamer: Optional[MP4Streamer] = None
@@ -813,6 +819,7 @@ class GstBridge:
             self.release()
             raise GstBridgeError("Не удалось подключить аудио-хук (frida-inject)")
         backups = [str(u) for u in (fallback_urls or []) if u and str(u) != url][:4]
+        proxy_url = self._proxy_url(0.0)
         with self._lock:
             self._stream_gen += 1
             self._last_url = url
@@ -823,6 +830,7 @@ class GstBridge:
             self._seek_offset_sec = 0.0
             self._paused_pos = 0.0
             self._seek_start_time = time.time()
+            self._stream_started = proxy_url is None
             self.streamer = None
             self._streamer_done = threading.Event()
             self._is_active = True
@@ -832,7 +840,7 @@ class GstBridge:
         threading.Thread(target=self._init_streamer, args=(url,), daemon=True).start()
 
         # 1. Route initial playback through local retry proxy when bound (avoids 403 / libsoup stalls)
-        self._write_override(self._proxy_url(0.0) or url)
+        self._write_override(proxy_url or url)
 
         # 2. Trigger native playback via Glagol
         try:
@@ -847,10 +855,13 @@ class GstBridge:
         with self._lock:
             if not self._is_paused:
                 self._is_paused = True
-                if self._seek_offset_sec > 0:
-                    self._paused_pos = self._seek_offset_sec + max(0.0, time.time() - self._seek_start_time)
+                now = time.time()
+                if not self._stream_started and self._seek_start_time > 0 and (now - self._seek_start_time) < 8.0:
+                    self._paused_pos = self._seek_offset_sec
+                elif self._seek_offset_sec > 0:
+                    self._paused_pos = self._seek_offset_sec + max(0.0, now - self._seek_start_time)
                 else:
-                    self._paused_pos = max(0.0, time.time() - self._seek_start_time) if self._seek_start_time > 0 else 0.0
+                    self._paused_pos = max(0.0, now - self._seek_start_time) if self._seek_start_time > 0 else 0.0
         try:
             self._send_glagol({"command": "stop"})
         except Exception:
@@ -879,6 +890,7 @@ class GstBridge:
             self._seek_offset_sec = 0.0
             self._paused_pos = 0.0
             self._seek_start_time = 0.0
+            self._stream_started = False
             self.streamer = None
             self._streamer_done.set()
         self._clear_override()
@@ -906,15 +918,17 @@ class GstBridge:
 
         # If seeking to beginning, reload via local retry proxy when bound
         if sec <= 0.5:
+            proxy_url = self._proxy_url(0.0)
             with self._lock:
                 self._seek_offset_sec = 0.0
                 self._paused_pos = 0.0
                 self._seek_start_time = time.time()
+                self._stream_started = proxy_url is None
                 self._is_paused = False
                 last_url = self._last_url
             if not last_url:
                 return 0
-            self._write_override(self._proxy_url(0.0) or last_url)
+            self._write_override(proxy_url or last_url)
             self._restart_glagol_playback("seek to 0")
             return 1
 
@@ -945,6 +959,7 @@ class GstBridge:
                     self._seek_offset_sec = actual_sec
                     self._paused_pos = actual_sec
                     self._seek_start_time = time.time()
+                    self._stream_started = False
                     self._is_paused = False
                 self._write_override(proxy_url)
                 print(f"[GST] Seeking to {sec:.2f}s -> actual {actual_sec:.2f}s (offset {byte_off}, base_dt={base_decode_time}): {proxy_url}", flush=True)
@@ -960,6 +975,7 @@ class GstBridge:
             self._seek_offset_sec = sec
             self._paused_pos = sec
             self._seek_start_time = time.time()
+            self._stream_started = True
         try:
             self._send_glagol({"command": "rewind", "position": sec})
         except Exception:
@@ -979,9 +995,12 @@ class GstBridge:
             paused_pos = self._paused_pos
             seek_offset_sec = self._seek_offset_sec
             seek_start_time = self._seek_start_time
+            stream_started = self._stream_started
             track_duration = self._track_duration
             streamer = self.streamer
 
+        buffering = False
+        now = time.time()
         if is_paused:
             status = "paused"
             is_playing = False
@@ -989,10 +1008,15 @@ class GstBridge:
         elif is_playing or is_active:
             status = "playing"
             is_playing = True
-            if seek_offset_sec > 0:
-                effective_pos = seek_offset_sec + max(0.0, time.time() - seek_start_time)
+            if (not stream_started and seek_start_time > 0 and (now - seek_start_time) < 8.0) or (
+                stream_started and seek_start_time > now
+            ):
+                buffering = True
+                effective_pos = seek_offset_sec
+            elif seek_offset_sec > 0:
+                effective_pos = seek_offset_sec + max(0.0, now - seek_start_time)
             elif seek_start_time > 0:
-                effective_pos = max(0.0, time.time() - seek_start_time)
+                effective_pos = max(0.0, now - seek_start_time)
             else:
                 effective_pos = float(pstate.get("progress") or 0.0)
         else:
@@ -1010,6 +1034,7 @@ class GstBridge:
             "ok": True,
             "state": status,
             "playing": is_playing,
+            "buffering": buffering,
             "position": int(effective_pos * 1000),
             "duration": int(effective_dur * 1000),
             "levels": [],
