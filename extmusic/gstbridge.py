@@ -541,16 +541,26 @@ class GstBridge:
         self._ensure_server()
 
     def _ensure_server(self) -> None:
+        """Start the local HTTP streaming proxy, falling back to an ephemeral port if PROXY_PORT is busy."""
         with self._lock:
             if self._server is not None:
                 return
-            try:
-                handler_cls = type("_BoundStreamHandler", (_StreamRequestHandler,), {"bridge": self})
-                self._server = _ReusableTCPServer(("127.0.0.1", PROXY_PORT), handler_cls)
-                t = threading.Thread(target=self._server.serve_forever, daemon=True, name="gst-proxy-server")
-                t.start()
-            except Exception:
-                pass
+            handler_cls = type("_BoundStreamHandler", (_StreamRequestHandler,), {"bridge": self})
+            ports = (PROXY_PORT, 0) if PROXY_PORT else (0,)
+            for idx, candidate in enumerate(ports):
+                try:
+                    self._server = _ReusableTCPServer(("127.0.0.1", candidate), handler_cls)
+                    t = threading.Thread(target=self._server.serve_forever, daemon=True, name="gst-proxy-server")
+                    t.start()
+                    if candidate == 0 and PROXY_PORT:
+                        bound = int(self._server.server_address[1] or 0)
+                        _log.warning("[GST_PROXY] Bound fallback ephemeral port %d instead of busy %d", bound, PROXY_PORT)
+                    return
+                except Exception as error:  # noqa: BLE001
+                    if idx == 0 and len(ports) > 1:
+                        _log.warning("[GST_PROXY] Port %d unavailable (%s), retrying on ephemeral port", candidate, error)
+                    else:
+                        _log.warning("[GST_PROXY] Failed to start local proxy server: %s", error)
 
     def close(self) -> None:
         """Stop the local streaming proxy TCP server and release its listening socket."""
@@ -866,18 +876,22 @@ class GstBridge:
 
         if streamer and getattr(streamer, "ready", False) and streamer.segments:
             byte_off, actual_sec, base_decode_time = streamer.get_seek_offset(sec)
-            with self._lock:
-                if self._stream_gen != gen:
-                    return 1
-                self._seek_offset_sec = actual_sec
-                self._paused_pos = actual_sec
-                self._seek_start_time = time.time()
-                self._is_paused = False
-            proxy_url = self._proxy_url(actual_sec) or f"http://127.0.0.1:{PROXY_PORT}/stream.mp4?seek={actual_sec}&t={int(time.time() * 1000)}"
-            self._write_override(proxy_url)
-            print(f"[GST] Seeking to {sec:.2f}s -> actual {actual_sec:.2f}s (offset {byte_off}, base_dt={base_decode_time}): {proxy_url}", flush=True)
-            self._restart_glagol_playback("seek")
-            return 1
+            proxy_url = self._proxy_url(actual_sec)
+            if proxy_url:
+                with self._lock:
+                    if self._stream_gen != gen:
+                        return 1
+                    self._seek_offset_sec = actual_sec
+                    self._paused_pos = actual_sec
+                    self._seek_start_time = time.time()
+                    self._is_paused = False
+                self._write_override(proxy_url)
+                print(f"[GST] Seeking to {sec:.2f}s -> actual {actual_sec:.2f}s (offset {byte_off}, base_dt={base_decode_time}): {proxy_url}", flush=True)
+                self._restart_glagol_playback("seek")
+                return 1
+            _log.warning("[GST] Proxy server unavailable for seek (%.2fs), falling back to Glagol rewind", sec)
+            if last_url:
+                self._write_override(last_url)
 
         print(f"[GST] Falling back to Glagol rewind ({sec:.2f}s), streamer={streamer}", flush=True)
         self._write_device_file(USER_SEEK_FLAG, "1")

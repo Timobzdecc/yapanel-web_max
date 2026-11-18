@@ -526,3 +526,166 @@ def test_gstbridge_play_and_seek_zero_route_via_proxy_and_stream_exact_bytes(mon
         assert exc_info.value.code == 416
     finally:
         bridge.close()
+
+
+def test_get_service_is_thread_safe_and_binds_single_proxy(monkeypatch, tmp_path):
+    """Concurrent get_service(panel) calls must not leak a duplicate GstBridge onto PROXY_PORT."""
+    from concurrent.futures import ThreadPoolExecutor
+    from extmusic import service as extmusic_service
+
+    # Use an ephemeral port as PROXY_PORT so host state never interferes
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    free_port = probe.getsockname()[1]
+    probe.close()
+    monkeypatch.setattr(gstbridge, "PROXY_PORT", free_port)
+
+    created_bridges = []
+    orig_gst_init = gstbridge.GstBridge.__init__
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    def slow_gst_init(self, panel):
+        orig_gst_init(self, panel)
+        created_bridges.append(self)
+
+    orig_yt_account = extmusic_service.YTAccount
+
+    def delayed_yt_account(*args, **kwargs):
+        # Pause first thread inside ExtMusicService.__init__ after GstBridge bound PROXY_PORT
+        entered.set()
+        proceed.wait(timeout=2.0)
+        return orig_yt_account(*args, **kwargs)
+
+    monkeypatch.setattr(gstbridge.GstBridge, "__init__", slow_gst_init)
+    monkeypatch.setattr(extmusic_service, "YTAccount", delayed_yt_account)
+    monkeypatch.setattr(
+        extmusic_service,
+        "ExtMusicStore",
+        lambda *a, **kw: ExtMusicStore(tmp_path / "extmusic.json"),
+    )
+
+    panel = SimpleNamespace(glagol=SimpleNamespace(send=lambda _p: {"ok": True}, state={"playing": False}))
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(extmusic_service.get_service, panel)
+            assert entered.wait(timeout=2.0)
+            f2 = pool.submit(extmusic_service.get_service, panel)
+            time.sleep(0.08)
+            proceed.set()
+            s1 = f1.result(timeout=5.0)
+            s2 = f2.result(timeout=5.0)
+
+        assert s1 is s2
+        assert len(created_bridges) == 1
+        assert s1.gst._server is not None
+        assert s1.gst._server.server_address[1] == free_port
+    finally:
+        for b in created_bridges:
+            b.close()
+
+
+def test_gstbridge_falls_back_to_ephemeral_port_when_proxy_port_busy(monkeypatch, tmp_path):
+    """When PROXY_PORT is already occupied, GstBridge binds a live ephemeral port so seek() still works."""
+    ov_file = tmp_path / "override_url.txt"
+    monkeypatch.setattr(gstbridge, "OVERRIDE_PATH", str(ov_file))
+
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    busy_port = blocker.getsockname()[1]
+    monkeypatch.setattr(gstbridge, "PROXY_PORT", busy_port)
+
+    blob, _, _ = _build_fragmented_mp4(seg_count=4, seg_dur=10000, timescale=1000)
+
+    def fake_urlopen(req, timeout=10):
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Used", {}, None)
+
+    monkeypatch.setattr(gstbridge, "ipv4_urlopen", fake_urlopen)
+    panel = SimpleNamespace(glagol=SimpleNamespace(send=lambda _p: {"ok": True}, state={"playing": False}))
+    bridge = None
+    try:
+        bridge = gstbridge.GstBridge(panel)
+        assert bridge._server is not None
+        actual_port = bridge._server.server_address[1]
+        assert actual_port > 0
+        assert actual_port != busy_port
+
+        monkeypatch.setattr(bridge, "ensure_injected", lambda: True)
+        monkeypatch.setattr(bridge, "_init_streamer", lambda _u: None)
+        bridge.play("https://rr2.googlevideo.com/videoplayback?itag=140", "T", "A", 40)
+        assert ov_file.read_text(encoding="utf-8").startswith(f"http://127.0.0.1:{actual_port}/stream.mp4?seek=0")
+
+        # Install a ready streamer directly and verify seek() writes the live ephemeral port
+        streamer = object.__new__(gstbridge.MP4Streamer)
+        streamer._lock = threading.Lock()
+        streamer.ready = True
+        streamer.total_size = len(blob)
+        streamer.init_header = blob[:40]
+        streamer.timescale = 1000
+        streamer.segments = [(i * 10.0, 40 + i * 60, 60, i * 10000, 10.0) for i in range(4)]
+        bridge.streamer = streamer
+
+        bridge.seek(12000)
+        ov_seek = ov_file.read_text(encoding="utf-8")
+        assert ov_seek.startswith(f"http://127.0.0.1:{actual_port}/stream.mp4?seek=")
+        assert f":{busy_port}/" not in ov_seek
+    finally:
+        if bridge is not None:
+            bridge.close()
+        blocker.close()
+
+
+def test_gstbridge_seek_does_not_write_dead_proxy_port_when_server_unavailable(monkeypatch, tmp_path):
+    """If proxy binding failed completely, seek() must not write a broken 127.0.0.1:8788 URL."""
+    ov_file = tmp_path / "override_url.txt"
+    seek_flag = tmp_path / "user_seek.txt"
+    monkeypatch.setattr(gstbridge, "OVERRIDE_PATH", str(ov_file))
+    monkeypatch.setattr(gstbridge, "USER_SEEK_FLAG", str(seek_flag))
+
+    sent = []
+    panel = SimpleNamespace(glagol=SimpleNamespace(send=lambda p: sent.append(p), state={"playing": True}))
+    monkeypatch.setattr(gstbridge.GstBridge, "_ensure_server", lambda self: None)
+    bridge = gstbridge.GstBridge(panel)
+    monkeypatch.setattr(bridge, "ensure_injected", lambda: True)
+    monkeypatch.setattr(bridge, "_init_streamer", lambda _u: None)
+
+    url = "https://rr2.googlevideo.com/videoplayback?itag=140"
+    bridge.play(url, "T", "A", 40)
+
+    streamer = object.__new__(gstbridge.MP4Streamer)
+    streamer._lock = threading.Lock()
+    streamer.ready = True
+    streamer.total_size = 1000
+    streamer.init_header = b"\x00" * 40
+    streamer.timescale = 1000
+    streamer.segments = [(0.0, 40, 100, 0, 10.0), (10.0, 140, 100, 10000, 10.0)]
+    bridge.streamer = streamer
+
+    bridge.seek(12000)
+    ov = ov_file.read_text(encoding="utf-8")
+    assert f"127.0.0.1:{gstbridge.PROXY_PORT}" not in ov
+    assert ov == url
+    assert any(cmd.get("command") == "rewind" for cmd in sent)
+
+
+def test_restart_self_closes_gstbridge_proxy_before_execv(monkeypatch):
+    """restart_self() must close active GstBridge proxy before os.execv replaces the process."""
+    import server as srv_mod
+
+    closed = []
+    fake_gst = SimpleNamespace(close=lambda: closed.append("gst_closed"))
+    fake_panel = SimpleNamespace(
+        metrics=SimpleNamespace(_save=lambda: None),
+        _extmusic_service=SimpleNamespace(gst=fake_gst),
+    )
+    monkeypatch.setattr(srv_mod.Handler, "panel", fake_panel)
+    monkeypatch.setattr(srv_mod, "RESTART_HOOK", None)
+
+    execv_calls = []
+    monkeypatch.setattr(srv_mod.os, "execv", lambda exe, argv: execv_calls.append((exe, argv)))
+
+    srv_mod.restart_self()
+    assert closed == ["gst_closed"]
+    assert len(execv_calls) == 1
+
