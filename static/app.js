@@ -3760,7 +3760,7 @@ function musicPos() {
   const s = muState(), p = s?.playerState;
   if (!p) return 0;
   // + сколько прошло с момента, когда позиция измерена (по Bluetooth её берёт сервер у телефона — progress_at)
-  const since = s.playing ? (Date.now() / 1000 - (mu.info.glagol.progress_at || mu.info.glagol.updated)) : 0;
+  const since = (s.playing && !p.buffering) ? (Date.now() / 1000 - (mu.info.glagol.progress_at || mu.info.glagol.updated)) : 0;
   return Math.min(p.duration || Infinity, (p.progress || 0) + Math.max(0, since));
 }
 

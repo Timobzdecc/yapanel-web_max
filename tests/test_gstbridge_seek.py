@@ -689,3 +689,64 @@ def test_restart_self_closes_gstbridge_proxy_before_execv(monkeypatch):
     assert closed == ["gst_closed"]
     assert len(execv_calls) == 1
 
+
+def test_gstbridge_holds_progress_while_buffering_until_proxy_starts_streaming(monkeypatch, tmp_path):
+    """Progress timer must stay at 0 while GStreamer connects/buffers and start once byte 0 streams."""
+    payload = b"ABCD" * 512
+    monkeypatch.setattr(gstbridge, "PROXY_PORT", 0)
+    monkeypatch.setattr(gstbridge, "OVERRIDE_PATH", str(tmp_path / "override.txt"))
+    monkeypatch.setattr(gstbridge, "USER_SEEK_FLAG", str(tmp_path / "user_seek.txt"))
+
+    now = {"t": 2000.0}
+    monkeypatch.setattr(gstbridge.time, "time", lambda: now["t"])
+    monkeypatch.setattr(gstbridge.time, "sleep", lambda _s: None)
+
+    class StreamResp:
+        headers = {"Content-Range": f"bytes 0-{len(payload) - 1}/{len(payload)}", "Content-Length": str(len(payload))}
+
+        def __init__(self):
+            self._pos = 0
+
+        def read(self, n=-1):
+            if self._pos >= len(payload):
+                return b""
+            res = payload[self._pos:] if n < 0 else payload[self._pos:self._pos + n]
+            self._pos += len(res)
+            return res
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(gstbridge, "ipv4_urlopen", lambda req, timeout=10: StreamResp())
+    panel = SimpleNamespace(glagol=SimpleNamespace(send=lambda _p: {"ok": True}, state={"playing": False}))
+    bridge = gstbridge.GstBridge(panel)
+    try:
+        monkeypatch.setattr(bridge, "ensure_injected", lambda: True)
+        monkeypatch.setattr(bridge, "_init_streamer", lambda _u: None)
+        bridge.play("https://rr2.googlevideo.com/videoplayback?itag=140", "Track", "Artist", 180)
+
+        # 3 seconds pass while Glagol/GStreamer open TLS and buffer -> timer must remain at 0
+        now["t"] += 3.0
+        pre = bridge.player()
+        assert pre["buffering"] is True
+        assert pre["position"] == 0
+
+        # Proxy delivers byte 0 of GET /stream.mp4 -> timer resets to actual stream start (+0.35s ALSA buffer)
+        port = bridge._server.server_address[1]
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/stream.mp4?seek=0.0", timeout=5)
+        assert resp.read() == payload
+
+        # Advance 5.35s after stream start -> ~5000ms reported
+        now["t"] += 5.35
+        post = bridge.player()
+        assert post["buffering"] is False
+        assert abs(post["position"] - 5000) <= 50
+    finally:
+        bridge.close()
+
