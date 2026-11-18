@@ -1792,19 +1792,22 @@
         </div>
         <div class="tlist" id="yt-home-recent"></div>
       </section>
+      <section class="card" id="yt-home-mixes-wrap" hidden>
+        <div class="card-head">
+          <h2>Миксы для вас</h2>
+          <div class="actions">
+            <span class="meta" id="yt-home-mixes-meta"></span>
+            <button type="button" class="btn sm" id="yt-mixes-refresh">↻ Обновить</button>
+          </div>
+        </div>
+        <div class="yt-cards" id="yt-home-mixes"></div>
+      </section>
       <section class="card" id="yt-home-qp-wrap">
         <div class="card-head">
           <h2>Быстрый выбор</h2>
           <button type="button" class="btn sm" id="yt-home-refresh">↻ Обновить</button>
         </div>
         <div class="tlist" id="yt-home-qp"><div class="empty">Загрузка подборки…</div></div>
-      </section>
-      <section class="card" id="yt-home-mixes-wrap" hidden>
-        <div class="card-head">
-          <h2>Миксы для вас</h2>
-          <span class="meta" id="yt-home-mixes-meta"></span>
-        </div>
-        <div class="yt-shelf" id="yt-home-mixes"></div>
       </section>
       <section class="card" id="yt-home-feed-wrap" hidden>
         <div class="card-head">
@@ -3003,7 +3006,7 @@
 <script src="static/vendor/qrcode.js"></script>
 <script src="static/anim-presets.js?v=0.3.11"></script>
 <script src="static/app.js?v=0.3.30"></script>
-<script src="static/extmusic.js?v=0.3.30"></script>
+<script src="static/extmusic.js?v=0.3.32"></script>
 <script type="module">
 import { bindVoiceInput } from './static/voice-input.js';
 import { startAsciiBackground } from './static/ascii-background.js';

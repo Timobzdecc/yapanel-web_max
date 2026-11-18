@@ -1216,3 +1216,131 @@ def test_fetch_thumb_retries_once_on_transient_gaierror(monkeypatch):
     assert body == b"IMG" and ctype == "image/jpeg"
     assert len(attempts) == 2
     assert sleeps == [0.15]
+
+
+def _yt_mix_test_service(tmp_path, monkeypatch):
+    from extmusic.service import ExtMusicError
+
+    service = ExtMusicService(FakePanel())
+    service.store = ExtMusicStore(tmp_path / "extmusic.json")
+    service.player = FakePlayer()
+    service._prefetch_after = lambda *a: None
+    monkeypatch.setattr(ytdlp, "available", lambda: True)
+    monkeypatch.setattr(fast_yt, "fast_resolve", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(
+        ytdlp,
+        "resolve",
+        lambda vid, **kw: {"url": f"https://rr.example/{vid}.m4a", "ext": "m4a", "acodec": "mp4a.40.2", "abr": 128, "duration": 180},
+    )
+    return service, ExtMusicError
+
+
+def test_yt_mix_play_loads_personal_supermix_and_numbered_mixes_up_to_25_tracks(tmp_path, monkeypatch):
+    service, _ = _yt_mix_test_service(tmp_path, monkeypatch)
+    service.yt_account.is_configured = lambda: True
+
+    mixes = [
+        {"kind": "playlist", "title": "Мой супермикс", "browse_id": "VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY", "thumb": "https://img/s.jpg"},
+        {"kind": "liked", "title": "Понравившаяся музыка", "browse_id": "VLLM", "thumb": "https://img/l.png"},
+        {"kind": "playlist", "title": "Мой микс 1", "browse_id": "VLRDTMAK5uy_nGQKSMIkpr4o9VI_2i56pkGliD6FQRo50", "thumb": "https://img/m1.jpg"},
+        {"kind": "playlist", "title": "Мой микс 2", "browse_id": "VLRDTMAK5uy_lz2owBgwWf1mjzyn_NbxzMViQzIg8IAIg", "thumb": "https://img/m2.jpg"},
+    ]
+    service.yt_account.home = lambda limit=30: {"mixes": mixes, "tracks": [], "quick_picks": [], "feed": [], "moods": []}
+    seen_bids = []
+
+    def fake_col(bid, params="", limit=100):
+        seen_bids.append((bid, limit))
+        return {
+            "kind": "playlist",
+            "title": bid,
+            "browse_id": bid,
+            "tracks": [
+                {"source": "yt", "id": f"{bid[-4:]}_{i}", "title": f"Track {i}", "artist": "Muse", "duration": 200, "thumb": "", "url": ""}
+                for i in range(30)
+            ],
+        }
+
+    service.yt_account.collection = fake_col
+
+    res_super = service.yt_mix_play(name="супермикс")
+    assert seen_bids[-1][0] == "VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY"
+    assert len(res_super["queue"]) == 25
+
+    res_two = service.yt_mix_play(index=2)
+    assert seen_bids[-1][0] == "VLRDTMAK5uy_lz2owBgwWf1mjzyn_NbxzMViQzIg8IAIg"
+    assert len(res_two["queue"]) == 25
+
+    # Bare "мой микс" picks "Мой микс 1" distinctly from "Мой супермикс"
+    res_my = service.yt_mix_play(name="мой микс")
+    assert seen_bids[-1][0] == "VLRDTMAK5uy_nGQKSMIkpr4o9VI_2i56pkGliD6FQRo50"
+    assert len(res_my["queue"]) == 25
+
+
+def test_yt_mix_play_handles_liked_mix_and_anonymous_fallback(tmp_path, monkeypatch):
+    service, _ = _yt_mix_test_service(tmp_path, monkeypatch)
+    service.yt_account.is_configured = lambda: True
+    service.yt_account.home = lambda limit=30: {
+        "mixes": [{"kind": "liked", "title": "Понравившаяся музыка", "browse_id": "VLLM"}],
+        "tracks": [], "quick_picks": [], "feed": [], "moods": [],
+    }
+    service.yt_account.liked = lambda limit=50: [
+        {"source": "yt", "id": f"lk{i}", "title": f"Liked {i}", "artist": "Linkin Park", "duration": 180, "thumb": "", "url": ""}
+        for i in range(28)
+    ]
+
+    res_liked = service.yt_mix_play(name="понравившаяся музыка")
+    assert len(res_liked["queue"]) == 25
+    assert res_liked["queue"][0]["id"] == "lk0"
+
+    # Unconfigured / anonymous fallback still plays home tracks cleanly
+    service.yt_account.is_configured = lambda: False
+    monkeypatch.setattr(
+        ytmusic,
+        "home",
+        lambda limit=30: {
+            "tracks": [{"source": "yt", "id": f"pub{i}", "title": f"Pub {i}", "artist": "Artist", "duration": 200} for i in range(26)],
+            "shelves": [],
+            "moods": [],
+        },
+    )
+    res_anon = service.yt_mix_play(name="супермикс")
+    assert len(res_anon["queue"]) == 25
+    assert res_anon["queue"][0]["id"] == "pub0"
+
+
+def test_radio_play_song_radio_25_tracks_and_personal_mix_browse_id(tmp_path, monkeypatch):
+    service, _ = _yt_mix_test_service(tmp_path, monkeypatch)
+    service.yt_account.is_configured = lambda: True
+
+    def fake_radio(vid, pl="", limit=25):
+        if pl.startswith("RDTMAK"):
+            return []  # Simulates anonymous WEB_REMIX returning empty for personal mix IDs
+        if vid == "shortseed":
+            return [
+                {"source": "yt", "id": f"s{i}", "title": f"S{i}", "artist": "Art", "duration": 180, "thumb": "", "url": ""}
+                for i in range(18)
+            ]
+        return [
+            {"source": "yt", "id": f"{vid}_r{i}", "title": f"Rec {i}", "artist": "RecArt", "duration": 180, "thumb": "", "url": ""}
+            for i in range(25)
+        ]
+
+    monkeypatch.setattr(ytmusic, "radio", fake_radio)
+    service.yt_account.collection = lambda bid, params="", limit=100: {
+        "kind": "playlist",
+        "title": "Мой супермикс",
+        "browse_id": bid,
+        "tracks": [
+            {"source": "yt", "id": f"sm{i}", "title": f"MixTrack {i}", "artist": "Muse", "duration": 210, "thumb": "", "url": ""}
+            for i in range(25)
+        ],
+    }
+
+    res_song = service.radio_play(track={"source": "yt", "id": "shortseed", "title": "Short", "artist": "A", "duration": 180})
+    assert len(res_song["queue"]) == 25
+    assert res_song["queue"][0]["id"] == "shortseed"
+
+    # Clicking "Радио" on a personal VLRDTMAK mix must work cleanly instead of failing on empty anonymous RDTMAK
+    res_mix_radio = service.radio_play(browse_id="VLRDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY")
+    assert len(res_mix_radio["queue"]) == 25
+    assert res_mix_radio["queue"][0]["id"].startswith("sm0_r") or res_mix_radio["queue"][0]["id"] == "sm0"

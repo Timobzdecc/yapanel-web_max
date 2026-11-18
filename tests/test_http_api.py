@@ -387,6 +387,10 @@ class HttpApiTests(unittest.TestCase):
                 self.calls.append(("radio_play", track, browse_id))
                 return {"current": {"id": "r1"}}
 
+            def yt_mix_play(self, name="", index=None, browse_id=""):
+                self.calls.append(("yt_mix_play", name, index, browse_id))
+                return {"current": {"id": "m1"}}
+
             def fetch_thumb(self, url):
                 self.calls.append(("fetch_thumb", url))
                 if self.thumb_error:
@@ -517,6 +521,13 @@ class HttpApiTests(unittest.TestCase):
             st, _, _ = self.request("POST", "/api/extmusic/radio", {"track": "v1", "browse_id": "VL1"})
             self.assertEqual(st, 200)
             self.assertEqual(svc.calls[-1], ("radio_play", "v1", "VL1"))
+
+            st, _, _ = self.request("POST", "/api/extmusic/yt/mix", {"name": "мой микс 2", "index": 2})
+            self.assertEqual(st, 200)
+            self.assertEqual(svc.calls[-1], ("yt_mix_play", "мой микс 2", 2, ""))
+
+            st, _, _ = self.request("POST", "/api/extmusic/yt/jam", {"mode": "my"})
+            self.assertEqual(st, 404)
 
             # CSRF protection still enforced on extmusic POST routes
             st, _, _ = self.request(
