@@ -6738,6 +6738,17 @@ def watch_model(adb, conn, active):
         restart_self()
 
 
+def _close_extmusic_gst(panel):
+    """Закрывает локальный HTTP-прокси GstBridge перед остановкой или перезапуском процесса."""
+    try:
+        ext = getattr(panel, "_extmusic_service", None)
+        gst = getattr(ext, "gst", None) if ext is not None else None
+        if gst is not None and hasattr(gst, "close"):
+            gst.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def restart_self(device=None):
     """Перезапуск сервера тем же интерпретатором и с теми же аргументами (без --open: браузер уже открыт).
     device — с другой колонкой: старые --device/--find заменяем (иначе аргумент перебил бы запомненный адрес)."""
@@ -6757,6 +6768,7 @@ def restart_self(device=None):
         Handler.panel.metrics._save()
     except Exception:  # noqa: BLE001
         pass
+    _close_extmusic_gst(Handler.panel)
     sys.stdout.flush()
     if RESTART_HOOK:     # Android: Python внутри приложения, exec некуда — перезапуск делает служба
         return RESTART_HOOK(args[1:])
@@ -7202,6 +7214,7 @@ def main():
     finally:
         # При остановке самого процесса не перетираем последнее явное
         # состояние: после обычного рестарта панель восстановит его.
+        _close_extmusic_gst(panel)
         panel.stop_party(persist=False)
         panel.metrics._save()
 
