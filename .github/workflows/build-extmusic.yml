@@ -1,0 +1,41 @@
+name: Build ExtMusicPlayer DEX
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile external music player
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -f "$SDK/platforms/android-34/android.jar"
+          mkdir -p build/extmusic/classes build/extmusic/dex
+          javac --release 8 -Xlint:-options -cp "$SDK/platforms/android-34/android.jar" \
+            -d build/extmusic/classes device/extmusic/ExtMusicPlayer.java
+          TOOLS="$(find "$SDK/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          "$TOOLS/d8" --min-api 28 \
+            --lib "$SDK/platforms/android-34/android.jar" \
+            --output build/extmusic/dex \
+            build/extmusic/classes/ExtMusicPlayer.class
+          cp build/extmusic/dex/classes.dex build/extmusic/ExtMusicPlayer.dex
+          test -s build/extmusic/ExtMusicPlayer.dex
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extmusic-player-dex
+          path: build/extmusic/ExtMusicPlayer.dex
+      - name: Regression tests
+        run: |
+          python -m pip install pytest
+          python -m py_compile extmusic/*.py api/extmusic.py
+          python -m pytest tests/test_extmusic.py -q

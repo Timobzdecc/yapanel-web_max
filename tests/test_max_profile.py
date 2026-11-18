@@ -256,6 +256,13 @@ class MaxProfileTests(unittest.TestCase):
         self.assertTrue(any("svc bluetooth enable" in c for c in commands))
         self.assertFalse(any("/q restart" in c for c in commands))
         self.assertFalse(any("rootkeeper.sh.webpanel.bak" in c for c in commands))
+        reset_cmd = next(c for c in commands if "svc bluetooth enable" in c)
+        self.assertIn("ledpatterns/ring/*)", reset_cmd)
+        self.assertIn(f"{s.PATTERNS['ring']}/\"${{rel#ledpatterns/ring/}}\"", reset_cmd)
+        self.assertIn("ledpatterns/clock/*)", reset_cmd)
+        self.assertIn(f"{s.PATTERNS['clock']}/\"${{rel#ledpatterns/clock/}}\"", reset_cmd)
+        self.assertIn("sounds/*)", reset_cmd)
+        self.assertIn(f"{s.SOUNDS_DIR}/\"${{rel#sounds/}}\"", reset_cmd)
         p.ring_reset.assert_called_once()
 
     def test_max_android_audio_and_no_buildroot(self):

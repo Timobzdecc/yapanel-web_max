@@ -36,6 +36,49 @@ async function act(btn, fn, okMsg) {
 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// Буфер необработанных ошибок JS и сбоев загрузки ресурсов — для «Логов» и «Отчёта для Issue».
+const jsErrors = [];
+window.__jsErrors = jsErrors;
+function recordJsError(kind, detail) {
+  const msg = String(detail || '').trim();
+  if (!msg) return;
+  const now = new Date();
+  const ts = now.toTimeString().slice(0, 8);
+  const hash = location.hash || '#overview';
+  const line = `[${ts}] (${hash}) ${kind}: ${msg.slice(0, 700)}`;
+  const last = jsErrors[jsErrors.length - 1];
+  if (last && last.raw === `${kind}:${msg}`) {
+    last.n += 1;
+    last.ts = ts;
+    last.line = `[${ts}] (${hash}) ${kind}: ${msg.slice(0, 700)} (×${last.n})`;
+    return;
+  }
+  jsErrors.push({ ts, raw: `${kind}:${msg}`, n: 1, line });
+  if (jsErrors.length > 30) jsErrors.shift();
+}
+function formatJsErrors() {
+  return jsErrors.map(e => e.line).join('\n');
+}
+window.addEventListener('error', e => {
+  const t = e.target;
+  if (t && t !== window) {
+    if (t.tagName === 'IMG') return;
+    if (t.tagName === 'SCRIPT' || t.tagName === 'LINK') {
+      recordJsError('resource', `${t.tagName} load failed: ${t.src || t.href || ''}`);
+    }
+    return;
+  }
+  const where = e.filename ? ` @ ${e.filename}:${e.lineno || 0}:${e.colno || 0}` : '';
+  const stack = e.error?.stack ? '\n' + String(e.error.stack).split('\n').slice(0, 4).join('\n') : '';
+  recordJsError('error', `${e.message || 'Script error'}${where}${stack}`);
+}, true);
+window.addEventListener('unhandledrejection', e => {
+  const r = e.reason;
+  if (r && r.offline) return;
+  const detail = r?.stack ? String(r.stack).split('\n').slice(0, 5).join('\n') : (r?.message || String(r || 'Unhandled rejection'));
+  recordJsError('promise', detail);
+});
+
 // ---------- единый планировщик периодических задач ----------
 // Все частые опросы идут через один таймер. Пока вкладка скрыта, задачи стоят
 // и не дёргают колонку; при возврате выполняются сразу, не ожидая интервала.
@@ -277,10 +320,10 @@ async function refreshStatus() {
 
     tilesFromStatus(s);
     if (s.model && $('#model-name')) {
-      const mn = { max: 'Станция Макс', midi: 'Станция Миди', lite: 'Станция Лайт', lite2: 'Станция Лайт 2', station2: 'Станция 2' }[s.model];
+      const mn = { max: 'Станция Макс' }[s.model];
       if (mn) $('#model-name').textContent = mn;
     }
-    if (s.model === 'max') loadDSP();
+    loadDSP();
     window.__isMatrix = !!(s.matrix && s.matrix.cols === 25);
     try { localStorage.setItem('is_matrix', window.__isMatrix ? '1' : '0'); } catch {}
     const extrasEl = document.querySelector('.extras');
@@ -743,8 +786,6 @@ const toModel = v => {
         updateMatrixSVG(el, v);
       }
     }
-  } else if (window.__midiLiveDisplay && Array.isArray(v)) {
-    $('#clock-preview').innerHTML = clockSVG(v);
   }
 };
 const toRing = leds => window.modelRing?.(leds);
@@ -892,7 +933,6 @@ function clockFrame() {
 }
 let __lastMatrixPixels = null;
 function clockPreview() {
-  if (window.__midiLiveDisplay) return;
   const el = $('#clock-preview');
   clearTimeout(el._anim);
   el._until = 0;
@@ -1808,14 +1848,7 @@ function renderBt() {
   const card = $('[data-widget="bt"]');
   $('#bt-power').checked = d.powered;
   $('#bt-off-hint').hidden = d.powered;
-  for (const el of [$('#bt-pair-row'), $('#bt-list'), card.querySelector('.vol-bt'), $('#bt-out-row')]) el.hidden = !d.powered;
-  // при выводе на Bluetooth-колонку ползунка громкости нет: остаются громкость Алисы и сама колонка
-  if (d.out?.on && d.out.state === 'bt') card.querySelector('.vol-bt').hidden = true;
-  if (d.out?.supported === false) {
-    if (card.querySelector('.vol-bt')) card.querySelector('.vol-bt').hidden = true;
-    if ($('#bt-out-row')) $('#bt-out-row').hidden = true;
-  }
-  if (!d.powered) $('#bt-out-pick').hidden = true;
+  for (const el of [$('#bt-pair-row'), $('#bt-list'), card.querySelector('.vol-bt')]) if (el) el.hidden = !d.powered;
   $('#bt-badge').textContent = !d.powered ? 'выключен' : conn.length ? 'подключено' : 'включён';
   $('#bt-badge').className = 'badge' + (d.powered ? ' ok' : '');
   $('.bt-pair').classList.toggle('on', vis);
@@ -1825,7 +1858,6 @@ function renderBt() {
   $('#bt-pair-btn').textContent = vis ? 'Скрыть' : 'Сделать видимой';
   $('#bt-pair-btn').classList.toggle('primary', !vis);
   btLeft();
-  renderBtOut();
   setListHtml($('#bt-list'), d.devices.length ? d.devices.map(x => `<div class="bt-row${x.connected ? ' on' : ''}" data-mac="${esc(x.mac)}">
       <div class="bt-ic">${icon(BT_ICONS[x.icon] || 'i-bt', 18)}</div>
       <div class="info"><b>${x.name ? secret('btn-' + x.mac, x.name) : 'Без имени'}</b>
@@ -1868,28 +1900,6 @@ async function btMemesUpload(kind, input) {
     await loadBtMemes();
   }, 'Звук сброшен');
 });
-// ---- звук через Bluetooth-колонку ----
-let btEq = null;
-function renderBtOut() {
-  const o = btData?.out || { on: false }, last = !o.on && o.last;
-  const self = `из колонки «${esc($('#model-name').textContent.trim() || 'Станция')}»`;   // откуда звук на самом деле
-  const bt = n => n === 'Bluetooth-колонка' ? 'Bluetooth-колонку' : `«${esc(n)}»`;
-  $('#bt-out-row').classList.toggle('on', o.on && o.state === 'bt');
-  $('#bt-out-text').innerHTML = !o.on ? `Звук — ${self}`
-    : o.state === 'bt' ? `Звук — через ${bt(o.name)}` : `Звук — ${self} · ждём ${bt(o.name)}`;
-  $('#bt-out-hint').textContent = !o.on ? (last ? `Можно вернуть звук в «${last.name}» — она уже сопряжена. Алиса перезапустится, играющая музыка остановится`
-      : 'Можно играть через Bluetooth-колонку: Алиса слушает и отвечает, а звук — из неё')
-    : o.state === 'bt' ? 'Алиса, музыка, её звуки и звуки панели — из Bluetooth-колонки'
-    : 'Bluetooth-колонка не подключена, поэтому звук пока из самой колонки. Включите её — подключение и звук вернутся сами';
-  $('#bt-out-btn').textContent = o.on ? (o.state === 'bt' ? 'Вернуть звук в колонку' : 'Больше не ждать') : last ? `Играть через «${last.name}»` : 'Выбрать колонку';
-  $('#bt-out-btn').classList.toggle('primary', !o.on);
-  $('#bt-out-other').hidden = !last;
-  if (o.on) $('#bt-out-pick').hidden = true;
-  // эквалайзер имеет смысл только когда звук реально идёт в Bluetooth-колонку
-  const eqRow = $('#bt-eq-row');
-  eqRow.hidden = !(o.on && o.state === 'bt');
-  if (!eqRow.hidden && !btEq) loadBtEq();
-}
 // ---- Аппаратный DSP Станции Макс (Silergy SY6045S) ----
 let dspState = null;
 let dspEqOpen = false;
@@ -3287,153 +3297,6 @@ function initPartyEvents() {
 document.addEventListener('DOMContentLoaded', initPartyEvents);
 
 
-// ---- эквалайзер Bluetooth-выхода ----
-const EQ_NAMES = { flat: 'Без изменений', rock: 'Рок', electronic: 'Электроника', vocal: 'Вокал / подкаст', night: 'Ночной', custom: 'Свой' };
-const EQ_DEFAULT = [60, 230, 910, 3600, 14000];
-const fmtDb = g => (g > 0 ? '+' : '') + g + ' дБ';
-async function loadBtEq() {
-  try { btEq = await api('/api/btout/eq'); renderBtEq(); } catch { btEq = null; }
-}
-function buildEqCustom() {
-  const box = $('#bt-eq-custom');
-  if (!box || box.children.length) return;
-  box.innerHTML = EQ_DEFAULT.map((f, i) => `<div class="eq-band">
-      <input type="number" class="field eq-f" min="20" max="20000" step="10" value="${f}" aria-label="Частота ${i + 1}, Гц">
-      <span class="meta">Гц</span>
-      <input type="range" class="eq-g" min="-12" max="12" step="1" value="0" aria-label="Усиление ${i + 1}, дБ">
-      <span class="mono eq-gv">0 дБ</span></div>`).join('')
-    + '<p class="hint">Перекрывающиеся полосы складываются. Для более заметного эффекта попробуйте также убавить соседние частоты.</p>';
-  box.addEventListener('input', e => {
-    const band = e.target.closest('.eq-band');
-    if (!band) return;
-    band.querySelector('.eq-gv').textContent = fmtDb(+band.querySelector('.eq-g').value);
-    scheduleEqCustom();
-  });
-  box.addEventListener('change', e => {
-    if (e.target.matches('.eq-f')) { clampEqFreq(e.target); scheduleEqCustom(); }
-  });
-}
-function clampEqFreq(inp) {
-  inp.value = Math.max(20, Math.min(20000, Math.round(+inp.value) || 60));
-}
-function eqCustomBands() {
-  return $$('#bt-eq-custom .eq-band').map(b => ({
-    f: Math.max(20, Math.min(20000, Math.round(+b.querySelector('.eq-f').value) || 60)),
-    g: Math.max(-12, Math.min(12, Math.round(+b.querySelector('.eq-g').value) || 0)) }));
-}
-function fillEqCustom(bands) {
-  buildEqCustom();
-  const rows = $$('#bt-eq-custom .eq-band');
-  (bands || []).slice(0, rows.length).forEach((b, i) => {
-    const g = Math.round(b.g);
-    rows[i].querySelector('.eq-f').value = Math.round(b.f);
-    rows[i].querySelector('.eq-g').value = g;
-    rows[i].querySelector('.eq-gv').textContent = fmtDb(g);
-  });
-}
-let btEqTimer = 0;
-function scheduleEqCustom() {
-  clearTimeout(btEqTimer);
-  btEqTimer = setTimeout(async () => {
-    try {
-      btEq = await api('/api/btout/eq', { preset: 'custom', bands: eqCustomBands() });
-      drawEqCurve();
-    } catch (e) { toast(e.message, true); }
-  }, 250);
-}
-function renderBtEq() {
-  if (!btEq) return;
-  const sel = $('#bt-eq');
-  const names = btEq.presets || Object.keys(EQ_NAMES);
-  if (sel.options.length !== names.length)
-    sel.innerHTML = names.map(v => `<option value="${v}">${EQ_NAMES[v] || v}</option>`).join('');
-  sel.value = btEq.preset;
-  $('#bt-eq-custom').hidden = btEq.preset !== 'custom';
-  if (btEq.preset === 'custom') fillEqCustom(btEq.custom);
-  drawEqCurve();
-}
-function drawEqCurve() {
-  const cv = $('#bt-eq-curve');
-  if (!cv || !btEq) return;
-  const ctx = cv.getContext('2d'), w = cv.width, h = cv.height;
-  const padL = 28, padR = 6, padT = 6, padB = 15;
-  const plotW = w - padL - padR, plotH = h - padT - padB;
-  ctx.clearRect(0, 0, w, h);
-  const css = getComputedStyle(document.documentElement);
-  const grid = css.getPropertyValue('--line-2').trim() || '#ddd';
-  const muted = css.getPropertyValue('--muted').trim() || '#888';
-  const accent = css.getPropertyValue('--accent').trim() || '#e8590c';
-  const X = f => padL + Math.log10(f / 20) / Math.log10(1000) * plotW;
-  const Y = d => padT + (1 - (d + 15) / 30) * plotH;
-  const marks = [[20, '20'], [50, '50'], [100, '100'], [200, '200'], [500, '500'], [1000, '1k'],
-                 [2000, '2k'], [5000, '5k'], [10000, '10k'], [20000, '20k']];
-  ctx.lineWidth = 1; ctx.strokeStyle = grid;
-  marks.forEach(([f]) => { ctx.beginPath(); ctx.moveTo(X(f), padT); ctx.lineTo(X(f), padT + plotH); ctx.stroke(); });
-  ctx.beginPath(); ctx.moveTo(padL, Y(0)); ctx.lineTo(w - padR, Y(0)); ctx.stroke();
-  ctx.fillStyle = muted; ctx.font = '9px ui-monospace, monospace'; ctx.textBaseline = 'top';
-  marks.forEach(([f, label]) => {
-    const x = X(f);
-    ctx.textAlign = x < padL + 10 ? 'left' : x > w - padR - 10 ? 'right' : 'center';
-    ctx.fillText(label, x, padT + plotH + 3);
-  });
-  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-  for (const d of [12, 0, -12]) ctx.fillText((d > 0 ? '+' : '') + d, padL - 4, Y(d));
-  ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.beginPath();
-  (btEq.freqs || []).forEach((f, i) => { const x = X(f), y = Y(btEq.db[i]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-  ctx.stroke();
-}
-$('#bt-eq').onchange = e => {
-  const preset = e.target.value, name = EQ_NAMES[preset] || preset;
-  $('#bt-eq-custom').hidden = preset !== 'custom';
-  if (preset === 'custom') fillEqCustom(btEq?.custom);
-  act(e.target, async () => {
-    btEq = await api('/api/btout/eq', { preset, bands: preset === 'custom' ? eqCustomBands() : undefined });
-    if (btEq.preset === 'custom') fillEqCustom(btEq.custom);
-    drawEqCurve();
-  }, 'Эквалайзер: ' + name);
-};
-// «Выбрать колонку» / «Другая колонка»: ищем рядом и показываем список
-function btOutScan(b) {
-  const pick = $('#bt-out-pick'); pick.hidden = false;
-  $('#bt-out-list').innerHTML = '<div class="empty">Ищу устройства рядом… ~15 с</div>';
-  act(b, async () => {
-    const r = await api('/api/btout/scan', { seconds: 12 });
-    $('#bt-out-list').innerHTML = r.devices.length ? r.devices.map(x => `<div class="bt-row" data-mac="${esc(x.mac)}">
-        <div class="bt-ic">${icon(BT_ICONS[x.icon] || 'i-bt', 18)}</div>
-        <div class="info"><b>${esc(x.name || 'Без имени')}</b><span class="meta">${[x.audio ? 'колонка или наушники' : 'другое устройство', x.paired ? 'сопряжено' : '', x.rssi != null ? `сигнал ${x.rssi} dBm` : ''].filter(Boolean).join(' · ')}</span></div>
-        <div class="actions"><button class="btn sm${x.audio ? ' primary' : ''}">Играть через неё</button></div></div>`).join('')
-      : '<div class="empty">Ничего не нашлось — колонка в режиме сопряжения? Попробуйте ещё раз</div>';
-  });
-}
-function btOutUse(b, mac) {
-  // первый раз — честно предупреждаем, что меняется и как вернуть
-  if (!store.get('btout.ok') && !confirm('Чтобы звук шёл в Bluetooth-колонку, панель:\n'
-      + '• подменит настройку звука /etc/asound.conf своей копией (системный раздел не меняется, подмена накрывает его поверх);\n'
-      + '• загрузит модуль ядра snd-aloop (виртуальная петля для смешивания звука);\n'
-      + '• оставит на колонке сторожа, который держит это, пока Bluetooth-колонка подключена, и запускается после перезагрузки.\n\n'
-      + 'Алиса перезапустится (~30 с), играющая музыка остановится — включите её снова. Вернуть всё как было — кнопкой «Вернуть звук в колонку» здесь же '
-      + '(или в «Настройках» → «Своё на колонке»). Продолжить?')) return;
-  else if (store.get('btout.ok') && mu.info?.glagol?.state?.playing
-           && !confirm('Перевести звук в Bluetooth-колонку? Алиса перезапустится (~30 с), музыка остановится — включите её снова.')) return;
-  store.set('btout.ok', '1');
-  toast('Подключаю колонку — Алиса перезапустится и заговорит из неё');
-  const label = b?.textContent;
-  if (b) b.textContent = 'Подключение и настройка…';
-  return act(b, async () => { btData = await api('/api/btout/use', { mac }); renderBt(); if (btData.eq_error) toast('Звук подключён, но эквалайзер не применён: ' + btData.eq_error, true); else toast('Звук — через Bluetooth-колонку'); if (btData.restarted) aliceRestarting('Звук переходит на Bluetooth-колонку — Алиса перезапускается, это около 30 секунд'); }).finally(() => { if (b) b.textContent = label; });
-}
-$('#bt-out-btn').onclick = e => {
-  const b = e.currentTarget, o = btData?.out || {};
-  if (o.on) {
-    if (o.state === 'bt' && !confirm('Вернуть звук в саму колонку? Алиса перезапустится (~30 с), играющая музыка остановится — включите её снова.')) return;
-    return act(b, async () => { btData = await api('/api/btout/off', {}); renderBt(); if (btData.restarted) aliceRestarting('Звук возвращается во встроенный динамик — Алиса перезапускается, это около 30 секунд'); }, 'Звук — во встроенный динамик');
-  }
-  if (o.last) return btOutUse(b, o.last.mac);
-  btOutScan(b);
-};
-$('#bt-out-other').onclick = e => btOutScan(e.currentTarget);
-$('#bt-out-list').onclick = e => {
-  const b = e.target.closest('button'); if (b) btOutUse(b, b.closest('.bt-row').dataset.mac);
-};
 $('#bt-pair-btn').onclick = e => btDo(e.currentTarget, { action: btData?.discoverable ? 'pair_off' : 'pair_on' },
   btData?.discoverable ? 'Колонка скрыта' : 'Колонка видна 3 минуты');
 $('#bt-list').onclick = e => {
@@ -3454,17 +3317,21 @@ $('#reboot').onclick = e => confirm('Перезагрузить колонку?'
 
 // ---------- логи ----------
 let logText = '';
-// В логах Quasar — Device ID, номер аккаунта, сеть: для скриншотов прячем всё, что известно о колонке и аккаунте.
+// В логах Quasar — Device ID, номер аккаунта, сеть: для скриншотов и Issue прячем всё, что известно о колонке и аккаунте.
 function maskLog(t) {
   const st = status || {}, serial = /[-_]([A-Za-z0-9]{4,})$/.exec(st.hostname || '')?.[1];
   // номер аккаунта Яндекса встречается в разном виде (uid: …, id=…, Account …) — находим и прячем везде
   const uids = new Set([...t.matchAll(/(?:passport_uid|puid|uid)"?\s*[:=]\s*"?(\d{5,})/gi)].map(m => m[1]));
   for (const v of [st.device_id, st.ssid, st.address, ymLogin, serial, ...uids].filter(v => v && v.length >= 4))
     t = t.split(v).join('••••');
-  return t.replace(/\b(?:y0_|AQAAAA)[\w-]{10,}/g, '••••')                           // OAuth-токены
-    .replace(/(token["']?\s*[:=]\s*["']?)[\w.-]{20,}/gi, '$1••••')
+  return t.replace(/\b(?:y0_|AQAAAA)[\w-]{10,}/g, '••••')                           // OAuth-токены Яндекса
+    .replace(/\b(sk|rk|pk|gsk|xai)-[\w-]{8,}/g, '$1-••••')                          // API-ключи ассистента
+    .replace(/(bearer\s+|token["']?\s*[:=]\s*["']?|api[_-]?key["']?\s*[:=]\s*["']?)[\w.~+/-]{12,}/gi, '$1••••')
     .replace(/(\b[Aa]ccount[ :=]+)\d{5,}/g, '$1••••')
     .replace(/("wifi_hash"\s*:\s*")[0-9a-f]+/g, '$1••••')
+    .replace(/(^|[^\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])/g, (m, pre, ip) => pre + (ip === '127.0.0.1' ? ip : 'x.x.x.x'))
+    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '•••@•••')
+    .replace(/([/\\](?:home|users)[/\\])[^/\\\s]+/gi, '$1<user>')
     // MAC роутера (BSSID) находится в открытых базах точек Wi‑Fi — по нему можно узнать адрес
     .replace(/\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b/gi, '••:••:••:••:••:••');
 }
@@ -3477,16 +3344,32 @@ function renderLog() {
   if (atBottom) out.scrollTop = out.scrollHeight;
 }
 async function loadLog(btn) {
-  const r = await act(btn, () => api(`/api/log?name=${encodeURIComponent($('#log-name').value)}&lines=${$('#log-lines').value}`));
+  const name = $('#log-name').value;
+  if (name === 'browser') {
+    logText = formatJsErrors() || 'Ошибок браузера (JS) за этот сеанс не зафиксировано.';
+    renderLog();
+    return;
+  }
+  const r = await act(btn, () => api(`/api/log?name=${encodeURIComponent(name)}&lines=${$('#log-lines').value}`));
   if (r) { logText = r.text; renderLog(); }
 }
 $('#log-load').onclick = e => loadLog(e.currentTarget);
-// Отчёт для Issue — и в «Настройках», и на экране подключения (там он нужнее всего)
+$('#log-copy').onclick = async () => {
+  const text = $('#log-out').textContent || '';
+  const ok = text && await copyText(text);
+  toast(ok ? 'Лог скопирован' : 'Не удалось скопировать лог', !ok);
+};
+// Отчёт для Issue — на экране подключения, в «Настройках» и во вкладке «Логи»
 // Буфер обмена браузер даёт только сразу после нажатия, а отчёт собирается на сервере: поэтому запись начинаем
 // в том же нажатии с обещанием текста (ClipboardItem), а если не вышло — показываем отчёт в поле, уже выделенным.
 $$('[data-report]').forEach(b => b.onclick = e => act(e.currentTarget, async () => {
   const box = $('#' + b.dataset.report);
-  const text = api('/api/report').then(r => r.text);
+  const text = api('/api/report').then(r => {
+    const js = formatJsErrors();
+    if (!js) return r.text;
+    const masked = $('#log-mask')?.checked === false ? js : maskLog(js);
+    return r.text + '\n## Ошибки интерфейса (браузер)\n```\n' + masked + '\n```\n';
+  });
   let copied = false;
   if (navigator.clipboard?.write && window.ClipboardItem && isSecureContext) {
     copied = await navigator.clipboard.write([new ClipboardItem({ 'text/plain': text.then(t => new Blob([t], { type: 'text/plain' })) })])
@@ -3662,8 +3545,7 @@ const store = {
   get: k => { try { return localStorage.getItem(PanelContext.storageKey(k)); } catch { return null; } },
   set: (k, v) => { try { localStorage.setItem(PanelContext.storageKey(k), v); } catch {} },
 };
-// 'radio' временно убрана из списка вкладок вместе с пунктом меню; код вкладки остаётся
-const TABS = ['overview', 'player', 'led', 'alarm', 'scenes', 'assistant', 'wakeword', 'charts', 'boot', 'party', 'apps', 'files', 'logs', 'console', 'settings'];
+const TABS = ['overview', 'player', 'yt', 'assistant', 'wakeword', 'charts', 'boot', 'party', 'apps', 'files', 'logs', 'console', 'settings'];
 let bootLoaded = false;
 let logsLoaded = false;
 let shownTab = null;
@@ -3686,7 +3568,11 @@ $('#nav-sheet').addEventListener('click', e => { if (e.target.closest('a')) navS
 
 let prevTab = 'overview', plReturn = null;
 function showTab() {
-  const h = location.hash.slice(1);
+  const rawHash = location.hash.slice(1);
+  const qIdx = rawHash.indexOf('?');
+  let h = qIdx >= 0 ? rawHash.slice(0, qIdx) : rawHash;
+  const queryStr = qIdx >= 0 ? rawHash.slice(qIdx + 1) : '';
+  if (h === 'vk') h = 'yt';
   const tab = TABS.includes(h) ? h : 'overview';
   const from = document.body.dataset.tab;
   // другая вкладка — начинаем её сверху (например, переход в «Плеер» из нижнего плеера); но из плеера на
@@ -3723,6 +3609,9 @@ function showTab() {
     logsLoaded = true;
     api('/api/logs').then(l => {
       $('#log-name').innerHTML = '<option value="panel">журнал панели</option>'
+        + '<option value="errors">ошибки и трассировки сервера</option>'
+        + '<option value="server">буфер логов сервера</option>'
+        + '<option value="browser">ошибки браузера (JS)</option>'
         + l.map(n => `<option ${n === 'maind.log' ? 'selected' : ''}>${esc(n)}</option>`).join('');
       loadLog();
     }).catch(e => toast(e.message, true));
@@ -3732,10 +3621,7 @@ function showTab() {
   if (tab === 'party') loadParty();
   if (tab === 'wakeword') { if (window.wwLoad) window.wwLoad(); if (window.wwActionsLoad) window.wwActionsLoad(); }
   loadHook();
-  if (tab === 'apps') { loadYam2(); loadYam(); }
-  if (tab === 'alarm') loadAlarms();
-  if (tab === 'scenes') loadScenes();
-  rdPoll(tab === 'radio');
+  if (tab === 'apps') loadYam2();
   asPoll(tab === 'assistant');
   if (tab === 'charts') loadCharts();
   if (tab === 'settings') { loadAccess(); loadAgent(); loadFootprint(); loadPanelVersion().catch(() => {}); loadPanelModel(); }
@@ -3743,6 +3629,7 @@ function showTab() {
   loadDSP();
   if (tab === 'player') { renderMusic(); loadPlayerExtras(); loadMusic(); }
   updateMinibar();
+  window.dispatchEvent(new CustomEvent('panel:tab', { detail: { tab, query: queryStr || '' } }));
 }
 window.addEventListener('hashchange', showTab);
 
@@ -3755,9 +3642,30 @@ const fmtDur = s => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(
 const muState = () => mu.info?.glagol?.state;
 const muPlayer = () => muState()?.playerState;
 const muHas = () => { const p = muPlayer(); return !!(p && (p.title || p.subtitle)); };
-// на телефоне мини-плеер есть всегда: кнопки «Плеер» в нижней панели нет, в плеер ведёт он
+// на телефоне мини-плеер всегда виден для быстрого управления воспроизведением
 const minibarOn = () => store.get('ui.minibar') !== '0' || plMobile();
 const coverUrl = (uri, size) => uri ? (uri.includes('://') ? uri : 'https://' + uri.replace('%%', `${size}x${size}`)) : '';
+const safeImgUrl = u => {
+  let s = String(u || '').trim();
+  if (!s) return '';
+  if (/^http:\/\/avatars\.yandex\.net/i.test(s)) s = 'https://' + s.slice(7);
+  return /^(https:\/\/|\/api\/)/i.test(s) ? s : '';
+};
+const YT_THUMB_HOST_RE = /(?:^|\.)(?:ytimg\.com|googleusercontent\.com|ggpht\.com|youtube\.com|gstatic\.com)$/i;
+function proxyThumbUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('/api/')) return typeof PanelContext !== 'undefined' && PanelContext?.url ? PanelContext.url(raw) : raw;
+  let parsed;
+  try { parsed = new URL(raw); } catch { return ''; }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return '';
+  if (parsed.protocol === 'https:' && YT_THUMB_HOST_RE.test(parsed.hostname)) {
+    const path = '/api/extmusic/thumb?url=' + encodeURIComponent(raw);
+    return typeof PanelContext !== 'undefined' && PanelContext?.url ? PanelContext.url(path) : path;
+  }
+  return parsed.href;
+}
+window.proxyThumbUrl = proxyThumbUrl;
 // ---- перезапуск Алисы: экран ожидания вместо ошибок Glagol ----
 // Включается при перезапуске из панели и сам, если Алиса (Glagol) пропала при живой колонке. Уходит, когда Glagol
 // снова на связи (не раньше чем через 8 с после начала — до перезапуска он ещё «подключён»), или через 90 с.
@@ -3815,17 +3723,25 @@ $$('[data-mu-controls]').forEach(el => {
 });
 
 function updateMinibar() {
-  const show = online && minibarOn() && !!mu.info?.auth?.logged_in && $('#tab-player').hidden;
+  const show = online && minibarOn() && (!!mu.info?.auth?.logged_in || !!mu.info?.extmusic?.current) && $('#tab-player').hidden;
   $('#minibar').hidden = !show;
   document.body.classList.toggle('has-minibar', show);
 }
 
 let voiceInput = null;
 async function loadMusic() {
-  const need = !$('#tab-overview').hidden || !$('#tab-player').hidden || (minibarOn() && mu.info?.auth?.logged_in !== false) || !!aliceWait;
+  const need = !$('#tab-overview').hidden || !$('#tab-player').hidden
+    || (minibarOn() && (mu.info?.auth?.logged_in !== false || !!mu.info?.extmusic?.current)) || !!aliceWait;
   if (!online) { voiceInput?.update(false); return; }
   if (document.hidden || !need) return;
+  const prevP = muPlayer();
+  const prevLiked = prevP && typeof prevP.liked === 'boolean' ? prevP.liked : undefined;
   try { mu.info = await api('/api/music'); } catch { voiceInput?.update(false); return; }
+  const nextP = muPlayer();
+  if (mu.track && nextP && mu.track.id === nextP.id && typeof nextP.liked === 'boolean'
+      && prevLiked !== undefined && nextP.liked !== prevLiked) {
+    mu.track.liked = nextP.liked;
+  }
   // Алиса пропала при живой колонке (её перезапустили — например, сторож Bluetooth-колонки) — экран ожидания
   const gNow = !!mu.info?.glagol?.connected;
   if (gWas && !gNow && online && mu.info?.auth?.logged_in && !aliceWait) aliceRestarting('Ждём, пока она снова выйдет на связь — обычно это меньше минуты', 'Алиса недоступна');
@@ -3837,6 +3753,7 @@ async function loadMusic() {
   }
   renderMusic();
 }
+window.loadMusic = loadMusic;
 every(1000, loadMusic);
 
 function musicPos() {
@@ -3897,8 +3814,9 @@ function renderMusicProgress() {
 function renderMusic() {
   const i = mu.info;
   if (!i) return;
-  const logged = i.auth.logged_in;
-  const commandsReady = online && logged && !!i.glagol?.connected;
+  const extActive = !!i.extmusic?.current;
+  const logged = i.auth.logged_in || extActive;
+  const commandsReady = online && logged && (!!i.glagol?.connected || extActive);
   $('[data-widget="alice"]').hidden = !commandsReady;
   $('#pl-command').hidden = !commandsReady;
   $$('.mu-ask-form').forEach(form => { form.elements.text.disabled = !commandsReady; });
@@ -3911,32 +3829,71 @@ function renderMusic() {
   $('#mu-account').innerHTML = ymLogin ? secret('login', ymLogin) : '';
   $('#pl-login').hidden = logged;
   $('#pl-body').hidden = !logged;
-  if (!logged) { if (!mu.qr && !$('#tab-overview').hidden) startQr(); return; }
+  if (!logged) {
+    if ($('#pl-ext-stop')) $('#pl-ext-stop').hidden = true;
+    if ($('#pl-m-ext-stop')) $('#pl-m-ext-stop').hidden = true;
+    if ($('#pl-autoradio-wrap')) $('#pl-autoradio-wrap').hidden = true;
+    if ($('#pl-q-clear')) { $('#pl-q-clear').hidden = true; $('#pl-q-clear').disabled = true; }
+    if (!mu.qr && !$('#tab-overview').hidden) startQr();
+    return;
+  }
   stopQr();
 
   const g = i.glagol, s = g.state, p = s?.playerState, has = muHas();
   const isBt = p?.playerType === 'bluetooth';
+  const isExt = p?.playerType === 'external' || !!p?.extSource;
+  const isYtExt = isExt && p?.extSource === 'yt';
+  const isYtNonNative = isYtExt && !p?.native;
+  const showExtStop = isExt && !isBt;
+  const stopBtn = $('#pl-ext-stop'), mStopBtn = $('#pl-m-ext-stop');
+  if (stopBtn) {
+    stopBtn.hidden = !showExtStop;
+    stopBtn.textContent = p?.extSource === 'vk' ? '■ Стоп VK' : '■ Стоп YouTube';
+    stopBtn.setAttribute('aria-label', p?.extSource === 'vk' ? 'Остановить VK Music' : 'Остановить YouTube Music');
+  }
+  if (mStopBtn) {
+    mStopBtn.hidden = !showExtStop;
+    mStopBtn.setAttribute('aria-label', p?.extSource === 'vk' ? 'Остановить VK Music' : 'Остановить YouTube Music');
+  }
   document.body.classList.toggle('mu-bt', isBt);
-  $('#mu-err').hidden = g.connected || aliceWaitActive();
+  $('#mu-err').hidden = g.connected || aliceWaitActive() || extActive;
   $('#mu-err').textContent = g.connected ? '' : (g.error || 'Подключаемся к колонке…');
   const title = has ? p.title : 'Ничего не играет';
   const artist = has ? (p.subtitle || '') + (isBt && p.extra?.album ? ' — ' + p.extra.album : '') : (g.connected ? 'Нажмите ▶ — включится «Моя волна»' : '');
-  // В виджете и на вкладке «Плеер» название и исполнители — ссылки на Яндекс Музыку (нижний плеер ведёт во вкладку).
+  // В виджете и на вкладке «Плеер» название и исполнители — ссылки на Яндекс Музыку или внутреннюю вкладку YouTube Music.
   const t = !isBt && mu.track && mu.track.id === String(p?.id) ? mu.track : null;
-  const links = !plMobile();   // на телефоне ссылок наружу нет: исполнитель открывает «Об исполнителе»
+  const links = !plMobile();   // на телефоне в «Плеере» ссылок на исполнителя нет: тап открывает «Об исполнителе»
+  const ymLinks = links && !isExt;
   $$('.mu-title').forEach(e => {
-    const html = t && links && e.closest('#music-card, #tab-player') ? ymA(ymTrackPath(t), title) : esc(title);
+    const html = t && ymLinks && e.closest('#music-card, #tab-player') ? ymA(ymTrackPath(t), title) : esc(title);
     if (e.classList.contains('mq-line')) swapText(e, `<span class="mq">${html}</span>`, title, () => mqFit(e));
     else swapText(e, html, title);
   });
   const artists = t?.artistList?.length ? t.artistList.map(a => a.name).join(', ') : artist;
   $$('.mu-artist').forEach(e => {
-    if (t?.artistList?.length && links && e.closest('#music-card, #tab-player')) swapText(e, t.artistList.map(a => ymA(`/artist/${a.id}`, a.name)).join(', '), artists);
-    else swapText(e, esc(artists), artists);
+    if (t?.artistList?.length && e.closest('#music-card, #tab-player')) {
+      if (!isExt && links) {
+        swapText(e, t.artistList.map(a => ymA(`/artist/${a.id}`, a.name)).join(', '), artists);
+        return;
+      }
+      if (isExt && (links || e.closest('#music-card'))) {
+        const artistHtml = t.artistList.map(a => {
+          const aid = String(a?.id || '');
+          if (aid.startsWith('ext:yt:') && aid.length > 7) {
+            return `<a class="yt-nav" href="#yt?artist=${encodeURIComponent(aid.slice(7))}" title="Открыть исполнителя в YouTube Music">${esc(a.name || artists)}</a>`;
+          }
+          return esc(a?.name || artists);
+        }).join(', ');
+        swapText(e, artistHtml, artists);
+        return;
+      }
+    }
+    swapText(e, esc(artists), artists);
   });
-  const cover = has && !isBt ? coverUrl(p.extra?.coverURI, 400) : '';
+  const cover = has && !isBt ? safeImgUrl(coverUrl(p.extra?.coverURI, 400)) : '';
   $$('.mu-cover').forEach(e => {
-    const url = e.classList.contains('pl-cover') && mu.track?.coverBig ? mu.track.coverBig : cover;
+    const big = safeImgUrl(mu.track?.coverBig);
+    const url = e.classList.contains('pl-cover') && big ? big : cover;
     e.style.backgroundImage = url ? cssUrl(url) : '';
     if (e.firstElementChild) e.firstElementChild.style.display = url ? 'none' : '';
   });
@@ -3953,14 +3910,25 @@ function renderMusic() {
     b.setAttribute('aria-label', { None: 'Повтор выключен', All: 'Повтор всех', One: 'Повтор трека' }[rep]);
   });
   $$('[data-mu="shuffle"]').forEach(b => b.classList.toggle('on', !!p?.entityInfo?.shuffled));
-  $$('[data-mu="like"]').forEach(b => { b.classList.toggle('liked', !!mu.track?.liked); b.setAttribute('aria-label', mu.track?.liked ? 'Убрать лайк' : 'Лайк'); });
-  $$('[data-mu="shuffle"], [data-mu="repeat"], [data-mu="like"], [data-mu="dislike"]').forEach(b => b.disabled = !has);
+  const isLiked = t ? !!t.liked : !!p?.liked;
+  $$('[data-mu="like"]').forEach(b => { b.classList.toggle('liked', isLiked); b.setAttribute('aria-label', isLiked ? 'Убрать лайк' : 'Лайк'); });
+  const canTrackControls = has && !isBt && (!isExt || isYtNonNative);
+  $$('[data-mu="shuffle"], [data-mu="repeat"], [data-mu="like"], [data-mu="dislike"]').forEach(b => b.disabled = !canTrackControls);
   renderMusicProgress();
 
   if (p?.id && p.id !== mu.trackId) {   // сменился трек — подробности и всё для вкладки «Плеер»
     mu.trackId = p.id; mu.track = null; mu.extras = {};
-    if (!isBt) api('/api/music/info?id=' + encodeURIComponent(p.id)).then(t => { if (mu.trackId === p.id) { mu.track = t; renderMusic(); } }).catch(() => {});
+    if (!isBt) api('/api/music/info?id=' + encodeURIComponent(p.id)).then(info => {
+      if (mu.trackId === p.id) {
+        mu.track = info;
+        const curP = muPlayer();
+        if (curP && curP.id === p.id && typeof info?.liked === 'boolean') curP.liked = info.liked;
+        renderMusic();
+      }
+    }).catch(() => {});
     if (!$('#tab-player').hidden) loadPlayerExtras();
+  } else if (!p?.id && mu.trackId) {
+    mu.trackId = null; mu.track = null; mu.extras = {};
   }
   if (!$('#tab-player').hidden) renderPlayerTab();
 }
@@ -3973,18 +3941,41 @@ function renderPlayerTab() {
   const q = mu.extras.queue;
   const src = q?.title || (p?.playlistId === 'user:onyourwave' ? 'Моя волна' : p?.playlistDescription);
   const isBt = p?.playerType === 'bluetooth';
-  const srcPath = !isBt && muHas() ? ymSourcePath(p) : null;
+  const isExt = p?.playerType === 'external' || !!p?.extSource;
+  const isYtNonNative = isExt && p?.extSource === 'yt' && !p?.native;
+  const extLabel = p?.extSource === 'vk' ? 'VK Music' : 'YouTube Music';
+  const srcPath = !isBt && !isExt && muHas() ? ymSourcePath(p) : null;
   setHtml($('#pl-source'), isBt ? 'Bluetooth · звук с телефона или компьютера'
+    : isExt ? `<a class="yt-nav" href="#yt">${esc(extLabel)}</a>` + (src && src !== extLabel ? ' · ' + esc(src) : '')
     : muHas() ? esc(PL_TYPES[p.playlistType] || p.playlistType || '') + (src ? ' · ' + (srcPath ? ymA(srcPath, src) : esc(src)) : '') : 'Ничего не играет');
-  $('#pl-msrc').textContent = isBt ? 'Bluetooth' : muHas() ? (src || PL_TYPES[p.playlistType] || p.playlistType || '') : '';
-  $('#pl-kind').textContent = p ? (isBt ? 'Bluetooth' : PL_TYPES[p.type] || p.type || 'Трек') + (s?.playing ? ' · играет' : ' · пауза') : '—';
+  $('#pl-msrc').textContent = isBt ? 'Bluetooth' : isExt ? extLabel : muHas() ? (src || PL_TYPES[p.playlistType] || p.playlistType || '') : '';
+  $('#pl-kind').textContent = p ? (isBt ? 'Bluetooth' : isExt ? extLabel : PL_TYPES[p.type] || p.type || 'Трек') + (s?.playing ? ' · играет' : ' · пауза') : '—';
   const meta = [];
-  if (t) {
+  if (t && !isExt) {
     if (t.album?.title) meta.push(t.album.id ? ymA(`/album/${t.album.id}`, `Альбом «${t.album.title}»`, 'badge') : `<span class="badge">${esc(`Альбом «${t.album.title}»`)}</span>`);
     for (const m of [t.album?.year, t.album?.genre, t.album?.label, t.album?.trackCount && `${t.album.trackCount} треков в альбоме`, t.explicit && '18+'])
       if (m) meta.push(`<span class="badge">${esc(m)}</span>`);
+  } else if (t && isExt && t.album?.title && t.album.title !== extLabel) {
+    meta.push(`<span class="badge">${esc(`Альбом «${t.album.title}»`)}</span>`);
   }
   setHtml($('#pl-meta'), meta.join(''));
+  if ($('#pl-autoradio-wrap')) $('#pl-autoradio-wrap').hidden = !isYtNonNative;
+  if ($('#pl-autoradio') && !$('#pl-autoradio').disabled) {
+    $('#pl-autoradio').checked = Boolean(p?.autoplayRadio ?? mu.info?.extmusic?.autoplay_radio);
+  }
+  if ($('#pl-q-clear')) {
+    const qTracks = Array.isArray(q?.tracks) ? q.tracks : [];
+    const qCur = q?.current;
+    $('#pl-q-clear').hidden = !isYtNonNative;
+    $('#pl-q-clear').disabled = !isYtNonNative || qTracks.length <= (qCur == null ? 0 : qCur + 1);
+  }
+  if (isExt && mu.info?.extmusic?.current && mu.extras.for === mu.trackId) {
+    const liveQ = extQueueData(mu.info.extmusic, extLabel);
+    if (liveQ) {
+      mu.extras.queue = liveQ;
+      renderPlayerQueue(liveQ);
+    }
+  }
   // текст: если есть синхронизация — подсвечиваем текущую строку
   const ly = mu.extras.lyrics;
   if (ly?.sync) {
@@ -4067,15 +4058,11 @@ function sheetDrag(el, isOpen, close) {
 sheetDrag($('#nav-sheet'), () => document.body.classList.contains('nav-open'), () => navSheet(false));
 $$('#tab-player [data-pl-sec]').forEach(x => sheetDrag(x, () => x.classList.contains('open'), () => plSheet('')));
 sheetDrag($('#pl-command'), () => $('#tab-player').classList.contains('pl-ask'), () => plSheet(''));
-sheetDrag($('#sc-add-step'), () => $('#sc-board').classList.contains('pal-open'), () => $('#sc-board').classList.remove('pal-open'));
 
 // какие списки уходят в листы
 mSheet([$('#snd-folders'), $('#snd-filter').closest('.search'), $('#sounds')], 'Звуки колонки', 'Все звуки');
 mSheet([$('#pat-kind').closest('.card-head'), $('#patterns')], 'Анимации', 'Анимации кольца и часов');
-mSheet([$('#al-log')], 'Журнал будильника', 'Журнал');
-mSheet([$('#sc-log')], 'Журнал сценариев', 'Журнал');
 mSheet([$('#y2-log')], 'Лог службы', 'Лог службы');
-mSheet([$('#yam-log')], 'Лог пакета', 'Лог пакета');
 
 // ---- телефон: плеер в цветах обложки ----
 // Маленькую обложку (её сервер разрешает читать) рисуем на холсте 24×24 и ищем самый «живой» цвет: оттенки
@@ -4086,6 +4073,8 @@ function plTint(url) {
   if (url === plTintFor) return;
   plTintFor = url;
   if (!url) return plTintApply(null);
+  const srcUrl = proxyThumbUrl(url);
+  if (!srcUrl) return plTintApply(null);
   const img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = () => {
@@ -4117,7 +4106,7 @@ function plTint(url) {
     } catch { plTintApply(null); }
   };
   img.onerror = () => plTintApply(null);
-  img.src = url;
+  img.src = srcUrl;
 }
 function plTintApply(hsl) {
   plTintHsl = hsl;
@@ -4297,59 +4286,151 @@ plPlaceholder();
 matchMedia('(max-width: 760px)').addEventListener('change', () => { plSheet(''); plPlaceholder(); plTintApply(plTintHsl); renderMusic(); });
 // ручная прокрутка текста (колесо, тач, перетаскивание полосы) — ставит автопрокрутку на паузу
 ['wheel', 'touchmove', 'pointerdown'].forEach(ev => $('#pl-lyrics').addEventListener(ev, () => { $('#pl-lyrics')._userScroll = Date.now(); }, { passive: true }));
-const trackRow = (t, cur, tag) => `<button class="trow${cur ? ' cur' : ''}" data-play="${esc(t.id)}" ${t.available === false ? 'disabled' : ''}>
-  ${t.cover ? `<img src="${esc(t.cover)}" alt="" loading="lazy">` : '<span class="ph"></span>'}
+const trackRow = (t, cur, tag, acts = '') => {
+  const cover = safeImgUrl(t.cover);
+  const inner = `${cover ? `<img src="${esc(cover)}" alt="" loading="lazy">` : '<span class="ph"></span>'}
   <span class="tt"><b>${esc(t.title)}</b><span>${esc(t.artists)}</span></span>
-  ${tag ? `<span class="badge${cur ? ' ok' : ''}">${esc(tag)}</span>` : ''}<span class="td">${t.durationMs ? fmtDur(t.durationMs / 1000) : ''}</span></button>`;
-async function loadPlayerExtras() {
-  const id = mu.trackId;
-  if (!id || mu.extras.for === id) return;
-  mu.extras = { for: id };
-  $('#pl-lyrics').innerHTML = $('#pl-queue').innerHTML = $('#pl-similar').innerHTML = '<div class="empty">Загрузка…</div>';
-  const p = muPlayer(), isBt = p?.playerType === 'bluetooth';
-  // По Bluetooth у трека нет id Яндекса: текст ищем в LRCLIB по названию, очередь и похожие не нужны.
-  const lyUrl = isBt ? '/api/music/lyrics?' + new URLSearchParams({ title: p.title || '', artist: p.subtitle || '', album: p.extra?.album || '', duration: p.duration || 0 })
-                     : '/api/music/lyrics?id=' + id;
-  const none = Promise.reject(new Error('—'));
-  none.catch(() => {});
-  const [ly, q, sim] = await Promise.allSettled([api(lyUrl), isBt ? none : api('/api/music/queue'), isBt ? none : api('/api/music/similar?id=' + id)]);
-  if (mu.trackId !== id) return;
-  const L = ly.status === 'fulfilled' ? ly.value : {};
-  if (L.text) {
-    mu.extras.lyrics = L;
-    $('#pl-lyrics').innerHTML = L.sync
-      ? L.sync.map(l => `<span class="ln">${esc(l[1]) || '&nbsp;'}</span>`).join('')
-      : esc(L.text);
-    $('#pl-ly-meta').textContent = L.sync ? 'идёт вместе с песней' : '';
-  } else {
-    $('#pl-lyrics').innerHTML = `<div class="empty">${L.instrumental ? 'Инструментальный трек — без слов' : 'Текст не нашёлся ни в Яндекс Музыке, ни в LRCLIB'}</div>`;
-    $('#pl-ly-meta').textContent = '';
+  ${tag ? `<span class="badge${cur ? ' ok' : ''}">${esc(tag)}</span>` : ''}<span class="td">${t.durationMs ? fmtDur(t.durationMs / 1000) : ''}</span>`;
+  if (acts) {
+    return `<div class="trow trow-with-acts${cur ? ' cur' : ''}">
+      <button type="button" class="trow-main" data-play="${esc(t.id)}" ${t.available === false ? 'disabled' : ''}>${inner}</button>
+      <span class="trow-acts">${acts}</span>
+    </div>`;
   }
-  // откуда текст
-  const SRC = { 'Яндекс Музыка': 'Текст: Яндекс Музыка', 'LRCLIB': 'Текст: <a href="https://lrclib.net" target="_blank" rel="noopener">LRCLIB</a> — открытая база текстов песен' };
-  $('#pl-ly-src').hidden = !L.source;
-  $('#pl-ly-src').innerHTML = SRC[L.source] || '';
-  if (q.status === 'fulfilled') {
-    mu.extras.queue = q.value;
-    $('#pl-q-title').textContent = q.value.title ? `Очередь · ${q.value.title}` : 'Очередь';
-    $('#pl-q-count').textContent = q.value.tracks.length > 3 ? `${q.value.tracks.length} треков` : '';
-    const cur = q.value.current, tagOf = k => cur == null ? '' : k === cur ? 'сейчас' : k === cur + 1 ? 'далее' : k === cur - 1 ? 'было' : '';
-    $('#pl-queue').innerHTML = q.value.tracks.map((t, k) => trackRow(t, k === cur, tagOf(k))).join('') || '<div class="empty">Пусто</div>';
+  return `<button class="trow${cur ? ' cur' : ''}" data-play="${esc(t.id)}" ${t.available === false ? 'disabled' : ''}>${inner}</button>`;
+};
+
+function extQueueData(ext, extLabel) {
+  if (!ext?.current) return null;
+  const tracks = (ext.queue || []).map(tr => ({
+    id: `ext:${tr.source || 'yt'}:${tr.id || ''}`,
+    title: tr.title || 'Без названия',
+    artists: tr.artist || extLabel,
+    cover: tr.thumb || '',
+    durationMs: (Number(tr.duration) || 0) * 1000,
+    available: true,
+  }));
+  return { title: extLabel, type: 'External', tracks, current: Number(ext.index || 0) };
+}
+
+function renderPlayerQueue(qVal, { scrollToCur = false } = {}) {
+  const p = muPlayer();
+  const isExt = p?.playerType === 'external' || !!p?.extSource;
+  const isYtNonNative = isExt && p?.extSource === 'yt' && !p?.native;
+  const tracks = Array.isArray(qVal?.tracks) ? qVal.tracks : [];
+  const cur = qVal?.current;
+  if ($('#pl-autoradio-wrap')) $('#pl-autoradio-wrap').hidden = !isYtNonNative;
+  if ($('#pl-autoradio') && !$('#pl-autoradio').disabled) {
+    $('#pl-autoradio').checked = Boolean(p?.autoplayRadio ?? mu.info?.extmusic?.autoplay_radio);
+  }
+  if ($('#pl-q-clear')) {
+    $('#pl-q-clear').hidden = !isYtNonNative;
+    $('#pl-q-clear').disabled = !isYtNonNative || tracks.length <= (cur == null ? 0 : cur + 1);
+  }
+  $('#pl-q-title').textContent = qVal?.title ? `Очередь · ${qVal.title}` : 'Очередь';
+  $('#pl-q-count').textContent = tracks.length > 3 ? `${tracks.length} треков` : '';
+  const tagOf = k => cur == null ? '' : k === cur ? 'сейчас' : k === cur + 1 ? 'далее' : k === cur - 1 ? 'было' : '';
+  const html = tracks.map((t, k) => {
+    const acts = isYtNonNative && cur != null && k > cur
+      ? `<button type="button" class="cbtn sm" data-q-del="${k}" title="Убрать из очереди" aria-label="Убрать из очереди «${esc(t.title)}»">✕</button>`
+      : '';
+    return trackRow(t, k === cur, tagOf(k), acts);
+  }).join('') || '<div class="empty">Пусто</div>';
+  setListHtml($('#pl-queue'), html);
+  if (scrollToCur) {
     // только сам список: scrollIntoView прокрутил бы и родителей — на телефоне закреплённую страницу плеера,
     // и он при открытии улетал вверх и тут же возвращался
     const row = $('#pl-queue .trow.cur'), list = $('#pl-queue');
     if (row) list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - (list.clientHeight - row.offsetHeight) / 2;
-  } else $('#pl-queue').innerHTML = `<div class="empty">${esc(q.reason?.message || 'Не удалось')}</div>`;
-  $('#pl-similar').innerHTML = sim.status === 'fulfilled' && sim.value.length ? sim.value.map(t => trackRow(t)).join('') : '<div class="empty">Нет</div>';
+  }
+}
+
+async function loadPlayerExtras() {
+  const id = mu.trackId;
+  if (!id || mu.extras.for === id) return;
+  mu.extras = { for: id };
+  const p = muPlayer(), isBt = p?.playerType === 'bluetooth';
+  const isExt = p?.playerType === 'external' || !!p?.extSource;
+  const isYtExt = isExt && p?.extSource === 'yt';
+  setListHtml($('#pl-lyrics'), '<div class="empty">Загрузка…</div>');
+  setListHtml($('#pl-queue'), '<div class="empty">Загрузка…</div>');
+  setListHtml($('#pl-similar'), '<div class="empty">Загрузка…</div>');
+  if (!isBt && (!isExt || isYtExt)) {
+    $('#pl-artist').innerHTML = '<div class="empty">Загрузка…</div>';
+  }
+  const lyUrl = (isBt || (isExt && !isYtExt))
+    ? '/api/music/lyrics?' + new URLSearchParams({ title: p.title || '', artist: p.subtitle || '', album: p.extra?.album || '', duration: p.duration || 0 })
+    : '/api/music/lyrics?id=' + encodeURIComponent(id);
+  const none = Promise.reject(new Error('—'));
+  none.catch(() => {});
+  const [ly, q, sim] = await Promise.allSettled([
+    api(lyUrl),
+    isBt ? none : api('/api/music/queue'),
+    (isBt || (isExt && !isYtExt)) ? none : api('/api/music/similar?id=' + encodeURIComponent(id)),
+  ]);
+  if (mu.trackId !== id) return;
+  const L = ly.status === 'fulfilled' ? ly.value : {};
+  if (L.text) {
+    mu.extras.lyrics = L;
+    setListHtml($('#pl-lyrics'), L.sync
+      ? L.sync.map(l => `<span class="ln">${esc(l[1]) || '&nbsp;'}</span>`).join('')
+      : esc(L.text));
+    $('#pl-ly-meta').textContent = L.sync ? 'идёт вместе с песней' : '';
+  } else {
+    const lyEmpty = L.instrumental
+      ? 'Инструментальный трек — без слов'
+      : (isYtExt ? 'Текст не нашёлся ни в YouTube Music, ни в LRCLIB' : 'Текст не нашёлся ни в Яндекс Музыке, ни в LRCLIB');
+    setListHtml($('#pl-lyrics'), `<div class="empty">${lyEmpty}</div>`);
+    $('#pl-ly-meta').textContent = '';
+  }
+  // откуда текст
+  const SRC = {
+    'Яндекс Музыка': 'Текст: Яндекс Музыка',
+    'YouTube Music': 'Текст: YouTube Music',
+    'LRCLIB': 'Текст: <a href="https://lrclib.net" target="_blank" rel="noopener">LRCLIB</a> — открытая база текстов песен',
+  };
+  $('#pl-ly-src').hidden = !L.source;
+  $('#pl-ly-src').innerHTML = SRC[L.source] || '';
+  if (q.status === 'fulfilled') {
+    mu.extras.queue = q.value;
+    renderPlayerQueue(q.value, { scrollToCur: true });
+  } else {
+    if ($('#pl-autoradio-wrap')) $('#pl-autoradio-wrap').hidden = true;
+    if ($('#pl-q-clear')) { $('#pl-q-clear').hidden = true; $('#pl-q-clear').disabled = true; }
+    setListHtml($('#pl-queue'), `<div class="empty">${esc(q.reason?.message || 'Не удалось')}</div>`);
+  }
+  setListHtml($('#pl-similar'), sim.status === 'fulfilled' && sim.value.length ? sim.value.map(t => trackRow(t)).join('') : '<div class="empty">Нет</div>');
   if (isBt) return;
+  if (isExt && !isYtExt) { $('#pl-artist').innerHTML = '<div class="empty">—</div>'; return; }
   // исполнитель — когда приедут подробности о треке
   const waitTrack = async () => { for (let k = 0; k < 20 && !mu.track && mu.trackId === id; k++) await new Promise(r => setTimeout(r, 300)); };
   await waitTrack();
+  if (mu.trackId !== id) return;
   const aid = mu.track?.artistList?.[0]?.id;
   if (!aid) { $('#pl-artist').innerHTML = '<div class="empty">—</div>'; return; }
   try {
-    const a = await api('/api/music/artist?id=' + aid);
+    const a = await api('/api/music/artist?id=' + encodeURIComponent(aid));
     if (mu.trackId !== id) return;
+    if (a.source === 'yt' || String(aid).startsWith('ext:yt:')) {
+      const bid = a.browse_id || (String(a.id || '').startsWith('ext:yt:') ? String(a.id).slice(7) : String(aid).slice(7));
+      const artistHref = bid ? '#yt?artist=' + encodeURIComponent(bid) : '#yt';
+      const artCover = safeImgUrl(a.cover ? proxyThumbUrl(a.cover) : '');
+      $('#pl-artist').innerHTML = `<div class="artist-grid">
+        ${artCover ? `<img src="${esc(artCover)}" alt="" style="object-fit:cover">` : '<span></span>'}
+        <div class="col" style="gap:8px">
+          <div style="font-size:22px;font-weight:800"><a class="yt-nav" href="${esc(artistHref)}">${esc(a.name)}</a></div>
+          <div class="pl-meta">${a.subtitle ? `<span class="badge">${esc(a.subtitle)}</span>` : ''}
+            ${a.tracks ? `<span class="badge">${esc(a.tracks)} треков</span>` : ''}${a.albums ? `<span class="badge">${esc(a.albums)} альбомов</span>` : ''}</div>
+          ${a.description ? `<p class="hint" style="font-size:14px">${esc(a.description)}</p>` : ''}
+          ${a.similar?.length ? `<div class="meta">Похожие: ${a.similar.map(x => {
+            const xBid = x.browse_id || (String(x.id || '').startsWith('ext:yt:') ? String(x.id).slice(7) : '');
+            return xBid ? `<a class="yt-nav" href="#yt?artist=${encodeURIComponent(xBid)}">${esc(x.name)}</a>` : esc(x.name);
+          }).join(', ')}</div>` : ''}
+          <div><a class="btn sm" href="${esc(artistHref)}">Открыть в YouTube Music</a></div>
+          ${a.popular?.length ? `<b style="margin-top:6px">Популярное</b><div class="tlist">${a.popular.map(t => trackRow(t)).join('')}</div>` : ''}
+        </div></div>`;
+      return;
+    }
     $('#pl-artist').innerHTML = `<div class="artist-grid">
       ${a.cover ? `<img src="${esc(a.cover)}" ${a.cover_big ? `srcset="${esc(a.cover)} 300w, ${esc(a.cover_big)} 1000w" sizes="(max-width: 760px) 100vw, 140px"` : ''} alt="" style="object-fit:cover">` : '<span></span>'}
       <div class="col" style="gap:8px">
@@ -4387,18 +4468,88 @@ function musicAction(a, btn, noAnim) {
   if (a === 'repeat') return muCmd(btn, { command: 'repeat', mode: { None: 'All', All: 'One', One: 'None' }[p?.entityInfo?.repeatMode || 'None'] });
   if (!p?.id) return;
   if (a === 'like') return act(btn, async () => {
-    const r = await api('/api/music/like', { id: p.id, like: !mu.track?.liked });
+    const likedNow = mu.track ? !!mu.track.liked : !!p?.liked;
+    const r = await api('/api/music/like', { id: p.id, like: !likedNow });
     if (mu.track) mu.track.liked = r.liked;
+    if (p && typeof p.liked === 'boolean') p.liked = r.liked;
     renderMusic();
     toast(r.liked ? '♥ В «Мне нравится»' : 'Лайк убран');
   });
-  if (a === 'dislike') return act(btn, () => api('/api/music/dislike', { id: p.id }), 'Дизлайк — дальше');
+  if (a === 'dislike') return act(btn, async () => {
+    const r = await api('/api/music/dislike', { id: p.id });
+    setTimeout(loadMusic, 200);
+    setTimeout(loadMusic, 700);
+    return r;
+  }, 'Дизлайк — дальше');
 }
+const stopExtMusic = btn => act(btn, async () => {
+  await api('/api/extmusic/stop', {});
+  mu.trackId = null; mu.track = null; mu.extras = {};
+  await loadMusic();
+}, 'Внешний плеер остановлен');
+$('#pl-ext-stop')?.addEventListener('click', e => stopExtMusic(e.currentTarget));
+$('#pl-m-ext-stop')?.addEventListener('click', e => stopExtMusic(e.currentTarget));
+$('#pl-autoradio')?.addEventListener('change', async e => {
+  const el = e.currentTarget;
+  const enable = !!el.checked;
+  el.disabled = true;
+  try {
+    const r = await api('/api/extmusic/autoplay', { enable });
+    if (muPlayer()) muPlayer().autoplayRadio = Boolean(r?.autoplay_radio ?? enable);
+    if (mu.info?.extmusic) mu.info.extmusic.autoplay_radio = Boolean(r?.autoplay_radio ?? enable);
+    toast(enable ? 'Авто-радио включено' : 'Авто-радио выключено');
+    await loadMusic();
+  } catch (err) {
+    el.checked = !enable;
+    if (!err.offline) toast(err.message, true);
+  } finally {
+    el.disabled = false;
+  }
+});
+$('#pl-q-clear')?.addEventListener('click', e => act(e.currentTarget, async () => {
+  await api('/api/extmusic/queue/clear', {});
+  await loadMusic();
+}, 'Предстоящие треки очищены'));
+$('#pl-queue')?.addEventListener('click', e => {
+  const del = e.target.closest('[data-q-del]');
+  if (!del) return;
+  e.stopPropagation();
+  const index = Number(del.dataset.qDel);
+  if (!Number.isInteger(index) || index < 0) return;
+  act(del, async () => {
+    await api('/api/extmusic/queue/remove', { index });
+    await loadMusic();
+  });
+});
+document.addEventListener('error', e => {
+  const img = e.target;
+  if (!img || img.tagName !== 'IMG') return;
+  if (img.closest('.trow')) {
+    const ph = document.createElement('span');
+    ph.className = 'ph';
+    img.replaceWith(ph);
+  } else if (img.closest('.artist-grid')) {
+    img.replaceWith(document.createElement('span'));
+  }
+}, true);
 document.addEventListener('click', e => {
+  const nav = e.target.closest('#tab-player a[href^="#yt"], #music-card a[href^="#yt"]');
+  if (nav) {
+    const href = nav.getAttribute('href') || '#yt';
+    const qIdx = href.indexOf('?');
+    const query = qIdx >= 0 ? href.slice(qIdx + 1) : '';
+    window.dispatchEvent(new CustomEvent('yt:navigate', { detail: { href, tab: 'yt', query } }));
+    return;
+  }
   const b = e.target.closest('[data-mu]');
   if (b) return musicAction(b.dataset.mu, b);
   const r = e.target.closest('[data-play]');
-  if (r) act(r, () => api('/api/music/play', { id: r.dataset.play, type: 'track' }), 'Включаю');
+  if (r) act(r, async () => {
+    const res = await api('/api/music/play', { id: r.dataset.play, type: 'track' });
+    setTimeout(loadMusic, 200);
+    setTimeout(loadMusic, 700);
+    return res;
+  }, 'Включаю');
 });
 document.addEventListener('input', e => {
   if (e.target.matches('input.mu-seek')) { mu.seeking = true; $$('.mu-pos').forEach(x => x.textContent = fmtDur(+e.target.value)); }
@@ -4632,11 +4783,6 @@ async function loadYam2(refresh) {
   const reg = (st.registries || []).find(r => r.name === 'official');
   $('#y2-reg').textContent = reg ? reg.url : 'не подключён — без него yam не найдёт пакетов';
   $('#y2-reg-add').hidden = !!reg;
-  $('#y2-legacy-note').hidden = !st.legacy?.running;
-  // старый yam — свёрнут, если стоит новый; раскрыт, если есть только старый
-  const leg = $('#yam-legacy');
-  if (!leg.dataset.touched) leg.open = !st.installed && !!st.legacy?.installed;
-  $('#yam-legacy-state').textContent = st.legacy?.installed ? (st.legacy.running ? '— работает' : '— установлен, остановлен') : '— не установлен';
   if (!st.installed) return;
   await Promise.all([loadYam2Packages(), loadYam2Catalog()]);
 }
@@ -4730,17 +4876,13 @@ async function yam2Pkg(btn, action, name, yes) {
   if (name.split('@')[0] === 'tangenx/wakeword' && window.wwLoad) await window.wwLoad();
   await loadYam2Packages();
 }
-async function yam2Svc(el, id, action, stopLegacy) {
-  const r = await act(el, () => api('/api/yam2/service', { id, action, stop_legacy: !!stopLegacy }));
-  if (r?.need_stop_legacy) {
-    if (confirm('Работает старый yamd: он занимает порт 8099, нужный Luna. Остановить yamd и выключить его автозапуск, чтобы запустить Luna?'))
-      return yam2Svc(el, id, action, true);
-  } else if (r && action === 'start' && !r.running) {
+async function yam2Svc(el, id, action) {
+  const r = await act(el, () => api('/api/yam2/service', { id, action }));
+  if (r && action === 'start' && !r.running) {
     toast('Служба не запустилась — смотрите лог', true);
     yam2Log(null, id);
   } else if (r) toast({ start: 'Служба запущена', stop: 'Служба остановлена', boot: 'Будет запускаться при загрузке', noboot: 'Автозапуск выключен' }[action]);
   await loadYam2Packages();
-  if (stopLegacy) loadYam();
   if (action === 'boot' || action === 'noboot') loadHook();
 }
 async function yam2Log(btn, id) {
@@ -4768,42 +4910,13 @@ $('#y2-repair').onclick = e => act(e.currentTarget, async () => {
   y2out(r.text, !r.ok); $('#y2-repair').hidden = r.ok;
 });
 $('#y2-uninstall').onclick = e => {
-  if (!confirm('Удалить yam 2 вместе со всеми его пакетами и их данными (/data/yam)? Старый yamd это не затронет.')) return;
+  if (!confirm('Удалить yam 2 вместе со всеми его пакетами и их данными (/data/yam)?')) return;
   act(e.currentTarget, async () => { await api('/api/yam2/uninstall', {}); y2out(''); await loadYam2(); loadHook(); }, 'yam 2 удалён');
 };
 $('#y2-filter').oninput = renderYam2;
 $('#y2-all').onchange = renderYam2;
 $('#y2-refresh').onclick = e => act(e.currentTarget, async () => { await loadYam2(true); await loadYam2Catalog(true); });
-$('#yam-legacy > summary').addEventListener('click', () => { $('#yam-legacy').dataset.touched = 1; });
-// ---------- приложения (yam) ----------
-const yam = { registry: [], plugins: [] };
-async function loadYam() {
-  let st;
-  try { st = await api('/api/yam/status'); } catch (e) { return e.offline || toast(e.message, true); }
-  yam.status = st;
-  $('#yam-missing').hidden = st.installed;
-  $('#yam-card').hidden = !st.installed;
-  if (!st.installed) { $('#yam-on').hidden = true; return; }
-  $('#yam-badge').textContent = st.running ? 'yamd работает' : 'yamd остановлен';
-  $('#yam-badge').className = 'badge' + (st.running ? ' ok' : ' bad');
-  $('#yam-start').hidden = st.running;
-  $('#yam-off').hidden = st.running;
-  $('#yam-autostart').checked = st.autostart;
-  $('#yam-on').hidden = !st.running;
-  $('#yam-web').hidden = !(st.running && st.web_url);
-  if (st.web_url) $('#yam-web').href = st.web_url;
-  loadYamVersion();          // GitHub может отвечать долго — версию дорисуем отдельно
-  if (!st.running) return;
-  const [plugins, reg, settings] = await Promise.all([
-    api('/api/yam/plugins').catch(e => (toast(e.message, true), [])),
-    api('/api/yam/registry').catch(e => (toast('Реестр: ' + e.message, true), { packages: [] })),
-    api('/api/yam/settings').catch(() => null),
-  ]);
-  yam.plugins = plugins; yam.registry = reg.packages || [];
-  if (settings) $('#yam-binaries').checked = settings.allow_plugin_binaries;
-  renderYam();
-}
-const yamCall = (btn, body, msg) => act(btn, async () => { await api('/api/yam/action', body); await loadYam(); }, msg);
+
 // Сравнение версий вида 1.2.10 (и v-префикса): «1.2.10» новее «1.2.9», «1.0.0-beta» старше «1.0.0».
 function vcmp(a, b) {
   const [ma, pa = ''] = String(a || '').replace(/^v/, '').split('-'), [mb, pb = ''] = String(b || '').replace(/^v/, '').split('-');
@@ -4815,133 +4928,6 @@ function vcmp(a, b) {
   if (pa === pb) return 0;
   return !pa ? 1 : !pb ? -1 : Math.sign(pa.localeCompare(pb));   // финальная версия новее предварительной
 }
-// Самая новая версия каждого пакета в реестре
-const yamLatest = () => yam.registry.reduce((m, p) => (!m[p.id] || vcmp(p.version, m[p.id].version) > 0 ? { ...m, [p.id]: p } : m), {});
-async function loadYamVersion(refresh) {
-  $('#yam-ver').textContent = 'проверяем…';
-  $('#yam-update').hidden = $('#yam-notes').hidden = true;
-  let v;
-  try { v = await api('/api/yam/version' + (refresh ? '?refresh=1' : '')); } catch (e) { $('#yam-ver').textContent = e.message; return; }
-  const date = d => d ? ' от ' + new Date(d).toLocaleDateString('ru-RU') : '';
-  $('#yam-ver').textContent = v.error ? v.error
-    : !v.installed ? `сборка не из релизов yam (sha256 ${v.sha}…), последний релиз — ${v.latest || '—'}`
-    : v.update ? `установлена ${v.installed}${date(v.installed_date)}, доступна ${v.latest}${date(v.latest_date)}`
-    : `${v.installed} — последняя`;
-  $('#yam-ver').classList.toggle('warn', !!v.update);
-  $('#yam-update').hidden = !v.update;
-  if (v.latest_url) { $('#yam-notes').href = v.latest_url; $('#yam-notes').hidden = false; }
-}
-function renderYam() {
-  const inst = Object.fromEntries(yam.plugins.map(p => [p.manifest.id, p]));
-  const latest = yamLatest();
-  const newer = m => latest[m.id] && vcmp(latest[m.id].version, m.version) > 0 ? latest[m.id] : null;
-  const updates = yam.plugins.filter(p => newer(p.manifest)).length;
-  $('#yam-count').textContent = yam.plugins.length ? `${yam.plugins.length} шт.` + (updates ? ` · обновлений: ${updates}` : '') : '';
-  $('#yam-installed').innerHTML = yam.plugins.length ? yam.plugins.map(p => {
-    const m = p.manifest, kind = `${m.launch?.kind || 'lua'} · ${m.launch?.mode || 'oneshot'}`;
-    return `<div class="inst" data-id="${esc(m.id)}">
-      <div class="who"><b>${esc(m.name || m.id)} <span class="mono meta">${esc(m.version)}</span>${newer(m) ? ` <span class="badge" style="background:var(--accent-soft);color:var(--accent-ink)">доступна ${esc(newer(m).version)}</span>` : ''}</b>
-        <span class="meta">${esc(kind)}${p.compatible ? '' : ' · <span style="color:var(--danger)">' + esc(p.incompatibility || 'несовместим') + '</span>'}</span></div>
-      <span class="badge${p.running ? ' ok' : ''}">${p.running ? 'работает' : p.enabled ? 'включён' : 'выключен'}</span>
-      <div class="row" style="gap:6px">
-        ${newer(m) ? `<button class="btn sm primary" data-a="update" data-v="${esc(newer(m).version)}">Обновить</button>` : ''}
-        <button class="btn sm" data-a="toggle">${p.enabled ? 'Выключить' : 'Включить'}</button>
-        ${p.running ? '<button class="btn sm" data-a="stop">Стоп</button>' : `<button class="btn sm" data-a="run" ${p.enabled ? '' : 'disabled title="Сначала включите"'}>Запустить</button>`}
-        <button class="btn sm" data-a="logs">Лог</button>
-        <button class="btn sm icon danger" data-a="remove" aria-label="Удалить ${esc(m.id)}">${icon('i-trash', 14)}</button>
-      </div></div>`;
-  }).join('') : '<p class="hint">Пока ничего не установлено.</p>';
-  const showLog = async (b, id) => {
-    $('#yam-log-id').textContent = id;
-    const r = await act(b, () => api('/api/yam/logs?id=' + encodeURIComponent(id)));
-    if (r) { $('#yam-log').textContent = r.text || '(пусто)'; $('#yam-log').scrollTop = 1e9; mSheetShow(mSheetOf($('#yam-log'))); }
-  };
-  $$('#yam-installed .inst button').forEach(b => b.onclick = async () => {
-    const id = b.closest('.inst').dataset.id, a = b.dataset.a;
-    if (a === 'logs') return showLog(b, id);
-    if (a === 'update') {
-      return act(b, async () => { b.textContent = 'Скачиваю…'; await api('/api/yam/install', { id, version: b.dataset.v }); await loadYam(); },
-                 `Обновлён: ${id} → ${b.dataset.v}`);
-    }
-    if (a === 'remove' && !confirm(`Удалить пакет ${id}?`)) return;
-    await yamCall(b, { action: a, id }, { toggle: 'Готово', run: 'Запущен: ' + id, stop: 'Остановлен: ' + id, remove: 'Удалён: ' + id }[a]);
-    // разовые пакеты (fastfetch и т. п.) выводят результат в лог — показываем его сразу
-    if (a === 'run' && (inst[id]?.manifest.launch?.mode || 'oneshot') === 'oneshot') {
-      await new Promise(r => setTimeout(r, 1500));
-      await showLog(null, id);
-      if (!plMobile()) $('#yam-log').scrollIntoView({ behavior: 'smooth', block: 'nearest' });   // на телефоне лог — в листе
-    }
-  });
-
-  const f = $('#yam-filter').value.toLowerCase();
-  const list = Object.values(latest).filter(p => !f || (p.id + ' ' + p.name + ' ' + p.description).toLowerCase().includes(f));
-  $('#yam-catalog').innerHTML = list.length ? list.map(p => {
-    const have = inst[p.id];
-    const action = !have ? 'Установить' : vcmp(p.version, have.manifest.version) > 0 ? `Обновить с ${esc(have.manifest.version)}` : '';
-    return `<div class="app${have ? ' installed' : ''}">
-      <div class="app-top"><b>${esc(p.name)}</b><span class="mono">${esc(p.version)}</span></div>
-      <p>${esc(p.description)}</p>
-      <div class="row">${action ? `<button class="btn sm${have ? '' : ' primary'}" data-id="${esc(p.id)}" data-v="${esc(p.version)}">${action}</button>` : '<span class="badge ok">установлено</span>'}</div>
-    </div>`;
-  }).join('') : '<div class="empty">Ничего не найдено</div>';
-  $$('#yam-catalog button[data-id]').forEach(b => b.onclick = () => act(b, async () => {
-    b.textContent = 'Скачиваю…';
-    await api('/api/yam/install', { id: b.dataset.id, version: b.dataset.v });
-    await loadYam();
-  }, 'Установлен: ' + b.dataset.id));
-}
-$('#yam-filter').oninput = renderYam;
-$('#yam-refresh').onclick = e => act(e.currentTarget, async () => { await api('/api/yam/registry?refresh=1'); await loadYam(); loadYamVersion(true); });
-$('#yam-autostart').onchange = e => act(e.target, async () => {
-  const st = await api('/api/yam/autostart', { enabled: e.target.checked });
-  e.target.checked = st.autostart;
-}, e.target.checked ? 'yamd будет запускаться при загрузке' : 'Автозапуск yamd выключен');
-$('#yam-install').onclick = e => {
-  const btn = e.currentTarget;
-  act(btn, async () => {
-    btn.textContent = 'Скачиваю и устанавливаю…';
-    try { const r = await api('/api/yam/install-daemon', {}); toast('yam ' + (r.version || '') + ' установлен и запущен'); }
-    finally { btn.textContent = 'Установить yam'; }
-    await loadYam();
-  });
-};
-$('#yam-update').onclick = () => {
-  // Станция 2 и Мини 3 Про: перед заменой — резервная копия, прошлые копии при этом удаляются
-  const b = yam.status?.backups;
-  $('#yam-update-text').textContent = 'Обновить yamd? Пакеты временно остановятся и запустятся снова, пакеты и настройки сохранятся.'
-    + (!b ? '' : ' Перед заменой будет создана резервная копия.'
-      + (b.count ? ` Старые резервные копии (${b.count} шт., ${(b.kb / 1024).toFixed(1)} МБ) будут удалены.` : ''));
-  $('#yam-update-confirm').hidden = false;
-};
-$('#yam-update-cancel').onclick = () => { $('#yam-update-confirm').hidden = true; };
-$('#yam-update-confirm-btn').onclick = e => {
-  const btn = e.currentTarget, result = $('#yam-update-result');
-  act(btn, async () => {
-    $('#yam-update').disabled = true;
-    $('#yam-update-cancel').disabled = true;
-    result.hidden = false; result.classList.remove('warn');
-    result.textContent = 'Скачиваю и проверяю yamd. Не закрывайте страницу…';
-    try {
-      const r = await api('/api/yam/install-daemon', { drop_backups: !!yam.status?.backups?.count });
-      $('#yam-update-confirm').hidden = true;
-      result.textContent = 'yamd обновлён до ' + (r.version || 'последней версии') + '. Пакеты и настройки сохранены.';
-      toast(result.textContent);
-      await loadYam();
-    } catch (error) {
-      result.textContent = 'Не удалось обновить yamd: ' + error.message;
-      result.classList.add('warn');
-      throw error;
-    } finally {
-      $('#yam-update').disabled = false;
-      $('#yam-update-cancel').disabled = false;
-    }
-  });
-};
-$('#yam-start').onclick = e => act(e.currentTarget, async () => { await api('/api/yam/start', {}); await loadYam(); }, 'yamd запущен');
-$('#yam-binaries').onchange = e => act(e.target, async () => {
-  const r = await api('/api/yam/settings', { allow_plugin_binaries: e.target.checked });
-  e.target.checked = r.allow_plugin_binaries;
-}, e.target.checked ? 'Бинарные пакеты разрешены' : 'Бинарные пакеты запрещены');
 
 // ---------- файлы ----------
 const fs = { cwd: '/', entries: [], writable: false, sort: 'name', dir: 1, sel: null, loaded: false };
@@ -5605,167 +5591,6 @@ $('#as-stop').onclick = e => act(e.currentTarget, async () => { await api('/api/
 $('#as-remove').onclick = e => confirm('Удалить помощника с колонки вместе с настройками и ключами?') &&
   act(e.currentTarget, async () => { await api('/api/assistant/remove', {}); await loadAssistant(true); }, 'Помощник удалён');
 
-// ---------- «Радио»: станции Алисы и свои потоки (играет программа панели на колонке) ----------
-// Атрибуты кнопок — data-rd-*: data-play и data-mu уже заняты общими обработчиками плеера Алисы.
-const RD_ALICE = ['Европа Плюс', 'Русское радио', 'Авторадио', 'Радио Рекорд', 'Наше радио', 'Ретро FM', 'DFM', 'Love Radio',
-  'Хит FM', 'Радио Energy', 'Маяк', 'Дорожное радио', 'Радио Шансон', 'Relax FM', 'Монте-Карло', 'Business FM', 'Детское радио'];
-let rd = { st: null, task: 0, checked: {} };
-// Пометка у станции — только если с потоком беда; нормальные станции без лишних надписей.
-function rdCheckText(c) {
-  if (!c || c.state === 'ok') return '';
-  const where = c.host ? ` Сервер ${c.host}${c.ip ? ' (' + c.ip + ')' : ''}.` : '';
-  if (c.state === 'blocked') return `Поток ${c.detail} — похоже на блокировку провайдера.${where} Добавьте его в обход на роутере или укажите прокси ниже.`;
-  if (c.state === 'slow') return `Поток идёт медленнее, чем играет (${c.detail.split(' — ')[0]}) — будет прерываться.`;
-  return `Станция не работает: ${c.detail}.`;
-}
-const rdCheckNote = c => { const s = rdCheckText(c); return s ? `<span class="rd-warn" title="${esc(s)}" aria-label="${esc(s)}">⚠</span>` : ''; };
-// Проверить станцию (с компьютера с панелью) и сказать, если с ней беда
-async function rdCheck(url, quiet) {
-  if (rd.checked[url]) return;
-  rd.checked[url] = true;
-  try {
-    const c = await api('/api/radio/check', { url });
-    const s = rdCheckText(c);
-    if (s && !quiet) toast(s, true);
-    await loadRadio();
-  } catch {}
-}
-function rdPoll(on) {
-  if (on) loadRadio();
-}
-async function loadRadio() {
-  if (!online || document.hidden || $('#tab-radio').hidden) return;
-  let st;
-  try { st = await api('/api/radio'); } catch (e) { return e.offline || toast(e.message, true); }
-  rd.st = st;
-  // промах голосом: предлагаем привязать услышанное название к станции
-  const miss = st.miss?.phrase && st.stations.length ? st.miss : null;
-  $('#rd-miss').hidden = !miss;
-  if (miss && rd.missShown !== miss.at) {
-    rd.missShown = miss.at;
-    $('#rd-miss-phrase').textContent = miss.phrase;
-    $('#rd-miss-station').innerHTML = st.stations.map((s, i) => `<option value="${i}">${esc(s.name)}</option>`).join('');
-  }
-  if (JSON.stringify(st.alice) !== rd.alice) { rd.alice = JSON.stringify(st.alice); rdAliceView(st.alice || []); }
-  $('#rd-missing').hidden = st.installed;
-  $('#rd-unsupported').hidden = st.supported !== false;
-  $('#rd-install').hidden = st.supported === false;
-  $('#rd-own').hidden = !st.installed;
-  $('#rd-own-off').hidden = !st.own_disabled;
-  const now = st.now || {};
-  $('#rd-now').hidden = !(now.playing || now.paused || now.retrying || now.error && now.name);
-  // подробности проверки — под проигрывателем, где для них есть место
-  const note = rdCheckText(st.checks?.[now.url]);
-  $('#rd-now-note').hidden = !note || !now.url;
-  $('#rd-now-note').textContent = note;
-  $('#rd-now-name').textContent = now.name || '—';
-  // «souphttpsrc0: Bad Request» → понятная причина: поток отклонил сервер станции, а не колонка
-  const err = now.error && (/^souphttpsrc\d*:\s*(.*)$/.exec(now.error)?.[1] || now.error);
-  const why = /missing a plug-in/i.test(now.error || '')
-    ? 'Формат этой станции колонка не умеет (обычно это OGG Vorbis). Найдите у неё поток MP3 или AAC.'
-    : /souphttpsrc/.test(now.error || '') ? `Станция не отдаёт поток (сервер ответил: ${err}). Попробуйте другой адрес потока.` : 'Ошибка: ' + err;
-  $('#rd-now-title').textContent = err && !now.retrying ? why
-    : now.retrying ? 'поток прервался — переподключаюсь…' : now.paused ? 'пауза, пока вы говорите с Алисой' : now.title || 'играет';
-  $('#rd-count').textContent = st.stations.length ? `${st.stations.length}` : '';
-  $('#rd-list').innerHTML = st.stations.length ? st.stations.map((s, i) => `<div class="rd-row${now.url === s.url && now.playing ? ' on' : ''}">
-      <button class="btn sm icon" data-rd-play="${i}" aria-label="Слушать ${esc(s.name)}"><svg width="14" height="14" aria-hidden="true"><use href="#i-play"/></svg></button>
-      <div class="rd-name"><b>${esc(s.name)}</b><small>${s.aliases?.length ? 'голосом: ' + s.aliases.map(esc).join(', ') + ' · ' : ''}${esc(s.url)}</small></div>${rdCheckNote(st.checks?.[s.url])}
-      <button class="btn sm icon" data-rd-voice="${i}" aria-label="Как называть голосом ${esc(s.name)}" title="Как называть голосом">🗣</button>
-      <button class="btn sm icon" data-rd-ren="${i}" aria-label="Переименовать ${esc(s.name)}" title="Переименовать">✎</button>
-      <button class="btn sm icon" data-rd-del="${i}" aria-label="Удалить ${esc(s.name)}">×</button></div>`).join('')
-    : '<div class="empty">Добавьте станцию ниже или найдите в каталоге.</div>';
-  $('#rd-voice').checked = st.voice;
-  if (document.activeElement !== $('#rd-proxy-form').elements.proxy) $('#rd-proxy-form').elements.proxy.value = st.proxy || '';
-  // станция играет пару секунд и молчит — проверяем, не блокировка ли
-  if (now.url && /почти не отдаёт|souphttpsrc/.test(now.error || '')) rdCheck(now.url, true);
-  $('#rd-voice-hint').textContent = `— «Алиса, ${st.play[0]} <название>», «Алиса, ${st.stop[0]}»`;
-  Scheduler.setInterval(rd.task, now.playing || now.paused || now.retrying ? 4000 : 10000);
-}
-rd.task = every(10000, loadRadio);
-// Логотип станции — из каталога radio-browser.info (панель скачивает и хранит его сама); не нашёлся — первые буквы.
-const rdKey = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/^радио\s+/, '').replace(/[^a-zа-я0-9]+/g, '');
-function rdAliceView(learned = []) {
-  const names = [...RD_ALICE, ...learned.map(s => s.title).filter(t => !RD_ALICE.some(n => rdKey(n) === rdKey(t)))];
-  $('#rd-alice').innerHTML = names.map(n => {
-    const initials = n.replace(/^радио\s+/i, '').split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
-    const logo = PanelContext.url('/api/radio/logo?name=' + encodeURIComponent(n));
-    return `<button class="btn sm" data-alice="${esc(n)}"><span class="rd-logo" aria-hidden="true">${esc(initials)}</span>`
-      + `<img src="${esc(logo)}" alt="" hidden>${esc(n)}</button>`;
-  }).join('');
-  // буквы видны, пока логотип грузится; загрузился — показываем его
-  $$('#rd-alice img').forEach(img => img.addEventListener('load', () => { img.hidden = false; img.previousElementSibling.remove(); }, { once: true }));
-}
-rdAliceView();
-const rdAlice = (btn, name) => act(btn, async () => { await api('/api/radio/alice', { name }); setTimeout(loadRadio, 800); }, `Алиса включает «${name}»`);
-$('#rd-alice').onclick = e => { const b = e.target.closest('[data-alice]'); if (b) rdAlice(b, b.dataset.alice); };
-$('#rd-alice-form').onsubmit = e => { e.preventDefault(); const n = e.target.elements.name.value.trim(); if (n) rdAlice(e.submitter, n); };
-const rdPlay = (btn, s) => act(btn, async () => { await api('/api/radio/play', s); setTimeout(loadRadio, 1500); }, `Включаю «${s.name}»`);
-const rdSave = (btn, stations, msg) => act(btn, async () => { rd.st = await api('/api/radio', { stations }); await loadRadio(); }, msg);
-$('#rd-list').onclick = e => {
-  const play = e.target.closest('[data-rd-play]'), del = e.target.closest('[data-rd-del]'), ren = e.target.closest('[data-rd-ren]');
-  if (play) rdPlay(play, rd.st.stations[+play.dataset.rdPlay]);
-  const voice = e.target.closest('[data-rd-voice]');
-  if (voice) {
-    const i = +voice.dataset.rdVoice, s = rd.st.stations[i];
-    const v = prompt(`Как вы называете «${s.name}» голосом? Несколько вариантов — через запятую:`, (s.aliases || []).join(', '));
-    if (v !== null) rdSave(voice, rd.st.stations.map((x, k) => k === i ? { ...x, aliases: v.split(',').map(a => a.trim()).filter(Boolean) } : x), 'Сохранено');
-  }
-  if (ren) {
-    const i = +ren.dataset.rdRen, name = prompt('Название — как вы будете называть станцию голосом:', rd.st.stations[i].name)?.trim();
-    if (name) rdSave(ren, rd.st.stations.map((s, k) => k === i ? { ...s, name } : s), 'Название изменено');
-  }
-  if (del) {
-    const s = rd.st.stations[+del.dataset.rdDel];
-    if (confirm(`Удалить станцию «${s.name}»?`)) rdSave(del, rd.st.stations.filter((_, i) => i !== +del.dataset.rdDel), 'Станция удалена');
-  }
-};
-$('#rd-add').onsubmit = e => {
-  e.preventDefault();
-  const f = e.target.elements, s = { name: f.name.value.trim(), url: f.url.value.trim() };
-  rdSave(e.submitter, [...(rd.st?.stations || []), s], 'Станция добавлена').then(() => { f.name.value = ''; f.url.value = ''; rdCheck(s.url); });
-};
-$('#rd-miss-bind').onclick = e => {
-  const i = +$('#rd-miss-station').value, phrase = $('#rd-miss-phrase').textContent;
-  act(e.currentTarget, async () => {
-    await api('/api/radio', { stations: rd.st.stations.map((s, k) => k === i ? { ...s, aliases: [...new Set([...(s.aliases || []), phrase])] } : s) });
-    await api('/api/radio/miss-seen', {});
-    await loadRadio();
-  }, `«${phrase}» теперь включает «${rd.st.stations[i].name}»`);
-};
-$('#rd-miss-skip').onclick = e => act(e.currentTarget, async () => { await api('/api/radio/miss-seen', {}); await loadRadio(); });
-$('#rd-proxy-form').onsubmit = e => {
-  e.preventDefault();
-  act(e.submitter, async () => { await api('/api/radio', { proxy: e.target.elements.proxy.value.trim() }); rd.checked = {}; await loadRadio(); },
-    e.target.elements.proxy.value.trim() ? 'Прокси сохранён — станции пойдут через него' : 'Прокси выключен');
-};
-$('#rd-stop').onclick = e => act(e.currentTarget, async () => { await api('/api/radio/stop', {}); setTimeout(loadRadio, 500); });
-$('#rd-voice').onchange = e => act(null, async () => { await api('/api/radio', { voice: e.target.checked }); await loadRadio(); });
-$('#rd-install').onclick = e => act(e.currentTarget, async () => { await api('/api/assistant/install', {}); await loadRadio(); }, 'Программа установлена');
-let rdFound = [];
-$('#rd-search').onsubmit = e => {
-  e.preventDefault();
-  const f = e.target.elements;
-  act(e.submitter, async () => {
-    const r = await api(`/api/radio/search?q=${encodeURIComponent(f.q.value.trim())}&country=${f.country.value}`);
-    rdFound = r.stations;
-    $('#rd-results').innerHTML = rdFound.length ? rdFound.map((s, i) => `<div class="rd-row">
-        <button class="btn sm icon" data-rd-try="${i}" aria-label="Слушать ${esc(s.name)}"><svg width="14" height="14" aria-hidden="true"><use href="#i-play"/></svg></button>
-        <div class="rd-name"><b>${esc(s.name)}</b><small>${[s.codec, s.bitrate ? s.bitrate + ' кбит/с' : '', s.country, s.tags].filter(Boolean).map(esc).join(' · ')}</small></div>
-        <button class="btn sm" data-rd-add="${i}">Добавить</button></div>`).join('') : '<div class="empty">Ничего не нашлось.</div>';
-  });
-};
-$('#rd-results').onclick = e => {
-  const t = e.target.closest('[data-rd-try]'), a = e.target.closest('[data-rd-add]');
-  if (t) { if (!rd.st?.installed) return toast('Сначала установите программу на колонку', true); rdPlay(t, rdFound[+t.dataset.rdTry]); }
-  if (a) {
-    if (!rd.st?.installed) return toast('Сначала установите программу на колонку', true);
-    const s = rdFound[+a.dataset.rdAdd];
-    if (rd.st.stations.some(x => x.url === s.url)) return toast('Эта станция уже в списке');
-    rdSave(a, [...rd.st.stations, { name: s.name, url: s.url }], `«${s.name}» добавлена. Для голоса задайте название, как вы его произносите (✎)`)
-      .then(() => rdCheck(s.url));
-  }
-};
-
 async function loadPrivacy() {
   let p;
   try { p = await api('/api/privacy'); } catch (err) {
@@ -5818,12 +5643,12 @@ $('#privacy-on').onchange = e => {
 };
 $('#fp-reset').onclick = e => {
   if (!confirm('Удалить с колонки всё, что поставила панель?\n\n• своя заставка и звук запуска — вернутся стандартные;\n'
-    + '• будильники и их звуки;\n• голосовой помощник и его ключи;\n• блокировка аналитики;\n• флаги автозапуска;\n• настройки автозапуска и копии оригиналов.\n\nКолонку перезагружать не нужно.')) return;
+    + '• голосовой помощник и его ключи;\n• блокировка аналитики;\n• флаги автозапуска;\n• настройки автозапуска и копии оригиналов.\n\nКолонку перезагружать не нужно.')) return;
   act(e.currentTarget, async () => {
     footprint = await api('/api/footprint/reset', {});
     await loadFootprint();
     if (footprint?.note) toast(footprint.note, true);
-    bootLoaded = false; alarmsData = null;
+    bootLoaded = false;
   }, 'С колонки удалено всё, что ставила панель');
 };
 
@@ -5840,7 +5665,7 @@ $('#bk-save').onclick = e => act(e.currentTarget, async () => {
 $('#bk-restore').onclick = () => $('#bk-file').click();
 $('#bk-file').onchange = async e => {
   const f = e.target.files[0]; e.target.value = '';
-  if (!f || !confirm(`Восстановить из «${f.name}»?\n\nТо, что сейчас стоит на колонке от панели (заставка, звук запуска, будильники), `
+  if (!f || !confirm(`Восстановить из «${f.name}»?\n\nТо, что сейчас стоит на колонке от панели (заставка, звук запуска), `
     + 'будет заменено содержимым копии. Оформление и раскладка этого браузера тоже вернутся из копии.')) return;
   toast('Восстанавливаем… это может занять минуту');
   const r = await act($('#bk-restore'), () => api('/api/backup/restore', f, { raw: true, headers: { 'Content-Type': 'application/gzip' } }));
@@ -5848,7 +5673,7 @@ $('#bk-file').onchange = async e => {
   try { for (const [k, v] of Object.entries(r.ui || {})) if (UI_KEYS.test(k)) localStorage.setItem(PanelContext.storageKey(k), v); } catch {}
   applyUI(); buildTiles(); fillTileSettings();
   try { const saved = JSON.parse(store.get(LAYOUT_KEY)); if (saved) applyLayout(saved); } catch {}
-  bootLoaded = false; alarmsData = null;
+  bootLoaded = false;
   await loadFootprint();
   const when = r.created ? new Date(r.created.replace(/([+-]\d\d)(\d\d)$/, '$1:$2')).toLocaleString('ru-RU') : '';
   toast('Восстановлено' + (when ? ` (копия от ${when})` : '') + ': ' + (r.restored.length ? r.restored.join(', ') : 'на колонке ничего не было'));
@@ -5898,7 +5723,7 @@ const CHARTS = [
   { k: 'disk', name: 'Диск /data занят', unit: 'МБ', min: 0, total: true, fmt: v => v.toFixed(1) },
   { k: 'load', name: 'Средняя нагрузка', unit: '', min: 0, fmt: v => v.toFixed(2), note: 'load average за минуту' },
 ];
-const EV_TEXT = { reboot: '⟲', offline: '⨯', online: '✓', alarm: '⏰' };
+const EV_TEXT = { reboot: '⟲', offline: '⨯', online: '✓' };
 let chData = null, chRange = +(store.get('ch.range') || 3600), chHover = null;
 $('#ch-grid').innerHTML = CHARTS.map(c => `<section class="card chart-card">
   <div class="chart-head"><h2>${c.name}</h2><div class="chart-val" id="ch-${c.k}-v">—</div></div>
@@ -6036,718 +5861,6 @@ $('#ch-csv').onclick = () => {
   saveBlob(blob, `stantsiya-${hm(d.to).replace(':', '')}.csv`).catch(e => toast(e.message, true));
 };
 
-// ---------- будильник ----------
-// Будильники хранятся на колонке (alarms.conf), панель только редактирует их и показывает состояние.
-const DAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-const AL_MODES = {
-  wave: { name: 'Моя волна', hint: 'Алиса включит «Мою волну».' },
-  show: { name: 'Утреннее шоу', hint: 'Утреннее шоу Алисы: музыка, погода, новости.' },
-  music: { name: 'Музыка', cap: 'Что включить', ph: 'например: плейлист дня, Queen, джаз', hint: 'Алиса получит запрос «включи …».' },
-  text: { name: 'Запрос Алисе', cap: 'Что сказать Алисе', ph: 'например: доброе утро', hint: 'Запрос уходит Алисе как есть, будто вы сказали его вслух.' },
-  sound: { name: 'Звук', hint: 'Играет по кругу прямо с колонки — не нужен ни интернет, ни Алиса.' },
-};
-let alarmsData = null, alEditing = null, alUploaded = [];
-// у системных звуков в sound_name лежит путь (common/timer.wav), у своих — имя файла
-const sndName = a => a.sound.startsWith('u_') ? a.sound_name : (a.sound_name || 'common/timer.wav').split('/').pop().replace(/\.[^.]+$/, '');
-function daysText(d) {
-  if (!d) return 'Один раз';
-  if (d === '1234567') return 'Каждый день';
-  if (d === '12345') return 'По будням';
-  if (d === '67') return 'По выходным';
-  return [...d].map(x => DAY_NAMES[x - 1]).join(', ');
-}
-function nextFire(a) {
-  // ближайшее срабатывание по времени браузера (часовой пояс — как у компьютера с панелью)
-  const [h, m] = a.time.split(':').map(Number), now = new Date();
-  for (let i = 0; i < 8; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i, h, m);
-    const dow = (d.getDay() + 6) % 7 + 1;
-    if (d > now && (!a.days || a.days.includes(dow))) return d;
-  }
-  return null;
-}
-function inText(ms) {
-  const min = Math.round(ms / 60000), h = Math.floor(min / 60), m = min % 60;
-  return 'через ' + (h ? `${h} ч ` : '') + (m || !h ? `${m} мин` : '');
-}
-async function loadAlarms() {
-  try { alarmsData = await api('/api/alarms'); } catch (e) { if (!e.offline) setListHtml($('#al-list'), `<div class="empty">${esc(e.message)}</div>`); return; }
-  renderAlarms();
-}
-function renderAlarms() {
-  const d = alarmsData; if (!d) return;
-  // На Станции Макс будильники не поддерживаются, и ответ может быть без
-  // массива log/alarms. Не роняем остальную панель из-за необязательных полей.
-  if (!Array.isArray(d.alarms)) d.alarms = [];
-  if (!Array.isArray(d.log)) d.log = [];
-  const on = d.alarms.filter(a => a.on);
-  const next = on.map(a => [a, nextFire(a)]).filter(x => x[1]).sort((x, y) => x[1] - y[1])[0];
-  $('#al-badge').textContent = !d.alarms.length ? 'нет' : next ? `ближайший ${inText(next[1] - Date.now())}` : 'все выключены';
-  $('#al-badge').className = 'badge' + (on.length && d.running ? ' ok' : on.length && !d.running ? ' bad' : '');
-  if (on.length && !d.running) $('#al-badge').textContent = 'служба не запущена — проверьте поддержку профиля и хук';
-  setListHtml($('#al-list'), d.alarms.length ? d.alarms.map(a => {
-    const m = AL_MODES[a.mode] || AL_MODES.sound;
-    const what = a.mode === 'music' ? `Включить: ${a.query}` : a.mode === 'text' ? `«${a.query}»` : m.name;
-    const extra = [a.mode !== 'sound' ? `иначе звук «${sndName(a)}»` : `звук «${sndName(a)}»`,
-                   `громкость ${a.volume * 10}%`, a.ramp ? `нарастание ${a.ramp >= 60 ? a.ramp / 60 + ' мин' : a.ramp + ' с'}` : ''].filter(Boolean).join(' · ');
-    return `<div class="al-row${a.on ? '' : ' off'}" data-id="${esc(a.id)}">
-      <div class="al-time">${esc(a.time)}</div>
-      <div class="al-info"><b>${esc(a.label || daysText(a.days))}</b>
-        <div class="meta">${esc(a.label ? daysText(a.days) + ' · ' : '')}${esc(what)}</div><div class="meta">${esc(extra)}</div></div>
-      <div class="actions">
-        <input type="checkbox" data-a="toggle" ${a.on ? 'checked' : ''} aria-label="Включён" title="Включён">
-        <button class="btn sm" data-a="test" title="Сработает прямо сейчас">Проверить</button>
-        <button class="btn sm" data-a="edit">Изменить</button>
-      </div></div>`;
-  }).join('') : '<div class="empty">Будильников пока нет</div>');
-  $('#al-tz').textContent = d.pc_tz || 'неизвестен (используется UTC)';
-  $('#al-devtime').textContent = d.device_time?.hm ? `на колонке ${d.device_time.hm} ${d.device_time.zone || ''}` : '';
-  // в журнале демона — id; показываем вместо них время и подпись
-  const alName = id => { const a = d.alarms.find(x => x.id === id); return a ? a.time + (a.label ? ' ' + a.label : '') : id; };
-  $('#al-log').textContent = d.log.length ? d.log.slice().reverse().map(l => l.replace(/ ([0-9a-f]{8}): /, (_, id) => ` ${alName(id)}: `)).join('\n') : 'Пока пусто';
-  const sn = d.snooze;
-  $('#al-snoozed').hidden = !sn;
-  if (sn) {
-    const a = d.alarms.find(x => x.id === sn.id), t = new Date(sn.at * 1000);
-    $('#al-snoozed-text').textContent = `Отложенный будильник${a?.label ? ' «' + a.label + '»' : ''} зазвонит в ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
-  }
-  renderAlarmBar();
-  // без установки на колонку — только карточка установки
-  const inst = d.installed;
-  $('#al-setup').hidden = inst;
-  ['#al-list-card', '#al-cols', '#al-add'].forEach(x => $(x).hidden = !inst);
-  $('#al-add').disabled = d.supported === false;
-  $$('#al-list [data-a]').forEach(b => { b.disabled = d.supported === false; });
-  if (!inst) { $('#al-editor').hidden = true; $('#al-snoozed').hidden = true; }
-  $('#al-install-note').textContent = d.ffmpeg ? '' : 'Нужен ffmpeg на компьютере — им перекодируется звук.';
-  $('#al-install').disabled = !d.ffmpeg || d.supported === false;
-  if (d.supported === false) { $('#al-install-note').textContent = d.reason; $('#al-save').disabled = true; }
-  $('#al-inst-info').textContent = `${d.dir}${d.size_kb != null ? ' · ' + (d.size_kb >= 1024 ? (d.size_kb / 1024).toFixed(1) + ' МБ' : d.size_kb + ' КБ') : ''}`
-    + (d.outdated ? ' · есть новая версия скрипта' : '');
-  $('#al-update').hidden = !d.outdated || d.supported === false;
-}
-function renderAlarmBar() {
-  const st = alarmsData?.state, bar = $('#alarm-bar');
-  bar.hidden = !st?.ringing;
-  if (!st?.ringing) return;
-  const a = alarmsData.alarms.find(x => x.id === st.id);
-  $('#ab-title').textContent = 'Будильник' + (a ? ' ' + a.time : '') + (a?.label ? ' · ' + a.label : '');
-  $('#ab-sub').textContent = st.via === 'alice' ? 'играет Алиса' : st.via === 'starting' ? 'включаем…' : 'играет звук';
-  $('#ab-snooze').hidden = !a?.snooze;
-  if (a?.snooze) $('#ab-snooze').textContent = `Отложить на ${a.snooze} мин`;
-}
-// на колонке системный звук хранится перекодированным (s_*.wav) — серверу отдаём исходный путь
-const alToSave = a => ({ ...a, sound: a.sound.startsWith('s_') ? 'sys:' + a.sound_name : a.sound });
-async function saveAlarms(list, msg) {
-  alarmsData = await api('/api/alarms', { alarms: list });
-  renderAlarms();
-  if (msg) toast(msg);
-}
-$('#al-list').onclick = e => {
-  const b = e.target.closest('[data-a]'), row = e.target.closest('.al-row');
-  if (!b || !row) return;
-  const a = alarmsData.alarms.find(x => x.id === row.dataset.id);
-  if (b.dataset.a === 'edit') openAlarm(a);
-  if (b.dataset.a === 'test') act(b, async () => { await api('/api/alarms/test', { id: a.id }); setTimeout(loadAlarms, 2500); }, 'Сейчас зазвонит…');
-};
-$('#al-list').onchange = e => {
-  if (e.target.dataset.a !== 'toggle') return;
-  const id = e.target.closest('.al-row').dataset.id;
-  const list = alarmsData.alarms.map(a => alToSave(a.id === id ? { ...a, on: e.target.checked } : a));
-  act(null, () => saveAlarms(list, e.target.checked ? 'Будильник включён' : 'Будильник выключен'));
-};
-$('#al-days').innerHTML = DAY_NAMES.map((n, i) => `<button type="button" class="chip" data-d="${i + 1}" aria-pressed="false">${n}</button>`).join('');
-$('#al-days').onclick = e => { const c = e.target.closest('.chip'); if (c) c.setAttribute('aria-pressed', c.getAttribute('aria-pressed') !== 'true'); };
-$('#al-presets').onclick = e => { const c = e.target.closest('.chip'); if (c) setDays(c.dataset.d); };
-function setDays(d) { $$('#al-days .chip').forEach(c => c.setAttribute('aria-pressed', d.includes(c.dataset.d))); }
-const getDays = () => $$('#al-days .chip').filter(c => c.getAttribute('aria-pressed') === 'true').map(c => c.dataset.d).join('');
-function fillSounds(sel) {
-  const groups = {};
-  (sounds || []).forEach(n => { const [g, ...r] = n.split('/'); (groups[r.length ? g : ''] ||= []).push(n); });
-  const up = [...new Map([...alUploaded, ...(alarmsData?.alarms || []).filter(a => a.sound.startsWith('u_')).map(a => ({ sound: a.sound, sound_name: a.sound_name }))]
-    .map(u => [u.sound, u])).values()];
-  $('#al-sound').innerHTML = (up.length ? `<optgroup label="Свои">${up.map(u => `<option value="${esc(u.sound)}">${esc(u.sound_name)}</option>`).join('')}</optgroup>` : '')
-    + Object.entries(groups).map(([g, l]) => `<optgroup label="${esc(g || 'Система')}">${l.map(n => `<option value="sys:${esc(n)}">${esc(n.split('/').pop().replace(/\.[^.]+$/, ''))}</option>`).join('')}</optgroup>`).join('');
-  $('#al-sound').value = sel;
-  if ($('#al-sound').selectedIndex < 0) $('#al-sound').value = 'sys:common/timer.wav';
-}
-function alModeUI() {
-  const m = $('#al-mode').value, info = AL_MODES[m];
-  $('#al-query-l').hidden = !info.cap;
-  if (info.cap) { $('#al-query-cap').textContent = info.cap; $('#al-query').placeholder = info.ph; }
-  $('#al-mode-hint').textContent = info.hint + (m === 'sound' ? '' : ' Нужен интернет; без него или если Алиса не ответит за 30 с — играет звук ниже.');
-  $('#al-sound-cap').textContent = m === 'sound' ? 'Звук' : 'Звук, если Алиса не сможет';
-  $('#al-dur').querySelector('[value="0"]').disabled = m === 'sound';
-  if (m === 'sound' && $('#al-dur').value === '0') $('#al-dur').value = '15';
-}
-$('#al-mode').onchange = alModeUI;
-$('#al-vol').oninput = () => $('#al-vol-v').textContent = $('#al-vol').value * 10;
-function openAlarm(a) {
-  alEditing = a || null;
-  const x = a || { time: '07:30', days: '12345', mode: 'wave', query: '', sound: '', volume: 5, ramp: 180, duration: 15, snooze: 9, label: '' };
-  $('#al-ed-title').textContent = a ? 'Будильник ' + a.time : 'Новый будильник';
-  $('#al-time').value = x.time; $('#al-label').value = x.label; setDays(x.days);
-  $('#al-mode').value = x.mode; $('#al-query').value = x.query;
-  fillSounds(x.sound.startsWith('u_') ? x.sound : x.sound.startsWith('s_') ? 'sys:' + x.sound_name : 'sys:common/timer.wav');
-  $('#al-vol').value = x.volume; $('#al-vol').oninput();
-  $('#al-ramp').value = String(x.ramp); if ($('#al-ramp').selectedIndex < 0) $('#al-ramp').value = '180';
-  $('#al-dur').value = String(x.duration); if ($('#al-dur').selectedIndex < 0) $('#al-dur').value = '15';
-  $('#al-snz').value = String(x.snooze); if ($('#al-snz').selectedIndex < 0) $('#al-snz').value = '9';
-  $('#al-del').hidden = !a;
-  alModeUI();
-  $('#al-editor').hidden = false;
-  $('#al-editor').scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-$('#al-add').onclick = () => openAlarm(null);
-// ---------- сценарии ----------
-// Сценарий — граф нод; на колонке его выполняет демон будильника (scenes.conf). У «Условия» и «Повтора»
-// два выхода: next (да / ещё круг) и else (нет / круги кончились). Простой сценарий — цепочка без ветвлений —
-// можно править и списком; с ветвлениями — только на поле.
-const SC_NODES = {
-  query: { name: 'Запрос Алисе', icon: 'i-mic', group: 'Алиса', def: () => ({ text: '' }) },
-  say: { name: 'Алиса скажет', icon: 'i-mic', group: 'Алиса', def: () => ({ text: '' }) },
-  ask: { name: 'Спросить ассистента', icon: 'i-mic', group: 'Алиса', def: () => ({ text: '' }), assistant: true },
-  assistant: { name: 'Режим ассистента', icon: 'i-mic', group: 'Алиса', def: () => ({ mode: true }), assistant: true },
-  vol: { name: 'Громкость', icon: 'i-vol', group: 'Звук и свет', def: () => ({ level: 3, ramp: 0 }) },
-  sound: { name: 'Звук', icon: 'i-music', group: 'Звук и свет', def: () => ({ sound: 'sys:common/timer.wav' }) },
-  ring: { name: 'Кольцо', icon: 'i-palette', group: 'Звук и свет', def: () => ({ color: ringHex || '#ff5a00', secs: 10 }) },
-  anim: { name: 'Анимация', icon: 'i-palette', group: 'Звук и свет', def: () => ({ anim: 'ring:' + ((patterns.ring || []).find(n => n.startsWith('alice_thinking')) || (patterns.ring || [])[0] || ''), secs: 5 }) },
-  stop: { name: 'Стоп', icon: 'i-stop', group: 'Звук и свет', def: () => ({}) },
-  wait: { name: 'Пауза', icon: 'i-alarm', group: 'Время', def: () => ({ secs: 60 }) },
-  wait_until: { name: 'Ждать до', icon: 'i-alarm', group: 'Время', def: () => ({ time: '07:00' }) },
-  wait_quiet: { name: 'Ждать тишины', icon: 'i-vol', group: 'Время', def: () => ({ secs: 600 }) },
-  if: { name: 'Условие', icon: 'i-shuffle', group: 'Логика', def: () => ({ check: 'time', arg: '22:00-07:00' }), outs: ['да', 'нет'] },
-  repeat: { name: 'Повторить', icon: 'i-repeat', group: 'Логика', def: () => ({ count: 3 }), outs: ['ещё', 'готово'] },
-  scene: { name: 'Другой сценарий', icon: 'i-flow', group: 'Логика', def: () => ({ target: '' }) },
-  note: { name: 'Заметка', icon: 'i-edit', group: 'Логика', def: () => ({ text: '' }), noPorts: true },
-};
-const SC_CHECKS = {
-  time: { name: 'время между', ph: '22:00-07:00' }, days: { name: 'день недели', ph: '67' },
-  playing: { name: 'что-то играет' }, online: { name: 'есть интернет' }, vol_above: { name: 'громкость выше', ph: '5' },
-  chance: { name: 'случайно, % «да»', ph: '50' }, assistant_mode: { name: 'включён режим ассистента' },
-};
-const SC_RAMPS = [[0, 'сразу'], [30, 'за 30 с'], [60, 'за 1 мин'], [180, 'за 3 мин'], [300, 'за 5 мин'], [600, 'за 10 мин'], [1800, 'за 30 мин']];
-let scData = null, scEdit = null, scTask = 0, scSel = null, scHasAssistant = false;
-const durText = s => s >= 3600 ? `${+(s / 3600).toFixed(1)} ч` : s >= 60 ? `${+(s / 60).toFixed(1)} мин` : `${s} с`;
-const sndTitle = v => v.startsWith('u_') ? (alUploaded.find(u => u.sound === v)?.sound_name || 'свой звук') : v.replace(/^sys:/, '').split('/').pop().replace(/\.[^.]+$/, '');
-function nodeText(n) {
-  switch (n.kind) {
-    case 'query': return `«${n.text}»`;
-    case 'say': return `скажет «${n.text}»`;
-    case 'ask': return `ассистенту «${n.text}»`;
-    case 'assistant': return n.mode ? 'режим ассистента: вкл' : 'режим ассистента: выкл';
-    case 'vol': return `громкость ${n.level * 10}%` + (n.ramp ? ` ${SC_RAMPS.find(r => r[0] === n.ramp)?.[1] || durText(n.ramp)}` : '');
-    case 'sound': return `звук «${sndTitle(n.sound)}»`;
-    case 'ring': return `кольцо ${durText(n.secs)}`;
-    case 'wait': return `пауза ${durText(n.secs)}`;
-    case 'wait_until': return `ждать до ${n.time}`;
-    case 'wait_quiet': return 'ждать тишины';
-    case 'if': return `если ${SC_CHECKS[n.check]?.name || ''}${n.arg && SC_CHECKS[n.check]?.ph ? ' ' + n.arg : ''}`;
-    case 'repeat': return `повторить ${n.count} раз`;
-    case 'scene': return `сценарий «${scData?.scenes.find(s => s.id === n.target)?.name || '?'}»`;
-    case 'anim': return `анимация «${animName(n.anim)}»`;
-    case 'note': return 'заметка';
-    default: return 'стоп';
-  }
-}
-const scNode = (s, id) => s.nodes.find(n => n.id === id);
-const animName = v => animTitle(String(v || '').replace(/^\w+:/, ''));
-// цепочка от «Запуска» по next; linear — сценарий без ветвлений, все ноды (кроме заметок) в ней
-function scChain(s) {
-  const out = [], seen = new Set();
-  for (let n = scNode(s, s.start); n && !seen.has(n.id); n = scNode(s, n.next)) { seen.add(n.id); out.push(n); }
-  const linear = out.every(n => !SC_NODES[n.kind].outs) && s.nodes.every(n => n.kind === 'note' || seen.has(n.id))
-    && !(out.length && scNode(s, out[out.length - 1].next)) && !s.nodes.some(n => n.kind === 'note');
-  return { chain: out, linear };
-}
-async function loadScenes() {
-  if (!online || document.hidden || $('#tab-scenes').hidden) return;
-  try {
-    [scData, scHasAssistant] = await Promise.all([api('/api/scenes'), api('/api/assistant').then(a => !!a.installed, () => false)]);
-    if (!patterns.ring) patterns = await api('/api/patterns').catch(() => ({}));   // для ноды «Анимация»
-  } catch (e) { if (!e.offline) setListHtml($('#sc-list'), `<div class="empty">${esc(e.message)}</div>`); return; }
-  renderScenes();
-  // пока что-то идёт — обновляем, чтобы кнопка «Остановить» и журнал не отставали
-  Scheduler.setInterval(scTask, scData.running.length ? 2000 : 15000);
-}
-scTask = every(15000, loadScenes);
-function renderScenes() {
-  const d = scData; if (!d) return;
-  const on = d.scenes.filter(s => s.on).length;
-  if (d.supported === false) { $('#sc-add').disabled = true; $('#sc-save').disabled = true; }
-  $('#sc-badge').textContent = !d.scenes.length ? 'нет' : on && !d.daemon ? 'служба не запущена — проверьте поддержку профиля и хук' : `включено ${on} из ${d.scenes.length}`;
-  $('#sc-badge').className = 'badge' + (on && d.daemon ? ' ok' : on && !d.daemon ? ' bad' : '');
-  setListHtml($('#sc-list'), d.scenes.length ? d.scenes.map(s => {
-    const run = d.running.includes(s.id), { chain, linear } = scChain(s);
-    return `<div class="al-row${s.on ? '' : ' off'}" data-id="${esc(s.id)}">
-      <div class="al-time">${({ boot: icon('i-power', 30), voice: icon('i-mic', 30), manual: icon('i-play', 30) })[s.trigger] || esc(s.time)}</div>
-      <div class="al-info"><b>${esc(s.name)}</b>
-        <div class="meta">${s.trigger === 'boot' ? 'после включения колонки' : s.trigger === 'manual' ? 'только вручную — кнопкой или из другого сценария' : s.trigger === 'voice' ? esc(`по команде ассистенту: «${s.phrases.join('», «')}»`) : esc(daysText(s.days))}${run ? ' · <span style="color:var(--ok-ink);font-weight:700">выполняется</span>' : ''}</div>
-        <div class="sc-flow">${chain.slice(0, 6).map(n => `<span>${esc(nodeText(n))}</span>`).join('')}${chain.length > 6 || !linear ? `<span>${linear ? '…' : 'есть ветвления'}</span>` : ''}</div></div>
-      <div class="actions">
-        <input type="checkbox" data-a="toggle" ${s.on ? 'checked' : ''} aria-label="Включён" title="Включён">
-        ${run ? '<button class="btn sm danger-soft" data-a="stop">Остановить</button>' : '<button class="btn sm" data-a="run" title="Выполнить прямо сейчас">Запустить</button>'}
-        <button class="btn sm" data-a="edit">Изменить</button>
-      </div></div>`;
-  }).join('') : '<div class="empty">Сценариев пока нет. Например: «Ночь» — в 23:00 громкость 20% и «Алиса, включи режим не беспокоить».</div>');
-  $('#sc-log').textContent = d.log.length ? d.log.slice().reverse().join('\n') : 'Пока пусто';
-}
-const scSave = list => api('/api/scenes', { scenes: list }).then(r => { scData = r; renderScenes(); return r; });
-$('#sc-list').onclick = e => {
-  const b = e.target.closest('[data-a]'); if (!b) return;
-  const id = b.closest('.al-row').dataset.id, s = scData.scenes.find(x => x.id === id);
-  if (b.dataset.a === 'edit') return openScene(s);
-  if (b.dataset.a === 'run') return act(b, async () => { await api('/api/scenes/run', { id }); setTimeout(loadScenes, 1500); }, `Сценарий «${s.name}» запущен`);
-  if (b.dataset.a === 'stop') return act(b, async () => { await api('/api/scenes/stop', { id }); await loadScenes(); }, 'Сценарий остановлен');
-};
-$('#sc-list').onchange = e => {
-  if (e.target.dataset.a !== 'toggle') return;
-  const id = e.target.closest('.al-row').dataset.id;
-  act(e.target, () => scSave(scData.scenes.map(s => s.id === id ? { ...s, on: e.target.checked } : s)));
-};
-
-// ---- редактор: общие части ----
-$('#sc-days').innerHTML = DAY_NAMES.map((n, i) => `<button type="button" class="chip" data-d="${i + 1}" aria-pressed="false">${n}</button>`).join('');
-$('#sc-days').onclick = e => { const c = e.target.closest('.chip'); if (c) { c.setAttribute('aria-pressed', c.getAttribute('aria-pressed') !== 'true'); scFieldStart(); } };
-$('#sc-presets').onclick = e => { const c = e.target.closest('.chip'); if (c) { $$('#sc-days .chip').forEach(x => x.setAttribute('aria-pressed', c.dataset.d.includes(x.dataset.d))); scFieldStart(); } };
-const scDays = () => $$('#sc-days .chip').filter(c => c.getAttribute('aria-pressed') === 'true').map(c => c.dataset.d).join('');
-function scTriggerUI() {
-  const v = $('#sc-trigger').value;
-  $$('[data-sc-time]').forEach(x => x.hidden = v === 'boot' || v === 'manual');
-  $('#sc-time').closest('label').hidden = v !== 'time';
-  $$('[data-sc-voice]').forEach(x => x.hidden = v !== 'voice');
-  $('#sc-boot-hint').hidden = v !== 'boot' && v !== 'manual';
-  $('#sc-boot-hint').textContent = v === 'manual'
-    ? 'Сам не запускается: только кнопкой «Запустить» здесь или нодой «Другой сценарий» из другого сценария.'
-    : 'Запустится примерно через минуту после того, как Алиса загрузится, — при каждом включении колонки.';
-  $('#sc-days-cap').textContent = v === 'voice' ? 'В какие дни (ни одного — в любой)' : 'Повторять';
-  $('#sc-once').hidden = v === 'voice';
-  $('#sc-voice-hint').textContent = scHasAssistant
-    ? 'Скажите «Алиса, спроси GPT, <фраза>» — или просто фразу, если включён режим ассистента. Алиса такие команды сама не поймёт, их ловит ассистент. Дни ниже — когда команда работает.'
-    : 'Нужен ассистент (вкладка «Ассистент»): команды ловит он — Алиса сама их не поймёт.';
-  scFieldStart();
-}
-const scPhrases = () => $('#sc-phrases').value.split(',').map(x => x.trim()).filter(Boolean);
-$('#sc-trigger').onchange = scTriggerUI;
-$('#sc-time').onchange = () => scFieldStart();
-$('#sc-phrases').oninput = () => scFieldStart();
-const scTrigText = () => ({ boot: 'после включения колонки', manual: 'вручную', voice: `по команде «${scPhrases()[0] || '…'}»` })[$('#sc-trigger').value]
-  || `${$('#sc-time').value || '—'} · ${daysText(scDays())}`;
-function soundOptions() {
-  const groups = {};
-  (sounds || []).forEach(n => { const [g, ...r] = n.split('/'); (groups[r.length ? g : ''] ||= []).push(n); });
-  return (alUploaded.length ? `<optgroup label="Свои">${alUploaded.map(u => `<option value="${esc(u.sound)}">${esc(u.sound_name)}</option>`).join('')}</optgroup>` : '')
-    + Object.entries(groups).map(([g, l]) => `<optgroup label="${esc(g || 'Система')}">${l.map(n => `<option value="sys:${esc(n)}">${esc(n.split('/').pop().replace(/\.[^.]+$/, ''))}</option>`).join('')}</optgroup>`).join('');
-}
-function nodeFields(n) {
-  switch (n.kind) {
-    case 'query': return `<input type="text" class="field" data-f="text" maxlength="200" value="${esc(n.text)}" placeholder="включи режим не беспокоить" aria-label="Что попросить">`;
-    case 'say': return `<input type="text" class="field" data-f="text" maxlength="200" value="${esc(n.text)}" placeholder="Пора спать" aria-label="Что сказать">`;
-    case 'ask': return `<input type="text" class="field" data-f="text" maxlength="200" value="${esc(n.text)}" placeholder="расскажи сказку на ночь" aria-label="Вопрос ассистенту">`
-      + (scHasAssistant ? '' : '<span class="meta">ассистент не установлен — шаг пропустится</span>');
-    case 'assistant': return `<select class="field" data-f="mode" aria-label="Режим ассистента"><option value="on" ${n.mode ? 'selected' : ''}>включить</option><option value="off" ${n.mode ? '' : 'selected'}>выключить</option></select>
-      <span class="meta">все вопросы к Алисе — своей модели</span>`;
-    case 'vol': return `<input type="range" min="0" max="10" data-f="level" value="${n.level}" aria-label="Громкость"><span class="mono meta" style="min-width:38px">${n.level * 10}%</span>
-      <select class="field" data-f="ramp" aria-label="Как менять">${SC_RAMPS.map(([v, t]) => `<option value="${v}" ${v === n.ramp ? 'selected' : ''}>${t}</option>`).join('')}</select>`;
-    case 'sound': return `<select class="field" data-f="sound" style="flex:1;min-width:140px" aria-label="Звук">${soundOptions()}</select>`;
-    case 'ring': return `<input type="color" data-f="color" value="${esc(n.color)}" aria-label="Цвет"><input type="number" class="field mono" data-f="secs" min="1" max="600" value="${n.secs}" aria-label="Секунд"><span class="meta">с</span>`;
-    case 'wait': return `<input type="number" class="field mono" data-f="mins" min="0.1" max="1440" step="0.5" value="${+(n.secs / 60).toFixed(2)}" aria-label="Минут"><span class="meta">мин</span>`;
-    case 'wait_until': return `<input type="time" class="field" data-f="time" value="${esc(n.time)}" aria-label="До какого времени">`;
-    case 'wait_quiet': return `<span class="meta">пока Алиса и музыка не замолчат, но не дольше</span><input type="number" class="field mono" data-f="mins" min="1" max="120" value="${Math.round(n.secs / 60)}" aria-label="Минут"><span class="meta">мин</span>`;
-    case 'scene': return `<select class="field" data-f="target" aria-label="Какой сценарий" style="flex:1;min-width:140px"><option value="">— выберите —</option>${(scData?.scenes || [])
-      .filter(s => s.id && s.id !== scEdit.id).map(s => `<option value="${esc(s.id)}" ${s.id === n.target ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`;
-    case 'if': return `<select class="field" data-f="check" aria-label="Условие">${Object.entries(SC_CHECKS).map(([k, c]) => `<option value="${k}" ${k === n.check ? 'selected' : ''}>${c.name}</option>`).join('')}</select>`
-      + (SC_CHECKS[n.check]?.ph ? `<input type="text" class="field mono" data-f="arg" value="${esc(n.arg)}" placeholder="${SC_CHECKS[n.check].ph}" aria-label="Значение" style="width:120px">` : '');
-    case 'repeat': return `<input type="number" class="field mono" data-f="count" min="1" max="20" value="${n.count}" aria-label="Сколько раз"><span class="meta">раз (до 20), потом «готово»</span>`;
-    case 'anim': return `<select class="field" data-f="anim" aria-label="Анимация" style="flex:1;min-width:140px">${[['ring', 'Кольцо'], ['clock', 'Часы']]
-      .filter(([k]) => (patterns[k] || []).length).map(([k, g]) => `<optgroup label="${g}">${patterns[k].map(p => `<option value="${k}:${esc(p)}" ${n.anim === k + ':' + p ? 'selected' : ''}>${esc(animName(p))}</option>`).join('')}</optgroup>`).join('')}</select>
-      <input type="number" class="field mono" data-f="secs" min="1" max="600" value="${n.secs}" aria-label="Секунд"><span class="meta">с</span>`;
-    case 'note': return `<textarea class="field" data-f="text" rows="2" maxlength="200" placeholder="Заметка для себя" aria-label="Заметка">${esc(n.text)}</textarea>`;
-    default: return '<span class="meta">остановить музыку и ответ Алисы</span>';
-  }
-}
-function scInput(e) {
-  const row = e.target.closest('[data-n]'), f = e.target.dataset.f; if (!row || !f) return;
-  const n = scNode(scEdit, row.dataset.n);
-  if (f === 'mins') n.secs = clamp(Math.round((+e.target.value || 1) * 60), 1, 86400);
-  else if (['level', 'ramp', 'secs', 'count'].includes(f)) n[f] = +e.target.value;
-  else if (f === 'mode') n.mode = e.target.value === 'on';
-  else n[f] = e.target.value;
-  if (f === 'level') e.target.nextElementSibling.textContent = n.level * 10 + '%';
-  if (f === 'check') { n.arg = ''; scRender(); }
-}
-const scNextId = () => String(Math.max(0, ...scEdit.nodes.map(n => +n.id)) + 1);
-
-// ---- список: только для цепочки без ветвлений ----
-function renderScList() {
-  const { chain, linear } = scChain(scEdit);
-  if (!linear) {
-    $('#sc-steps').innerHTML = '<div class="empty">В этом сценарии есть условия, повторы или заметки — его можно править только на поле. <button type="button" class="link" data-v="field">Открыть поле</button></div>';
-    return;
-  }
-  $('#sc-steps').innerHTML = chain.length ? chain.map((n, i) => `<div class="sc-step" data-n="${esc(n.id)}">
-    <span class="n">${i + 1}</span><span class="k">${icon(SC_NODES[n.kind].icon, 14)}${esc(SC_NODES[n.kind].name)}</span>
-    <div class="v">${nodeFields(n)}</div>
-    <span class="ctl"><button type="button" class="btn sm icon ghost" data-m="-1" aria-label="Выше" title="Выше">↑</button>
-      <button type="button" class="btn sm icon ghost" data-m="1" aria-label="Ниже" title="Ниже">↓</button>
-      <button type="button" class="btn sm icon ghost" data-m="del" aria-label="Удалить шаг" title="Удалить шаг">${icon('i-trash', 14)}</button></span></div>`).join('')
-    : '<div class="empty">Добавьте первый шаг кнопками ниже</div>';
-  scSoundValues($('#sc-steps'));
-}
-function scSetChain(chain) {   // перестраиваем связи по порядку списка
-  scEdit.start = chain[0]?.id || '';
-  chain.forEach((n, i) => { n.next = chain[i + 1]?.id || ''; n.else = ''; });
-}
-$('#sc-steps').oninput = scInput;
-$('#sc-steps').onclick = e => {
-  if (e.target.closest('[data-v]')) return scView('field');
-  const b = e.target.closest('[data-m]'); if (!b) return;
-  const chain = scChain(scEdit).chain, i = chain.findIndex(n => n.id === b.closest('[data-n]').dataset.n);
-  if (b.dataset.m === 'del') { const [gone] = chain.splice(i, 1); scEdit.nodes = scEdit.nodes.filter(n => n !== gone); }
-  else { const j = i + +b.dataset.m; if (j < 0 || j >= chain.length) return; [chain[i], chain[j]] = [chain[j], chain[i]]; }
-  scSetChain(chain); scRender();
-};
-function scSoundValues(box) {
-  box.querySelectorAll('[data-f="sound"]').forEach(s => { s.value = scNode(scEdit, s.closest('[data-n]').dataset.n).sound; if (s.selectedIndex < 0) s.value = 'sys:common/timer.wav'; });
-}
-
-// ---- поле: ноды, связи и перетаскивание ----
-const SC_W = 236;
-// Место ноды «Запуск» — в браузере. store хранит только строки: объект — через JSON, иначе вместо места
-// сохранится «[object Object]», и всё, что ставится рядом с «Запуском», получит NaN.
-const scXY = v => Number.isFinite(v?.x) && Number.isFinite(v?.y);
-function scStartPos() {
-  if (!scXY(scEdit._start)) {
-    let v = null;
-    try { v = JSON.parse(store.get('sc.start.' + (scEdit.id || 'new'))); } catch {}
-    scEdit._start = scXY(v) ? v : { x: 24, y: 40 };
-  }
-  return scEdit._start;
-}
-const scStartSave = (id, p) => store.set('sc.start.' + (id || 'new'), JSON.stringify({ x: p.x, y: p.y }));
-function renderScField() {
-  if (scEdit.nodes.some(n => !scXY(n))) scLayout();   // место без чисел — пересчитываем, иначе нода застрянет в углу
-  const f = $('#sc-field'), s = scEdit, st = scStartPos();
-  const port = (key, label) => `<span class="port out" data-port="${key}">${label ? `<i>${label}</i>` : ''}</span>`;
-  f.innerHTML = '<div class="sc-canvas"><svg class="sc-wires"></svg>'
-    + `<div class="sc-node trig" data-n="start" style="left:${st.x}px;top:${st.y}px"><header>${icon('i-power', 14)}Запуск</header><div class="v"><span class="meta" id="sc-start-text">${esc(scTrigText())}</span></div>${port('start')}</div>`
-    + s.nodes.map(n => {
-      const def = SC_NODES[n.kind];
-      return `<div class="sc-node k-${n.kind}${scSel === n.id ? ' sel' : ''}" data-n="${esc(n.id)}" style="left:${n.x}px;top:${n.y}px">
-        <header>${icon(def.icon, 14)}${esc(def.name)}<button type="button" data-m="del" aria-label="Удалить ноду" title="Удалить ноду">×</button></header>
-        <div class="v">${nodeFields(n)}</div>
-        ${def.noPorts ? '' : '<span class="port in"></span>' + (def.outs ? port('next', def.outs[0]) + port('else', def.outs[1]) : port('next'))}</div>`;
-    }).join('') + '</div>';
-  scSoundValues(f);
-  scApplyPan();
-  scWires();
-}
-const scFieldStart = () => { const t = $('#sc-start-text'); if (t) t.textContent = scTrigText(); };
-function scPortXY(el) {
-  const r = el.getBoundingClientRect(), c = $('#sc-field .sc-canvas').getBoundingClientRect();
-  return { x: r.left + r.width / 2 - c.left, y: r.top + r.height / 2 - c.top };
-}
-const scCurve = (a, b) => { const dx = Math.max(40, Math.abs(b.x - a.x) / 2); return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`; };
-function scWires(tmp) {
-  const c = $('#sc-field .sc-canvas'); if (!c) return;
-  const nodes = [...c.querySelectorAll('.sc-node')];
-  const inOf = id => c.querySelector(`.sc-node[data-n="${CSS.escape(id)}"] .port.in`);
-  const link = (from, port, to) => { const a = c.querySelector(`.sc-node[data-n="${CSS.escape(from)}"] [data-port="${port}"]`), b = to && inOf(to); return a && b ? `<path class="w-${port}" d="${scCurve(scPortXY(a), scPortXY(b))}"/>` : ''; };
-  let d = link('start', 'start', scEdit.start);
-  scEdit.nodes.forEach(n => { d += link(n.id, 'next', n.next); if (SC_NODES[n.kind].outs) d += link(n.id, 'else', n.else); });
-  if (tmp) d += `<path class="tmp" d="${scCurve(tmp.a, tmp.b)}"/>`;
-  c.querySelector('.sc-wires').innerHTML = d;
-}
-function scSetLink(from, port, to) {
-  if (from === 'start') scEdit.start = to;
-  else scNode(scEdit, from)[port === 'else' ? 'else' : 'next'] = to;
-}
-$('#sc-field').addEventListener('pointerdown', e => {
-  const c = $('#sc-field .sc-canvas'), nodeEl = e.target.closest('.sc-node');
-  if (!nodeEl && !e.button) return scPan(e);
-  if (!nodeEl || e.button) return;
-  const id = nodeEl.dataset.n, cr = () => c.getBoundingClientRect();
-  const portEl = e.target.closest('.port.out');
-  if (portEl) {
-    // тянем связь: отпустили над нодой — выход ведёт к ней, на пустом месте — связь убрана
-    e.preventDefault();
-    const a = scPortXY(portEl);
-    let over = null;
-    const move = ev => {
-      over?.classList.remove('drop');
-      over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('#sc-field .sc-node:not(.trig):not(.k-note)');
-      over?.classList.add('drop');
-      scWires({ a, b: { x: ev.clientX - cr().left, y: ev.clientY - cr().top } });
-    };
-    const up = () => {
-      removeEventListener('pointermove', move); removeEventListener('pointerup', up);
-      over?.classList.remove('drop');
-      scSetLink(id, portEl.dataset.port, over ? over.dataset.n : '');
-      scWires();
-    };
-    addEventListener('pointermove', move); addEventListener('pointerup', up);
-    return;
-  }
-  if (id !== 'start') { scSel = id; $$('#sc-field .sc-node').forEach(x => x.classList.toggle('sel', x === nodeEl)); }
-  if (!e.target.closest('header') || e.target.closest('button')) return;
-  // перетаскиваем ноду за заголовок; указатель захватываем — перенос не срывается, даже если мышь обогнала ноду
-  e.preventDefault();
-  const head = e.target.closest('header');
-  const p = id === 'start' ? scStartPos() : scNode(scEdit, id), sx = e.clientX - p.x, sy = e.clientY - p.y;
-  try { head.setPointerCapture(e.pointerId); } catch {}
-  const move = ev => {
-    p.x = Math.round(ev.clientX - sx); p.y = Math.round(ev.clientY - sy);
-    nodeEl.style.left = p.x + 'px'; nodeEl.style.top = p.y + 'px';
-    scWires();
-  };
-  const up = () => {
-    head.removeEventListener('pointermove', move); head.removeEventListener('pointerup', up); head.removeEventListener('pointercancel', up);
-    if (id === 'start') scStartSave(scEdit.id, p);
-  };
-  head.addEventListener('pointermove', move); head.addEventListener('pointerup', up); head.addEventListener('pointercancel', up);
-});
-// Поле бесконечное: сдвиг холста хранится в редактируемом сценарии (на время правки), фон-сетка едет вместе с ним
-const scPanXY = () => scEdit._pan || (scEdit._pan = { x: 0, y: 0 });
-function scApplyPan(glide) {
-  const c = $('#sc-field .sc-canvas'), p = scPanXY();
-  if (!c) return;
-  c.classList.toggle('glide', !!glide);
-  c.style.transform = `translate(${p.x}px, ${p.y}px)`;
-  $('#sc-field').style.backgroundPosition = `${p.x}px ${p.y}px`;
-  if (glide) setTimeout(() => c.classList.remove('glide'), 320);
-}
-// Тянем фон — двигаем поле (мышью и пальцем), а не выделяем текст
-function scPan(e) {
-  const f = $('#sc-field'), p = scPanXY(), sx = e.clientX - p.x, sy = e.clientY - p.y;
-  e.preventDefault();
-  try { f.setPointerCapture(e.pointerId); } catch {}
-  f.classList.add('panning');
-  const move = ev => { p.x = Math.round(ev.clientX - sx); p.y = Math.round(ev.clientY - sy); scApplyPan(); };
-  const up = () => {
-    f.classList.remove('panning');
-    f.removeEventListener('pointermove', move); f.removeEventListener('pointerup', up); f.removeEventListener('pointercancel', up);
-  };
-  f.addEventListener('pointermove', move); f.addEventListener('pointerup', up); f.addEventListener('pointercancel', up);
-}
-// На весь экран колесо и тачпад двигают поле; в обычном виде колесо прокручивает страницу
-$('#sc-field').addEventListener('wheel', e => {
-  if (!document.body.classList.contains('sc-full')) return;
-  e.preventDefault();
-  const p = scPanXY();
-  p.x -= e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX; p.y -= e.shiftKey && !e.deltaX ? 0 : e.deltaY;
-  scApplyPan();
-}, { passive: false });
-$('#sc-field').oninput = scInput;
-$('#sc-field').addEventListener('click', e => {
-  const b = e.target.closest('[data-m="del"]'); if (!b) return;
-  const id = b.closest('.sc-node').dataset.n;
-  scEdit.nodes = scEdit.nodes.filter(n => n.id !== id);
-  if (scEdit.start === id) scEdit.start = '';
-  scEdit.nodes.forEach(n => { if (n.next === id) n.next = ''; if (n.else === id) n.else = ''; });
-  if (scSel === id) scSel = null;
-  scRender();
-});
-
-// ---- добавление нод ----
-function renderScPalette() {
-  const field = !$('#sc-field').hidden, groups = {};
-  Object.entries(SC_NODES).forEach(([k, v]) => {
-    if (v.assistant && !scHasAssistant) return;
-    if (!field && (v.outs || v.noPorts)) return;   // ветвления и заметки — только на поле
-    (groups[v.group] ||= []).push(`<button type="button" class="btn sm" data-add="${k}">${icon(v.icon, 14)}${esc(v.name)}</button>`);
-  });
-  $('#sc-add-step').innerHTML = Object.entries(groups).map(([g, b]) => `<div class="grp"><span class="meta">${g}</span>${b.join('')}</div>`).join('')
-    + (field ? '' : '<p class="hint">Условия, повторы и заметки — на поле.</p>');
-}
-$('#sc-add-step').onclick = e => {
-  const b = e.target.closest('[data-add]'); if (!b) return;
-  const kind = b.dataset.add, n = { id: scNextId(), kind, ...SC_NODES[kind].def(), next: '', else: '', x: 0, y: 0 };
-  if ($('#sc-field').hidden) {   // список: в конец цепочки
-    const chain = scChain(scEdit).chain;
-    scEdit.nodes.push(n); scSetChain([...chain, n]);
-  } else {
-    // поле: рядом с выбранной нодой и сразу с ней связанная, если у неё свободный выход
-    const from = scSel && scNode(scEdit, scSel) || null, f = $('#sc-field');
-    const base = (scXY(from) ? from : null) || (scEdit.nodes.length ? null : scStartPos());
-    n.x = base ? base.x + (base === scStartPos() ? 230 : SC_W + 40) : 40 - scPanXY().x;
-    n.y = base ? base.y : 60 - scPanXY().y + (scEdit.nodes.length % 4) * 40;
-    scEdit.nodes.push(n);
-    if (n.kind !== 'note') {
-      if (from && from.kind !== 'note' && !from.next) from.next = n.id;
-      else if (!from && !scEdit.start) scEdit.start = n.id;
-    }
-    scSel = n.id;
-  }
-  scRender();
-  if (!$('#sc-field').hidden) scReveal(n.id);
-  $('#sc-board').classList.remove('pal-open');
-};
-// Новая нода могла встать за краем видимой части поля — подвигаем поле к ней
-function scReveal(id) {
-  const f = $('#sc-field'), el = f.querySelector(`.sc-node[data-n="${CSS.escape(id)}"]`);
-  if (!el) return;
-  const r = el.getBoundingClientRect(), fr = f.getBoundingClientRect();
-  if (r.left >= fr.left && r.right <= fr.right && r.top >= fr.top && r.bottom <= fr.bottom) return;
-  const p = scPanXY();
-  p.x = Math.round(fr.width / 2 - el.offsetLeft - el.offsetWidth / 2);
-  p.y = Math.round(fr.height / 3 - el.offsetTop);
-  scApplyPan(true);
-}
-
-// ---- вид, открытие, сохранение ----
-function scRender() {
-  if (!scEdit) return;
-  const field = !$('#sc-field').hidden;
-  if (field) renderScField(); else renderScList();
-  renderScPalette();
-}
-function scView(v) {
-  if (v === 'list' && !scChain(scEdit).linear) v = 'field';
-  $$('#sc-view button').forEach(b => b.classList.toggle('active', b.dataset.v === v));
-  $('#sc-view [data-v="list"]').disabled = !scChain(scEdit).linear;
-  $('#sc-view [data-v="list"]').title = scChain(scEdit).linear ? '' : 'В сценарии есть ветвления — только поле';
-  store.set('sc.view', v);
-  $('#sc-steps').hidden = v === 'field';
-  $('#sc-field').hidden = $('#sc-field-hint').hidden = $('#sc-arrange').hidden = v !== 'field';
-  $$('.sc-arrange-row [data-sc-center]').forEach(b => b.hidden = v !== 'field');
-  $('#sc-board').classList.toggle('fieldmode', v === 'field');
-  if (v === 'field') scLayout();   // ноды, добавленные в списке, места на поле ещё не имеют
-  scRender();
-}
-$$('#sc-view button').forEach(b => b.onclick = () => scView(b.dataset.v));
-$('#sc-arrange').onclick = $('#sc-arrange-full').onclick = () => { scLayout(true); renderScField(); };
-// Поле на весь экран: на телефоне — единственный способ его увидеть, на компьютере — кнопка в углу поля
-function scFull(open) {
-  if (open) scView('field');
-  $('#sc-board').classList.toggle('full-open', open);
-  if (!open) $('#sc-board').classList.remove('pal-open');
-  document.body.classList.toggle('sc-full', open);
-  if (scEdit && (open || $('#sc-field').offsetParent)) renderScField();   // размеры поля изменились — связи пересчитать
-}
-$('#sc-open-field').onclick = $('#sc-expand').onclick = () => scFull(true);
-// «К нодам»: ноды — по центру поля, а если не влезают — от левого верхнего края
-function scCenter() {
-  const f = $('#sc-field'), nodes = [...f.querySelectorAll('.sc-node')];
-  if (!nodes.length) return;
-  const x0 = Math.min(...nodes.map(n => n.offsetLeft)), y0 = Math.min(...nodes.map(n => n.offsetTop));
-  const x1 = Math.max(...nodes.map(n => n.offsetLeft + n.offsetWidth)), y1 = Math.max(...nodes.map(n => n.offsetTop + n.offsetHeight));
-  const at = (a, b, size) => Math.round(b - a + 40 > size ? 20 - a : (size - a - b) / 2);
-  Object.assign(scPanXY(), { x: at(x0, x1, f.clientWidth), y: at(y0, y1, f.clientHeight) });
-  scApplyPan(true);
-}
-$$('[data-sc-center]').forEach(b => b.onclick = scCenter);
-$('#sc-full-close').onclick = () => scFull(false);
-$('#sc-fab').onclick = () => $('#sc-board').classList.toggle('pal-open');
-$('#sc-pal-backdrop').onclick = () => $('#sc-board').classList.remove('pal-open');
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape' || !document.body.classList.contains('sc-full')) return;
-  if ($('#sc-board').classList.contains('pal-open')) $('#sc-board').classList.remove('pal-open'); else scFull(false);
-});
-addEventListener('hashchange', () => { if (document.body.classList.contains('sc-full')) scFull(false); });
-// Ноды без места (из списка) — по порядку цепочки змейкой; all — разложить заново все.
-// Ноды, оказавшиеся в одной точке, тоже разводим: иначе верхняя закрывает остальные.
-function scLayout(all) {
-  const { chain } = scChain(scEdit);
-  const order = [...chain, ...scEdit.nodes.filter(n => !chain.includes(n))];
-  const seen = new Set();
-  order.forEach((n, i) => {
-    if (all || !scXY(n) || (!n.x && !n.y) || seen.has(n.x + ',' + n.y)) { n.x = 260 + (i % 3) * (SC_W + 14); n.y = 30 + Math.floor(i / 3) * 190 + (i % 2) * 30; }
-    seen.add(n.x + ',' + n.y);
-  });
-}
-function openScene(s) {
-  scEdit = structuredClone(s || { id: '', name: '', trigger: 'time', time: '23:00', days: '1234567', on: true, start: '', nodes: [] });
-  delete scEdit._start; scSel = null;
-  scLayout();
-  $('#sc-ed-title').textContent = s ? 'Сценарий' : 'Новый сценарий';
-  $('#sc-name').value = scEdit.name;
-  $('#sc-trigger').value = scEdit.trigger;
-  $('#sc-time').value = scEdit.time || '23:00';
-  $('#sc-phrases').value = (scEdit.phrases || []).join(', ');
-  $$('#sc-days .chip').forEach(c => c.setAttribute('aria-pressed', scEdit.days.includes(c.dataset.d)));
-  $('#sc-del').hidden = !s;
-  $('#sc-trigger [value="voice"]').disabled = !scHasAssistant && scEdit.trigger !== 'voice';
-  $('#sc-editor').hidden = false;
-  scTriggerUI();
-  scView(store.get('sc.view') || 'list');
-  $('#sc-editor').scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-$('#sc-add').onclick = () => openScene(null);
-$('#sc-cancel').onclick = () => { scFull(false); $('#sc-editor').hidden = true; scEdit = null; };
-$('#sc-form').onsubmit = e => {
-  scFull(false);
-  e.preventDefault();
-  scLayout();
-  const { _start, ...rest } = scEdit;
-  const s = { ...rest, name: $('#sc-name').value.trim(), trigger: $('#sc-trigger').value, time: $('#sc-time').value, days: scDays(), phrases: scPhrases() };
-  if (s.trigger === 'voice' && !s.phrases.length) return toast('Укажите фразу, по которой ассистент запустит сценарий', true);
-  if (!s.nodes.some(n => n.kind !== 'note')) return toast('Добавьте хотя бы один шаг', true);
-  const list = s.id ? scData.scenes.map(x => x.id === s.id ? s : x) : [...scData.scenes, s];
-  act($('#sc-save'), async () => {
-    const r = await scSave(list);
-    const saved = s.id ? r.scenes.find(x => x.id === s.id) : r.scenes[r.scenes.length - 1];
-    if (scXY(_start) && saved) scStartSave(saved.id, _start);
-    $('#sc-editor').hidden = true; scEdit = null;
-  }, `Сценарий «${s.name}» сохранён`);
-};
-$('#sc-del').onclick = e => confirm(`Удалить сценарий «${scEdit.name}»?`) &&
-  act(e.currentTarget, async () => { await scSave(scData.scenes.filter(x => x.id !== scEdit.id)); $('#sc-editor').hidden = true; scEdit = null; }, 'Сценарий удалён');
-
-$('#al-cancel').onclick = () => { $('#al-editor').hidden = true; };
-$('#al-form').onsubmit = e => {
-  e.preventDefault();
-  const snd = $('#al-sound').value, opt = $('#al-sound').selectedOptions[0];
-  const item = {
-    id: alEditing?.id, on: alEditing ? alEditing.on : true, time: $('#al-time').value, days: getDays(),
-    mode: $('#al-mode').value, query: $('#al-query').value.trim(), label: $('#al-label').value.trim(),
-    sound: snd, sound_name: snd.startsWith('sys:') ? snd.slice(4) : opt?.textContent || '',
-    volume: +$('#al-vol').value, ramp: +$('#al-ramp').value, duration: +$('#al-dur').value, snooze: +$('#al-snz').value,
-  };
-  if (alEditing && (alEditing.time !== item.time || alEditing.days !== item.days)) item.on = true;
-  const list = (alarmsData?.alarms || []).filter(a => a.id !== alEditing?.id).map(alToSave);
-  list.push(item);
-  list.sort((a, b) => a.time.localeCompare(b.time));
-  act($('#al-save'), async () => { await saveAlarms(list); $('#al-editor').hidden = true; }, 'Будильник сохранён на колонке');
-};
-$('#al-del').onclick = e => {
-  if (!alEditing || !confirm('Удалить будильник ' + alEditing.time + '?')) return;
-  const list = alarmsData.alarms.filter(a => a.id !== alEditing.id).map(alToSave);
-  act(e.currentTarget, async () => { await saveAlarms(list); $('#al-editor').hidden = true; }, 'Будильник удалён');
-};
-$('#al-sound-play').onclick = e => {
-  const v = $('#al-sound').value;
-  if (!v.startsWith('sys:')) return toast('Свой звук можно послушать кнопкой «Проверить» после сохранения');
-  act(e.currentTarget, () => api('/api/play', { name: v.slice(4) }));
-};
-$('#al-sound-up').onclick = () => $('#al-sound-file').click();
-$('#al-sound-file').onchange = async e => {
-  const f = e.target.files[0]; e.target.value = '';
-  if (!f) return;
-  toast('Загружаем ' + f.name + '…');
-  const r = await act($('#al-sound-up'), () => api('/api/alarms/sound', f, {
-    raw: true, headers: { 'Content-Type': 'application/octet-stream', 'X-Filename': encodeURIComponent(f.name) } }), 'Звук загружен');
-  if (r) { alUploaded.push(r); fillSounds(r.sound); }
-};
-$('#al-install').onclick = e => act(e.currentTarget, async () => { alarmsData = await api('/api/alarms/install', {}); renderAlarms(); }, 'Будильник установлен на колонку');
-$('#al-update').onclick = e => act(e.currentTarget, async () => { alarmsData = await api('/api/alarms/install', {}); renderAlarms(); }, 'Скрипт обновлён');
-$('#al-uninstall').onclick = e => {
-  const n = alarmsData?.alarms.length || 0;
-  if (!confirm('Удалить будильник с колонки?' + (n ? ` Все будильники (${n}) и загруженные звуки будут удалены.` : '')
-               + ' Строка автозапуска уберётся, если она больше ничему не нужна.')) return;
-  act(e.currentTarget, async () => { alarmsData = await api('/api/alarms/uninstall', {}); renderAlarms(); }, 'Будильник удалён с колонки');
-};
-$('#al-snooze-cancel').onclick = e => act(e.currentTarget, async () => { await api('/api/alarms/cmd', { action: 'cancel_snooze' }); await loadAlarms(); }, 'Отложенный будильник отменён');
-$('#ab-stop').onclick = e => act(e.currentTarget, async () => { await api('/api/alarms/cmd', { action: 'stop' }); setTimeout(loadAlarms, 1500); }, 'Будильник выключен');
-$('#ab-snooze').onclick = e => act(e.currentTarget, async () => { await api('/api/alarms/cmd', { action: 'snooze' }); setTimeout(loadAlarms, 1500); }, 'Отложено');
-// Состояние: на вкладке — часто, на остальных — реже и только если будильники вообще есть.
-every(3000, () => {
-  if (!online || document.hidden) return;
-  const onTab = shownTab === 'alarm';
-  if (onTab || alarmsData?.state?.ringing || (alarmsData?.installed && alarmsData.alarms.some(a => a.on))) {
-    if (onTab || Date.now() - (loadAlarms.t || 0) > 15000 || alarmsData?.state?.ringing) { loadAlarms.t = Date.now(); loadAlarms(); }
-  }
-});
-
 // ---------- версия панели и обновление ----------
 // Сервер раз в 6 часов спрашивает GitHub о последнем релизе. В «Обзоре» — пометка (её можно скрыть
 // до следующей версии), в «Настройках» → «О панели» — само обновление.
@@ -6761,17 +5874,7 @@ const UPD_HOW = {
 async function loadPanelModel() {
   let p;
   try { p = await api('/api/profile'); } catch { return; }
-  // LED-панель (88 диодов через led-play) есть только у Станции 2 — пункт меню по флагу профиля
-  $('nav.side a[data-tab="led"]').hidden = !p.ledpanel;
-  // Скрываем разделы, не поддерживаемые моделью
-  if (p.alarms === false) {
-    $$('a[data-tab="alarm"]').forEach(el => el.hidden = true);
-    if (location.hash === '#alarm') location.hash = '#overview';
-  }
-  if (p.scenes === false) {
-    $$('a[data-tab="scenes"]').forEach(el => el.hidden = true);
-    if (location.hash === '#scenes') location.hash = '#overview';
-  }
+  // Скрываем разделы, если отключены в профиле
   if (p.assistant === false) {
     $$('a[data-tab="assistant"]').forEach(el => el.hidden = true);
     if (location.hash === '#assistant') location.hash = '#overview';
@@ -6780,10 +5883,6 @@ async function loadPanelModel() {
     $$('a[data-tab="apps"]').forEach(el => el.hidden = true);
     if (location.hash === '#apps') location.hash = '#overview';
   }
-  if (p.alarms === false && p.scenes === false) {
-    $$('.mbar-opt').forEach(el => el.hidden = false);
-  }
-  if (!p.ledpanel && location.hash === '#led') location.hash = '#overview';
   if (p.clock_max) {
     const slider = $('#clock-br');
     slider.max = p.clock_max;
@@ -7002,7 +6101,7 @@ async function useSpeaker(serial, btn) {
 $('#find-manual').onsubmit = e => { e.preventDefault(); const ip = $('#find-ip').value.trim(); if (ip) useSpeaker(ip, e.submitter); };
 
 // ---------- хук загрузки ----------
-// Своё на колонке (звуки, анимации, будильник, ассистент…) после перезагрузки держится на строке в rootkeeper.sh.
+// Своё на колонке (звуки, анимации, ассистент…) после перезагрузки держится на строке в rootkeeper.sh.
 // Панель подключает её сама при сохранении; плашка — на случай, когда строки нет или она от старой версии.
 let hookInfo = null;
 async function loadHook() {
@@ -7016,10 +6115,10 @@ function renderHook() {
   const what = h.users.join(', ');
   $('#hook-warn-title').textContent = 'После перезагрузки колонки своё пропадёт';
   $('#hook-warn-text').textContent = !h.possible
-    ? `На колонке есть своё (${what}), но подключить его к загрузке не к чему: нет ${h.rootkeeper}, штатная загрузка его не вызывает, а /etc/init.d — на корне только для чтения. Кнопка ниже положит туда свой сценарий автозапуска, на секунду перемонтировав корень в режим записи и вернув как было. До перезагрузки всё работает, после — вернутся стандартные, а будильник и ассистент не запустятся.`
+    ? `На колонке есть своё (${what}), но подключить его к загрузке не к чему: нет ${h.rootkeeper}, штатная загрузка его не вызывает, а /etc/init.d — на корне только для чтения. Кнопка ниже положит туда свой сценарий автозапуска, на секунду перемонтировав корень в режим записи и вернув как было. До перезагрузки всё работает, после — вернутся стандартные, а ассистент не запустится.`
     : h.hook
       ? `Хук запуска (${h.file || h.rootkeeper}) — от прошлой версии панели и подключит не всё (${what}). Обновите её.`
-      : `На колонке есть своё (${what}), но хук запуска не подключён — после перезагрузки вернутся стандартные, а будильник и ассистент не запустятся.`;
+      : `На колонке есть своё (${what}), но хук запуска не подключён — после перезагрузки вернутся стандартные, а ассистент не запустится.`;
   $('#hook-repair').hidden = h.supported === false;
   if (h.supported === false) $('#hook-warn-text').textContent = h.reason || 'Автозапуск для этой модели пока не поддерживается';
   $('#hook-repair').textContent = h.hook ? 'Обновить хук' : 'Подключить хук';
@@ -7052,7 +6151,6 @@ function onConnected() {
   api('/api/patterns').then(p => { patterns = p; renderPatterns(); }).catch(e => e.offline || toast(e.message, true));
   loadMusic();
   loadDispState();
-  loadAlarms();
   loadBt();
   loadDSP();
   loadPanelModel();

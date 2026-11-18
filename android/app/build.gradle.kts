@@ -8,8 +8,13 @@ plugins {
 // Панель лежит уровнем выше: её файлы кладём в assets/panel, при первом запуске приложение распаковывает их
 val panelRoot = rootDir.parentFile
 val panelVersion = panelRoot.resolve("VERSION").readText().trim()
-val panelFiles = listOf("server.py", "access.py", "agent.py", "glagol.py", "profiles.py", "midi.py", "managed_yam.py", "multi.py", "pyadb.py",
-    "VERSION", "LICENSE", "README.md")
+val panelFiles = listOf(
+    "server.py", "config.py", "access.py", "agent.py", "glagol.py",
+    "profiles.py", "max_profile.py", "max_privacy.py", "dsp_max.py",
+    "assistant_max.py", "assistant_socks.py", "party.py", "party_store.py",
+    "party_audio.py", "multi.py", "pyadb.py",
+    "VERSION", "LICENSE", "README.md"
+)
 
 // 0.1.9 → 109, 1.2.3 → 10203; «-rc1» и подобное не учитываем
 fun versionCodeOf(v: String): Int {
@@ -66,7 +71,7 @@ chaquopy {
 val copyPanel by tasks.registering(Sync::class) {
     from(panelRoot) {
         include(panelFiles)
-        include("static/**", "device/**")
+        include("api/**", "extmusic/**", "static/**", "device/**")
         exclude("**/__pycache__/**")
     }
     into(layout.buildDirectory.dir("panel-assets/panel"))

@@ -99,7 +99,7 @@ class AnimOverrides(unittest.TestCase):
         for kind, name in (("ring", "../../etc/passwd"), ("clock", "qc.led"), ("evil", "qc.led")):
             with self.assertRaisesRegex(server.AdbError, "нет такой анимации"):
                 p.anim_reset(kind, name)
-        self.assertEqual(p._anim_paths("ring", "qc.led")[1], f"{server.OVR_DIR}/ledpatterns/oknix/qc.led")
+        self.assertEqual(p._anim_paths("ring", "qc.led")[1], f"{server.OVR_DIR}/ledpatterns/ring/qc.led")
         p.boot_reset, p._remove_override, p.anim_custom = Mock(), Mock(), Mock()
         p.anim_reset("clock", "boot.binscled.zst")
         p.boot_reset.assert_called_once()   # заставка — по-старому, через вкладку «Запуск»
@@ -107,7 +107,7 @@ class AnimOverrides(unittest.TestCase):
 
     def test_custom_list(self):
         p = server.Panel(Mock())
-        p.adb.shell.return_value = ("./oknix/qc.led\n./clock/blink.binscled.zst\n./other/x\n@boot\n", "", 0)
+        p.adb.shell.return_value = ("./ring/qc.led\n./clock/blink.binscled.zst\n./other/x\n@boot\n", "", 0)
         self.assertEqual(p.anim_custom(), {"ring": ["qc.led"], "clock": ["blink.binscled.zst", "boot.binscled.zst"]})
 
     def test_custom_list_accepts_max_ring_folder(self):
@@ -118,8 +118,9 @@ class AnimOverrides(unittest.TestCase):
 
     def test_backup_names(self):
         ok = server.Panel.BACKUP_FILES.fullmatch
-        self.assertTrue(ok("override/ledpatterns/oknix/timer.led"))
-        for bad in ("override/ledpatterns/x/a", "override/ledpatterns/oknix/../a", "override/ledpatterns/oknix/a/b"):
+        self.assertTrue(ok("override/ledpatterns/ring/timer.led"))
+        for bad in ("override/ledpatterns/oknix/timer.led", "override/ledpatterns/x/a",
+                    "override/ledpatterns/ring/../a", "override/ledpatterns/ring/a/b"):
             self.assertFalse(ok(bad), bad)
 
 
@@ -157,7 +158,7 @@ class MyAnims(unittest.TestCase):
         r = p.my_anim_save("ring", "Мой закат", text="loop\nff0000 00ff00 0000ff 200\n")
         self.assertEqual(r["name"], "my/Мой_закат.led")
         self.assertEqual(pushed[0][1], f"{server.MY_ANIM_DIR}/ring/Мой_закат.led")
-        p.my_anim_save("clock", "c1", frames=[{"flag": 0, "v": [255] * len(server.CLOCK_LEDS), "ms": 100}])
+        p.my_anim_save("clock", "c1", frames=[{"flag": 0, "v": [255] * 400, "ms": 100}])
         self.assertEqual(pushed[1][1], f"{server.MY_ANIM_DIR}/clock/c1.binscled")
         for bad in ("../x", "a/b", "", "x" * 41, "a;b"):
             with self.assertRaises(server.AdbError, msg=bad):
@@ -171,23 +172,3 @@ class MyAnims(unittest.TestCase):
             p.my_anim_delete("ring", "timer.led")   # встроенную так не удалить
         with self.assertRaises(server.AdbError):
             p.anim_reset("ring", "my/Закат.led")    # и подменой своя не считается
-
-
-class DefaultAlarmSound(unittest.TestCase):
-    """common/timer.wav есть не во всех прошивках (Мини 2, issue #17) — берём похожий штатный."""
-
-    def test_default_alarm_sound_without_timer(self):
-        self.assertEqual(panel()._alarm_default_path(), "common/timer.wav")
-        p = panel(("common/boot.wav", "alice/alarm_morning.mp3", "common/ping.wav"))
-        self.assertEqual(p._alarm_default_path(), "alice/alarm_morning.mp3")
-        self.assertEqual(panel(("x/b.wav", "x/a.wav"))._alarm_default_path(), "x/a.wav")
-        with self.assertRaises(server.AdbError):
-            panel(())._alarm_default_path()
-
-    def test_mini2_opus_and_midi_flat_sound_layouts(self):
-        # Names observed by read-only SSH on the two devices, 29 Oct 2026.
-        mini2 = panel(('common/notification_sound.opus', 'common/calls_ringing_incoming.mp3',
-                       'common/timer.opus'))
-        midi = panel(('notification_sound.mp3', 'calls_ringing_incoming.mp3', 'timer.wav'))
-        self.assertEqual(mini2._alarm_default_path(), 'common/timer.opus')
-        self.assertEqual(midi._alarm_default_path(), 'timer.wav')

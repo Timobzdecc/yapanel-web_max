@@ -1,7 +1,7 @@
 {
   "speakers": [
-    {"id": "living-room", "name": "Гостиная · Лайт 2", "model": "lite2", "device": "192.168.1.50:5555"},
-    {"id": "study", "name": "Кабинет · Станция 2", "model": "station2", "device": "192.168.1.51:5555"},
-    {"id": "bedroom", "name": "Спальня · Мини 3 Про", "model": "mini3pro", "device": "192.168.1.52:5555"}
+    {"id": "living-room", "name": "Гостиная · Станция Макс", "model": "max", "device": "192.168.1.50:5555"},
+    {"id": "study", "name": "Кабинет · Станция Макс", "model": "max", "device": "192.168.1.51:5555"},
+    {"id": "bedroom", "name": "Спальня · Станция Макс", "model": "max", "device": "192.168.1.52:5555"}
   ]
 }

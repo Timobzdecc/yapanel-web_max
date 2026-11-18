@@ -145,8 +145,17 @@ class AgentProc:
     """Долгий процесс на колонке, как subprocess.Popen: stdout (поток), stdin.write, kill, wait, returncode.
     Вывод приходит по WebSocket и перекладывается в локальный канал — его можно читать построчно."""
 
+    @staticmethod
+    def _close_quietly(sock):
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
     def __init__(self, link, cmd, pty, cols, rows, text):
         raw = socket.create_connection((link.host, link.port), timeout=10)
+        self.sock = None
         try:
             self.sock = link.ctx.wrap_socket(raw)
             key = base64.b64encode(os.urandom(16)).decode()
@@ -160,15 +169,19 @@ class AgentProc:
                 if not chunk:
                     raise AgentError("агент закрыл соединение")
                 head += chunk
+            status, _, self.buf = head.partition(b"\r\n\r\n")
+            line = status.split(b"\r\n")[0].decode(errors="replace")
+            if " 101 " not in line:
+                raise AgentError("агент не принял токен панели" if " 401 " in line else f"поток: {line}")
+            self.sock.settimeout(None)
         except (OSError, ssl.SSLError) as e:
-            raw.close()
+            self._close_quietly(self.sock)
+            self._close_quietly(raw)
             raise AgentError(f"поток: {e}") from None
-        status, _, self.buf = head.partition(b"\r\n\r\n")
-        line = status.split(b"\r\n")[0].decode(errors="replace")
-        if " 101 " not in line:
-            self.sock.close()
-            raise AgentError("агент не принял токен панели" if " 401 " in line else f"поток: {line}")
-        self.sock.settimeout(None)
+        except BaseException:
+            self._close_quietly(self.sock)
+            self._close_quietly(raw)
+            raise
         self.returncode = None
         self._wlock = threading.Lock()
         r, w = os.pipe()

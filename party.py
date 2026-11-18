@@ -11,9 +11,12 @@ Manages:
 
 import os
 import sys
+import glob
+import shlex
 import time
 import math
 import json
+import logging
 import re
 import hashlib
 import struct
@@ -38,11 +41,23 @@ from party_store import (
 )
 from party_audio import BeatDetector
 
+_log = logging.getLogger("yapanel.party")
+
+def _site_packages_candidates():
+    """Return existing-style dynamic Python 3.* site-packages paths for embedded Android Python."""
+    current = f"/data/python/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages"
+    cands = [current]
+    for path in sorted(glob.glob("/data/python/lib/python3.*/site-packages"), reverse=True):
+        if path not in cands:
+            cands.append(path)
+    return cands
+
+
 try:
     import tinytuya
 except ImportError:
-    for sp in ["/data/python/lib/python3.11/site-packages", "/data/python/lib/python3.10/site-packages"]:
-        if sp not in sys.path and os.path.exists(sp):
+    for sp in _site_packages_candidates():
+        if sp not in sys.path and os.path.isdir(sp):
             sys.path.append(sp)
     try:
         import tinytuya
@@ -55,13 +70,44 @@ class _Cancelled(Exception):
 
 
 def run_android_cmd(args, ctx="u:r:shell:s0", timeout=2.0):
-    def _pre():
-        try:
-            with open("/proc/self/attr/current", "w") as f:
-                f.write(ctx)
-        except Exception:
-            pass
-    return subprocess.run(args, capture_output=True, text=True, preexec_fn=_pre, timeout=timeout)
+    """Run an Android command safely without preexec_fn in multithreaded processes."""
+    cmd_args = [str(a) for a in args]
+    if os.path.exists("/system/bin/sh"):
+        cmd = " ".join(shlex.quote(a) for a in cmd_args)
+        script = f"echo {shlex.quote(str(ctx))} > /proc/self/attr/current 2>/dev/null; exec {cmd}"
+        return subprocess.run(
+            ["/system/bin/sh", "-c", script],
+            capture_output=True, text=True, errors="replace", timeout=timeout,
+        )
+    return subprocess.run(
+        cmd_args,
+        capture_output=True, text=True, errors="replace", timeout=timeout,
+    )
+
+
+def _terminate_proc(proc, timeout=0.5):
+    """Terminate subprocess cleanly, falling back to kill() if wait() times out."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        pass
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=timeout)
+        return
+    except Exception:
+        pass
+    try:
+        proc.kill()
+        proc.wait(timeout=timeout)
+    except Exception:
+        pass
 
 
 # =====================================================================
@@ -69,10 +115,7 @@ def run_android_cmd(args, ctx="u:r:shell:s0", timeout=2.0):
 # =====================================================================
 
 class WorkersDict(dict):
-    """Dict mapping bulb IDs to BulbWorker instances that also supports
-    direct iteration over worker instances for clean thread inspection."""
-    def __iter__(self):
-        return iter(self.values())
+    """Dict mapping bulb IDs to BulbWorker instances."""
 
 
 class BulbWorker(threading.Thread):
@@ -1012,7 +1055,7 @@ class MovieAmbilightEffect(BaseEffect):
                 self.script = data
                 print(f"[Cinema] Loaded light script: {self.script.get('movie')} ({len(self.script.get('scenes', []))} scenes, {len(self.script.get('effects', []))} cues)")
             except Exception as e:
-                print(f"[Cinema] Error loading script: {e}")
+                _log.error("[Cinema] Error loading script: %s", e)
 
     def _cancel_animations(self):
         with self._anim_state_lock:
@@ -1044,7 +1087,7 @@ class MovieAmbilightEffect(BaseEffect):
                 except _Cancelled:
                     pass
                 except Exception as error:
-                    print(f"[Cinema] Spell error: {type(error).__name__}: {error}")
+                    _log.error("[Cinema] Spell error: %s: %s", type(error).__name__, error, exc_info=True)
                 finally:
                     if self._current_anim_event is event:
                         self._current_anim_event = None
@@ -2099,6 +2142,8 @@ class PartyManager:
         self.snare_val_lo = self.kick_val_lo
         self.snare_count = 0
         self.last_color_change_time = time.time()
+        self._timers_lock = threading.Lock()
+        self._flash_timers = set()
         self.broadcast_pool = ThreadPoolExecutor(max_workers=10, thread_name_prefix="PartyBcast")
 
     def broadcast_color(self, workers, val, timeout=0.060, wait=True):
@@ -2176,7 +2221,7 @@ class PartyManager:
                 self.workers[worker.dev_id] = worker
                 worker.start()
             except Exception as error:
-                print(f"[Party] Bulb worker init error ({item.get('id')}): {error}")
+                _log.error("[Party] Bulb worker init error (%s): %s", item.get("id"), error)
         print(f"[Party] Started {len(self.workers)} dedicated bulb workers.")
 
     def _apply_effect_settings(self, effect):
@@ -2223,7 +2268,7 @@ class PartyManager:
                     self.current_effect.start()
                     self.current_effect.tick(time.time())
                 except Exception as error:
-                    print(f"[Party] Effect start error: {error}")
+                    _log.error("[Party] Effect start error: %s", error, exc_info=True)
 
                 if self.is_android:
                     self._media_guard_thread = threading.Thread(target=self._media_guard_loop, args=(generation, run_stop), daemon=True, name="party-media-guard")
@@ -2269,6 +2314,7 @@ class PartyManager:
             self._stop_event.set()
             self._run_stop.set()
             self._run_generation += 1
+            self._cancel_flash_timers()
             if self.current_effect:
                 try:
                     self.current_effect.stop()
@@ -2312,11 +2358,7 @@ class PartyManager:
                 self._media_guard_thread.join(timeout=0.5)
                 self._media_guard_thread = None
             if self.audio_proc:
-                try:
-                    self.audio_proc.terminate()
-                    self.audio_proc.wait(timeout=0.5)
-                except Exception:
-                    pass
+                _terminate_proc(self.audio_proc, timeout=0.5)
                 self.audio_proc = None
             if self._audio_thread and self._audio_thread.is_alive():
                 self._audio_thread.join(timeout=0.5)
@@ -2359,6 +2401,7 @@ class PartyManager:
             self._bt_ambient_manual = True
         if not self.running:
             self.start()
+        self._cancel_flash_timers()
         if self.current_effect:
             if getattr(self.current_effect, "is_cinema", False):
                 self.current_effect._bulbs_off_for_strip = False
@@ -2417,7 +2460,9 @@ class PartyManager:
                     try:
                         self.current_effect.tick(now)
                     except Exception as e:
-                        print(f"[Party] Effect tick error: {e}")
+                        if now - getattr(self, "_last_tick_err_ts", 0.0) >= 5.0:
+                            self._last_tick_err_ts = now
+                            _log.error("[Party] Effect tick error: %s", e)
             if stop_event.wait(0.045):
                 break
 
@@ -2462,6 +2507,16 @@ class PartyManager:
 
         self._flash_role("snare", snare_color_hi, snare_color_lo)
 
+    def _cancel_flash_timers(self):
+        with self._timers_lock:
+            timers = list(self._flash_timers)
+            self._flash_timers.clear()
+        for timer in timers:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
     def _flash_role(self, role, high, low, delay=0.055):
         """Не блокирует аудиопоток: hi сразу, lo — отдельным таймером."""
         workers = [w for w in self.workers.values() if w.role == role]
@@ -2469,11 +2524,25 @@ class PartyManager:
             return
         self.broadcast_color(workers, high, wait=False)
 
+        gen = self._run_generation
+        timer_holder = [None]
+
         def low_pulse():
-            self.broadcast_color(workers, low, wait=False)
+            try:
+                if self._run_generation != gen:
+                    return
+                self.broadcast_color(workers, low, wait=False)
+            finally:
+                t = timer_holder[0]
+                if t is not None:
+                    with self._timers_lock:
+                        self._flash_timers.discard(t)
 
         timer = threading.Timer(delay, low_pulse)
         timer.daemon = True
+        timer_holder[0] = timer
+        with self._timers_lock:
+            self._flash_timers.add(timer)
         timer.start()
 
     def restore_white(self):
@@ -3218,7 +3287,7 @@ class PartyManager:
             proc = self.audio_proc
         except Exception as e:
             self._audio_error = f"tinycap2 start: {type(e).__name__}: {e}"
-            print(f"[Party] tinycap2 start error: {e}")
+            _log.error("[Party] tinycap2 start error: %s", e)
             return
 
         chunk_size = 2048
@@ -3254,8 +3323,11 @@ class PartyManager:
                     continue
                 self._audio_error = None
 
-                count = len(raw) // 2
-                samples = struct.unpack(f"<{count}h", raw)
+                n = len(raw) & ~1
+                if n < 4:
+                    continue
+                count = n // 2
+                samples = struct.unpack(f"<{count}h", raw[:n])
                 # Стерео → моно: иначе звук, панорамированный вправо, теряется.
                 mono = [(samples[i] + samples[i + 1]) * 0.5 for i in range(0, count - 1, 2)]
                 now = time.time()
@@ -3274,25 +3346,24 @@ class PartyManager:
                             self.current_effect.on_snare(events["snare_level"])
                         self.strobe_active = True
 
-                silence_timeout = float(self.settings.get("silence_timeout", 10.0))
-                if now - self.last_sound_time > silence_timeout:
-                    self.in_silence = True
-                    self.strobe_active = False
-                    if not self._silence_white_done:
-                        self._silence_white_done = True
-                        try:
-                            self.restore_white()
-                            self._white_hold_until = time.time() + 3600.0
-                        except Exception:
-                            pass
+                if active_party:
+                    silence_timeout = float(self.settings.get("silence_timeout", 10.0))
+                    if now - self.last_sound_time > silence_timeout:
+                        self.in_silence = True
+                        self.strobe_active = False
+                        if not self._silence_white_done:
+                            self._silence_white_done = True
+                            try:
+                                self.restore_white()
+                                self._white_hold_until = time.time() + 3600.0
+                            except Exception:
+                                pass
+                    else:
+                        self._silence_white_done = False
                 else:
+                    self.strobe_active = False
                     self._silence_white_done = False
         finally:
-            if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=1.0)
-                except Exception:
-                    pass
+            _terminate_proc(proc, timeout=1.0)
             if self.audio_proc is proc:
                 self.audio_proc = None

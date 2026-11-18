@@ -1,0 +1,712 @@
+"""Native playback integration for Yandex Station Max.
+
+Injects external audio stream URLs (YouTube Music, etc.) directly into
+Station Max's official GStreamer media pipeline (yio_souphttpsrc).
+This allows external music to play through the station's official native audio
+pipeline, driving the hardware front display visualizer (spectrogramAnimation)
+100% natively without any fake framebuffers or custom display hacks.
+
+Supports instant seeking via DASH sidx fragment splicing through a lightweight
+local streaming proxy (http://127.0.0.1:8788/stream.mp4?seek=<sec>).
+"""
+from __future__ import annotations
+
+import base64
+import http.server
+import os
+import re
+import shlex
+import socketserver
+import struct
+import subprocess
+import threading
+import time
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from . import ipv4_urlopen
+
+OVERRIDE_PATH = "/data/data/com.yandex.io.sdk/files/override_url.txt"
+PID_TRACK_PATH = "/data/data/com.yandex.io.sdk/files/injected_pid.txt"
+USER_SEEK_FLAG = "/data/data/com.yandex.io.sdk/files/user_seek.txt"
+HOOK_SCRIPT = "/data/local/tmp/hook_location.js"
+FALLBACK_TRACK_ID = "153109827"
+PROXY_PORT = 8788
+
+
+class GstBridgeError(ValueError):
+    pass
+
+
+class MP4Streamer:
+    """Parses MP4 DASH sidx box to allow instantaneous seek via fragment slicing."""
+
+    def __init__(self, youtube_url: str):
+        self.url = youtube_url
+        self.hdr = b""
+        self.segments: List[Tuple[float, int, int, int]] = []  # (time_sec, byte_offset, size, decode_time)
+        self.total_size = 0
+        self.duration_sec = 0.0
+        self.ready = False
+        self._lock = threading.Lock()
+        self._parse()
+
+    def _parse(self) -> None:
+        total_size = 0
+        try:
+            m = re.search(r"clen=(\d+)", self.url)
+            if m:
+                total_size = int(m.group(1))
+
+            req = urllib.request.Request(self.url, headers={"Range": "bytes=0-8192"})
+            with ipv4_urlopen(req, timeout=10) as resp:
+                data = resp.read()
+                cr = resp.headers.get("Content-Range")
+                if cr and "/" in cr:
+                    try:
+                        total_size = int(cr.split("/")[-1])
+                    except ValueError:
+                        pass
+        except Exception:
+            return
+
+        offset = 0
+        sidx_data = None
+        hdr_end = 0
+        while offset < len(data) - 8:
+            size, tag = struct.unpack(">I4s", data[offset:offset + 8])
+            tag_str = tag.decode("latin1", "replace")
+            if size == 1:
+                if offset + 16 > len(data):
+                    break
+                size = struct.unpack(">Q", data[offset + 8:offset + 16])[0]
+            if size < 8:
+                break
+            if tag_str == "sidx":
+                sidx_data = data[offset:offset + size]
+                hdr_end = offset
+                break
+            offset += size
+
+        if not sidx_data or hdr_end == 0:
+            return
+
+        hdr = data[:hdr_end]
+        segments: List[Tuple[float, int, int, int]] = []
+        duration_sec = 0.0
+        ready = False
+
+        try:
+            size, tag, version_flags = struct.unpack(">I4sI", sidx_data[:12])
+            version = version_flags >> 24
+            ref_id, timescale = struct.unpack(">II", sidx_data[12:20])
+            if version == 0:
+                earliest_time, first_offset = struct.unpack(">II", sidx_data[20:28])
+                s_off = 28
+            else:
+                earliest_time, first_offset = struct.unpack(">QQ", sidx_data[20:36])
+                s_off = 36
+            reserved, count = struct.unpack(">HH", sidx_data[s_off:s_off + 4])
+            s_off += 4
+
+            cur_time = earliest_time
+            cur_byte = hdr_end + size + first_offset
+            for _ in range(count):
+                ref_info, subseg_dur, sap_info = struct.unpack(">III", sidx_data[s_off:s_off + 12])
+                subseg_size = ref_info & 0x7FFFFFFF
+                time_sec = cur_time / timescale
+                segments.append((time_sec, cur_byte, subseg_size, cur_time))
+                cur_time += subseg_dur
+                cur_byte += subseg_size
+                s_off += 12
+
+            duration_sec = cur_time / timescale
+            if not total_size and segments:
+                total_size = segments[-1][1] + segments[-1][2]
+            ready = True
+        except Exception:
+            pass
+
+        with self._lock:
+            self.hdr = hdr
+            self.segments = segments
+            self.total_size = total_size
+            self.duration_sec = duration_sec
+            self.ready = ready
+
+    def snapshot(self) -> Tuple[bool, bytes, int, float, List[Tuple[float, int, int, int]]]:
+        with self._lock:
+            return self.ready, self.hdr, self.total_size, self.duration_sec, list(self.segments)
+
+    def get_seek_offset(self, target_sec: float) -> Tuple[int, float, int]:
+        with self._lock:
+            if not self.segments or target_sec <= 0:
+                return 0, 0.0, 0
+            best_seg = self.segments[0]
+            for seg in self.segments:
+                if seg[0] <= target_sec:
+                    best_seg = seg
+                else:
+                    break
+            return best_seg[1], best_seg[0], best_seg[3]
+
+
+class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    bridge: Optional[GstBridge] = None
+
+    @staticmethod
+    def _patch_tfdt(chunk: bytearray, base_decode_time: int) -> None:
+        if base_decode_time <= 0:
+            return
+        pos = 0
+        while True:
+            idx = chunk.find(b'tfdt', pos)
+            if idx == -1:
+                break
+            if idx >= 4:
+                b_sz = struct.unpack(">I", chunk[idx-4:idx])[0]
+                ver = chunk[idx+4]
+                if ver == 0 and b_sz == 16 and idx + 12 <= len(chunk):
+                    dt = struct.unpack(">I", chunk[idx+8:idx+12])[0]
+                    new_dt = max(0, dt - base_decode_time)
+                    struct.pack_into(">I", chunk, idx+8, new_dt)
+                elif ver == 1 and b_sz == 20 and idx + 16 <= len(chunk):
+                    dt = struct.unpack(">Q", chunk[idx+8:idx+16])[0]
+                    new_dt = max(0, dt - base_decode_time)
+                    struct.pack_into(">Q", chunk, idx+8, new_dt)
+            pos = idx + 4
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass  # Suppress default console clutter
+
+    def do_HEAD(self) -> None:
+        self._handle(head_only=True)
+
+    def do_GET(self) -> None:
+        self._handle(head_only=False)
+
+    def _handle(self, head_only: bool = False) -> None:
+        bridge = self.bridge
+        if not bridge:
+            self.send_response(404)
+            self.end_headers()
+            return
+        with bridge._lock:
+            upstream_url = bridge._last_url
+            streamer = bridge.streamer
+            default_seek_sec = getattr(bridge, "_seek_offset_sec", 0.0)
+        if not upstream_url:
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        query = self.path.split("?")[-1] if "?" in self.path else ""
+        params = dict(qc.split("=") for qc in query.split("&") if "=" in qc)
+        if "seek" in params:
+            try:
+                target_seek_sec = float(params["seek"])
+            except ValueError:
+                target_seek_sec = default_seek_sec
+        else:
+            target_seek_sec = default_seek_sec
+
+        byte_off = 0
+        base_decode_time = 0
+        s_ready = False
+        hdr = b""
+        total_size = 0
+        segments: List[Tuple[float, int, int, int]] = []
+        if streamer is not None:
+            s_ready, hdr, total_size, _, segments = streamer.snapshot()
+            if not s_ready:
+                hdr = b""
+                total_size = 0
+        hdr_len = len(hdr)
+
+        if streamer is not None and s_ready and target_seek_sec > 0:
+            byte_off, _, base_decode_time = streamer.get_seek_offset(target_seek_sec)
+
+        if not total_size and segments:
+            total_size = segments[-1][1] + segments[-1][2]
+        if not total_size:
+            total_size = 5000000
+
+        if byte_off == 0:
+            virtual_total = total_size
+        else:
+            virtual_total = hdr_len + max(0, total_size - byte_off)
+
+        # Parse client Range header
+        range_header = self.headers.get("Range", "")
+        r_start = 0
+        r_end = virtual_total - 1
+
+        if range_header.startswith("bytes="):
+            parts = range_header[6:].split("-")
+            if parts[0].isdigit():
+                r_start = int(parts[0])
+            if len(parts) > 1 and parts[1].isdigit():
+                r_end = min(int(parts[1]), virtual_total - 1)
+
+        content_length = max(0, r_end - r_start + 1)
+
+        if range_header:
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {r_start}-{r_end}/{virtual_total}")
+        else:
+            self.send_response(200)
+
+        self.send_header("Content-Type", "audio/mp4")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(content_length))
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        if head_only:
+            return
+
+        cur_vpos = r_start
+        bytes_left = content_length
+
+        try:
+            # 1. Send header part if cur_vpos < hdr_len (for seeked stream)
+            if byte_off > 0 and cur_vpos < hdr_len and bytes_left > 0:
+                hdr_slice = hdr[cur_vpos:min(hdr_len, cur_vpos + bytes_left)]
+                self.wfile.write(hdr_slice)
+                bytes_left -= len(hdr_slice)
+                cur_vpos += len(hdr_slice)
+
+            if bytes_left <= 0:
+                return
+
+            # 2. Upstream request for media data
+            if byte_off == 0:
+                upstream_start = cur_vpos
+            else:
+                upstream_start = byte_off + (cur_vpos - hdr_len)
+            upstream_end = upstream_start + bytes_left - 1
+
+            upstream_req = urllib.request.Request(
+                upstream_url,
+                headers={"Range": f"bytes={upstream_start}-{upstream_end}"}
+            )
+            with ipv4_urlopen(upstream_req, timeout=15) as upstream:
+                while bytes_left > 0:
+                    chunk = bytearray(upstream.read(min(65536, bytes_left)))
+                    if not chunk:
+                        break
+                    if base_decode_time > 0:
+                        self._patch_tfdt(chunk, base_decode_time)
+                    self.wfile.write(chunk)
+                    bytes_left -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        except Exception as error:
+            print(f"[GST_PROXY] Stream error: {error}", flush=True)
+
+
+class _ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        import sys
+        exc_type = sys.exc_info()[0]
+        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            return
+        super().handle_error(request, client_address)
+
+
+class GstBridge:
+    def __init__(self, panel: Any = None) -> None:
+        self.panel = panel
+        self._lock = threading.RLock()
+        self._stream_gen = 0
+        self._last_injected_pid: Optional[int] = None
+        self._is_active: bool = False
+        self._is_paused: bool = False
+        self._last_title: str = ""
+        self._last_artist: str = ""
+        self._last_url: str = ""
+        self._seek_offset_sec: float = 0.0
+        self._seek_start_time: float = 0.0
+        self._paused_pos: float = 0.0
+        self._track_duration: float = 0.0
+        self.streamer: Optional[MP4Streamer] = None
+        self._server: Optional[_ReusableTCPServer] = None
+        self._ensure_server()
+
+    def _ensure_server(self) -> None:
+        with self._lock:
+            if self._server is not None:
+                return
+            try:
+                handler_cls = type("_BoundStreamHandler", (_StreamRequestHandler,), {"bridge": self})
+                self._server = _ReusableTCPServer(("127.0.0.1", PROXY_PORT), handler_cls)
+                t = threading.Thread(target=self._server.serve_forever, daemon=True, name="gst-proxy-server")
+                t.start()
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Stop the local streaming proxy TCP server and release its listening socket."""
+        with self._lock:
+            srv = self._server
+            self._server = None
+        if srv is not None:
+            try:
+                srv.shutdown()
+            except Exception:
+                pass
+            try:
+                srv.server_close()
+            except Exception:
+                pass
+
+    shutdown = close
+
+    def _exec_result(self, cmd: str) -> Tuple[str, str, int]:
+        """Run a shell command locally on device or via panel.adb and return (stdout, stderr, rc)."""
+        if getattr(type(self), "_exec", None) is not GstBridge._exec or self.__dict__.get("_exec") is not None:
+            out = self._exec(cmd)
+            return str(out or ""), "", 0
+        if os.environ.get("PANEL_LOCAL") == "1" or not hasattr(self.panel, "adb"):
+            try:
+                res = subprocess.run(
+                    ["sh", "-c", cmd],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                    check=False,
+                )
+                return (
+                    res.stdout.decode("utf-8", errors="replace").strip(),
+                    res.stderr.decode("utf-8", errors="replace").strip(),
+                    int(res.returncode),
+                )
+            except Exception as exc:
+                return "", str(exc), 1
+        try:
+            out, err, rc = self.panel.adb.shell(cmd, check=False, timeout=10)
+            return (out or "").strip(), (err or "").strip(), int(rc if rc is not None else 0)
+        except Exception as exc:
+            return "", str(exc), 1
+
+    def _exec(self, cmd: str) -> str:
+        """Run a shell command locally on device or via panel.adb."""
+        out, _, _ = self._exec_result(cmd)
+        return out
+
+    def _get_sdk_pid(self) -> Optional[int]:
+        out = self._exec("pidof com.yandex.io.sdk")
+        for part in out.split():
+            if part.isdigit():
+                return int(part)
+        return None
+
+    def available(self, max_age: float = 8.0) -> bool:
+        return self._get_sdk_pid() is not None
+
+    def ensure_injected(self) -> bool:
+        pid = self._get_sdk_pid()
+        if not pid:
+            return False
+        with self._lock:
+            if self._last_injected_pid == pid:
+                return True
+
+        # Fast check if frida-agent is currently mapped into SDK memory
+        in_mem = self._exec(f"grep -q frida-agent /proc/{pid}/maps && echo 1 || echo 0")
+        if in_mem.strip() == "1":
+            with self._lock:
+                self._last_injected_pid = pid
+            return True
+
+        # Ensure hook script is in place and verify it exists
+        q_hook = shlex.quote(HOOK_SCRIPT)
+        _, _, hook_rc = self._exec_result(
+            f"if [ ! -f {q_hook} ] && [ -f /data/yapanel/device/extmusic/hook_location.js ]; "
+            f"then cp /data/yapanel/device/extmusic/hook_location.js {q_hook} && chmod 666 {q_hook}; fi; "
+            f"[ -f {q_hook} ]"
+        )
+        if hook_rc != 0:
+            return False
+
+        # Find frida-inject on the target device and verify it is executable
+        frida_out, _, frida_rc = self._exec_result(
+            "if [ -x /data/local/tmp/frida-inject ]; then echo /data/local/tmp/frida-inject; "
+            "elif [ -f /data/local/tmp/frida-inject ]; then chmod 755 /data/local/tmp/frida-inject 2>/dev/null; "
+            "[ -x /data/local/tmp/frida-inject ] && echo /data/local/tmp/frida-inject; "
+            "else for f in /data/app/com.yandex.io.sdk*/lib/arm64/frida-inject; do "
+            "if [ -x \"$f\" ]; then echo \"$f\"; break; fi; done; fi"
+        )
+        frida_bin = frida_out.splitlines()[0].strip() if frida_out.strip() else ""
+        if frida_rc != 0 or not frida_bin:
+            return False
+
+        # Inject hook_location.js with -e (eternalize and exit)
+        cmd = (
+            f"chmod 777 /data/data/com.yandex.io.sdk/files 2>/dev/null; "
+            f"{shlex.quote(frida_bin)} -p {int(pid)} -s {q_hook} -e"
+        )
+        out, err, rc = self._exec_result(cmd)
+        combined = f"{out}\n{err}".lower()
+        if rc != 0 or any(tok in combined for tok in ("not found", "permission denied", "unable to", "failed", "error:")):
+            return False
+        time.sleep(0.3)
+        with self._lock:
+            self._last_injected_pid = pid
+        return True
+
+    def _send_glagol(self, payload: Dict[str, Any]) -> None:
+        """Send command directly to Glagol daemon without recursion."""
+        glagol = getattr(self.panel, "glagol", None)
+        if glagol and hasattr(glagol, "send"):
+            glagol.send(payload)
+
+    def _write_override(self, url: str) -> None:
+        written = False
+        if os.environ.get("PANEL_LOCAL") == "1" or not hasattr(self.panel, "adb"):
+            try:
+                os.makedirs("/data/data/com.yandex.io.sdk/files", exist_ok=True)
+                with open(OVERRIDE_PATH, "w", encoding="utf-8") as f:
+                    f.write(url)
+                os.chmod(OVERRIDE_PATH, 0o666)
+                written = True
+            except Exception:
+                pass
+        if not written:
+            b64 = base64.b64encode(url.encode("utf-8")).decode("ascii")
+            self._exec(f"echo -n '{b64}' | base64 -d > {OVERRIDE_PATH} && chmod 666 {OVERRIDE_PATH}")
+
+    def _init_streamer(self, url: str) -> None:
+        with self._lock:
+            gen = self._stream_gen
+            cur_url = self._last_url
+            is_active = self._is_active
+        if cur_url and cur_url != url:
+            return
+        try:
+            streamer = MP4Streamer(url)
+        except Exception as error:
+            print(f"[GST] Failed to parse MP4Streamer: {error}", flush=True)
+            return
+        with self._lock:
+            if self._stream_gen != gen:
+                return
+            if self._last_url == url or (not self._last_url and not is_active and gen == 0):
+                self.streamer = streamer
+
+    def play(self, url: str, title: str = "", artist: str = "", duration: int = 0) -> int:
+        if not url:
+            raise GstBridgeError("Пустой адрес потока")
+        self._ensure_server()
+        if not self.ensure_injected():
+            self.release()
+            raise GstBridgeError("Не удалось подключить аудио-хук (frida-inject)")
+        with self._lock:
+            self._stream_gen += 1
+            self._last_url = url
+            self._last_title = title
+            self._last_artist = artist
+            self._track_duration = float(duration or 0)
+            self._seek_offset_sec = 0.0
+            self._paused_pos = 0.0
+            self._seek_start_time = time.time()
+            self.streamer = None
+            self._is_active = True
+            self._is_paused = False
+
+        # Parse sidx in background thread for instant seek readiness
+        threading.Thread(target=self._init_streamer, args=(url,), daemon=True).start()
+
+        # 1. Write target URL to override file with 0666 permissions
+        self._write_override(url)
+
+        # 2. Trigger native playback via Glagol
+        try:
+            self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
+        except Exception as error:
+            self.release()
+            raise GstBridgeError(f"Ошибка запуска родного плеера: {error}") from error
+
+        return 1
+
+    def pause(self) -> int:
+        with self._lock:
+            self._is_paused = True
+            if self._seek_offset_sec > 0:
+                self._paused_pos = self._seek_offset_sec + max(0.0, time.time() - self._seek_start_time)
+            else:
+                self._paused_pos = max(0.0, time.time() - self._seek_start_time) if self._seek_start_time > 0 else 0.0
+        try:
+            self._send_glagol({"command": "stop"})
+        except Exception:
+            pass
+        return 1
+
+    def resume(self) -> int:
+        with self._lock:
+            self._is_paused = False
+            self._seek_offset_sec = self._paused_pos
+            self._seek_start_time = time.time()
+            pos_ms = int(self._paused_pos * 1000)
+        return self.seek(pos_ms)
+
+    def _clear_override(self) -> None:
+        self._write_override("")
+
+    def release(self) -> int:
+        """Reset local GstBridge state and clear override URL without stopping Glagol."""
+        with self._lock:
+            self._stream_gen += 1
+            self._is_active = False
+            self._is_paused = False
+            self._last_url = ""
+            self._seek_offset_sec = 0.0
+            self._paused_pos = 0.0
+            self._seek_start_time = 0.0
+            self.streamer = None
+        self._clear_override()
+        return 1
+
+    def stop(self) -> int:
+        self.release()
+        try:
+            self._send_glagol({"command": "stop"})
+        except Exception:
+            pass
+        return 1
+
+    def seek(self, position_ms: int) -> int:
+        self._ensure_server()
+        if not self.ensure_injected():
+            raise GstBridgeError("Не удалось подключить аудио-хук (frida-inject)")
+        sec = max(0.0, float(position_ms) / 1000.0)
+
+        with self._lock:
+            last_url = self._last_url
+            streamer = self.streamer
+            gen = self._stream_gen
+
+        # If seeking to beginning, reload direct stream
+        if sec <= 0.5:
+            with self._lock:
+                self._seek_offset_sec = 0.0
+                self._paused_pos = 0.0
+                self._seek_start_time = time.time()
+                last_url = self._last_url
+            if not last_url:
+                return 0
+            self._write_override(last_url)
+            try:
+                self._send_glagol({"command": "stop"})
+            except Exception:
+                pass
+            time.sleep(0.06)
+            try:
+                self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
+            except Exception as error:
+                print(f"[GST] Glagol playMusic failed on seek to 0: {error}", flush=True)
+            return 1
+
+        # Wait for streamer if still parsing
+        if (streamer is None or not streamer.ready) and last_url:
+            if streamer is None:
+                try:
+                    new_streamer = MP4Streamer(last_url)
+                    with self._lock:
+                        if self._stream_gen == gen and self._last_url == last_url and self.streamer is None:
+                            self.streamer = new_streamer
+                        streamer = self.streamer or new_streamer
+                except Exception as error:
+                    print(f"[GST] Failed to create MP4Streamer: {error}", flush=True)
+            if streamer:
+                deadline = time.time() + 2.5
+                while time.time() < deadline:
+                    with self._lock:
+                        if self.streamer is not None:
+                            streamer = self.streamer
+                    if streamer.ready:
+                        break
+                    time.sleep(0.05)
+
+        if streamer and streamer.ready and streamer.segments:
+            byte_off, actual_sec, base_decode_time = streamer.get_seek_offset(sec)
+            with self._lock:
+                if self._stream_gen != gen:
+                    return 1
+                self._seek_offset_sec = actual_sec
+                self._paused_pos = actual_sec
+                self._seek_start_time = time.time()
+            proxy_url = f"http://127.0.0.1:{PROXY_PORT}/stream.mp4?seek={actual_sec}&t={int(time.time())}"
+            self._write_override(proxy_url)
+            print(f"[GST] Seeking to {sec:.2f}s -> actual {actual_sec:.2f}s (offset {byte_off}, base_dt={base_decode_time}): {proxy_url}", flush=True)
+            try:
+                self._send_glagol({"command": "stop"})
+            except Exception:
+                pass
+            time.sleep(0.06)
+            try:
+                self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
+            except Exception as error:
+                print(f"[GST] Glagol playMusic failed on seek: {error}", flush=True)
+            return 1
+
+        print(f"[GST] Falling back to Glagol rewind ({sec:.2f}s), streamer={streamer}", flush=True)
+        try:
+            self._send_glagol({"command": "rewind", "position": sec})
+        except Exception:
+            pass
+        return 1
+
+    def player(self) -> Dict[str, Any]:
+        glagol = getattr(self.panel, "glagol", None)
+        gstate = (getattr(glagol, "state", None) or {}) if glagol else {}
+        pstate = gstate.get("playerState") or {}
+        is_playing = bool(gstate.get("playing"))
+        dur_sec = float(pstate.get("duration") or 0.0)
+
+        with self._lock:
+            is_paused = self._is_paused
+            is_active = self._is_active
+            paused_pos = self._paused_pos
+            seek_offset_sec = self._seek_offset_sec
+            seek_start_time = self._seek_start_time
+            track_duration = self._track_duration
+            streamer = self.streamer
+
+        if is_paused:
+            status = "paused"
+            is_playing = False
+            effective_pos = paused_pos
+        elif is_playing or is_active:
+            status = "playing"
+            if seek_offset_sec > 0:
+                effective_pos = seek_offset_sec + max(0.0, time.time() - seek_start_time)
+            elif seek_start_time > 0:
+                effective_pos = max(0.0, time.time() - seek_start_time)
+            else:
+                effective_pos = float(pstate.get("progress") or 0.0)
+        else:
+            status = "stopped"
+            effective_pos = 0.0
+
+        streamer_dur = 0.0
+        if streamer is not None:
+            _, _, _, streamer_dur, _ = streamer.snapshot()
+        effective_dur = track_duration if track_duration > 0 else (
+            streamer_dur if streamer_dur > 0 else dur_sec
+        )
+
+        return {
+            "ok": True,
+            "state": status,
+            "playing": is_playing,
+            "position": int(effective_pos * 1000),
+            "duration": int(effective_dur * 1000),
+            "levels": [],
+            "error": "",
+        }

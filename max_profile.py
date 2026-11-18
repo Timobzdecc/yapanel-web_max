@@ -446,27 +446,30 @@ _cached_quasar_ctrl = None  # (pid, is_init_addr)
 _quasar_ctrl_lock = threading.Lock()
 
 
+def find_quasar_pid():
+    """Return the integer PID of com.yandex.io.sdk from _PROC_ROOT, or None."""
+    try:
+        for p in os.listdir(_PROC_ROOT):
+            if p.isdigit():
+                try:
+                    with open(f"{_PROC_ROOT}/{p}/cmdline", "rb") as f:
+                        cmd = f.read()
+                    if cmd.startswith(_QUASAR_CMDLINE_MARK):
+                        return int(p)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
 def find_quasar_controller_addr(target_pid=None):
     """Find Quasar's YandexStationFrontalController::isInitialized_ memory address.
     Matches the native max-platform implementation in quasar_pause.rs.
     """
     global _cached_quasar_ctrl
 
-    pid = target_pid
-    if not pid:
-        try:
-            for p in os.listdir("/proc"):
-                if p.isdigit():
-                    try:
-                        with open(f"/proc/{p}/cmdline", "rb") as f:
-                            cmd = f.read()
-                        if cmd.startswith(b"com.yandex.io.sdk"):
-                            pid = int(p)
-                            break
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    pid = target_pid or find_quasar_pid()
     if not pid:
         return None
 
@@ -623,12 +626,22 @@ def max_set_quasar_clock_paused(adb, pause=True):
             except Exception:
                 _cached_quasar_ctrl = None
     else:
-        cmd = (
-            f"/data/python/bin/python3.11 -c \"import sys; sys.path.insert(0, '/data/yapanel'); "
-            f"from max_profile import max_set_quasar_clock_paused; "
-            f"class FakeAdb: is_local = True\nmax_set_quasar_clock_paused(FakeAdb(), {pause})\" 2>/dev/null; true"
+        py_snippet = (
+            "import sys\n"
+            "sys.path.insert(0, '/data/yapanel')\n"
+            "from max_profile import max_set_quasar_clock_paused\n"
+            "class FakeAdb:\n"
+            "    is_local = True\n"
+            f"print('WP_OK=1' if max_set_quasar_clock_paused(FakeAdb(), {bool(pause)}) else 'WP_OK=0')"
         )
-        adb.shell(cmd, check=False)
+        cmd = (
+            "for _py in /data/python/bin/python3.11 /data/python/bin/python3 /data/local/tmp/python3 "
+            "\"$(command -v python3 2>/dev/null)\"; do "
+            "[ -n \"$_py\" ] && [ -x \"$_py\" ] && break; _py=; done; "
+            f"[ -n \"$_py\" ] && \"$_py\" -c {shlex.quote(py_snippet)} 2>/dev/null || echo WP_OK=0"
+        )
+        out, _, _ = adb.shell(cmd, check=False)
+        return "WP_OK=1" in str(out)
     return False
 
 
@@ -638,6 +651,30 @@ def max_pause_alice_leds(adb):
 
 def max_resume_alice_leds(adb):
     max_set_quasar_clock_paused(adb, False)
+
+
+_AM_ERROR_RE = re.compile(
+    r"\b(?:error|exception|permission denial|securityexception|not allowed|unable to|killed|not found)\b",
+    re.I,
+)
+
+
+def _format_android_cmd_result(out, err="", rc=0):
+    out_s = str(out or "")
+    err_s = str(err or "")
+    if err_s.strip() and (rc != 0 or not out_s.strip() or _AM_ERROR_RE.search(err_s)):
+        return f"{out_s}\n{err_s}".strip() if out_s.strip() else err_s.strip()
+    if rc != 0 and not out_s.strip():
+        return f"Error: exit status {rc}"
+    return out_s
+
+
+def _proc_cmd_text(res):
+    return _format_android_cmd_result(
+        getattr(res, "stdout", ""),
+        getattr(res, "stderr", ""),
+        getattr(res, "returncode", 0) or 0,
+    )
 
 
 def max_android_cmd(adb, args, timeout=None):
@@ -652,11 +689,11 @@ def max_android_cmd(adb, args, timeout=None):
             script = ("echo u:r:shell:s0 > /proc/self/attr/current 2>/dev/null; "
                       "exec " + cmd)
             try:
-                return subprocess.run(
+                return _proc_cmd_text(subprocess.run(
                     ["/system/bin/sh", "-c", script],
                     capture_output=True, text=True, errors="replace",
                     timeout=effective_timeout,
-                ).stdout
+                ))
             except Exception:
                 pass
 
@@ -676,18 +713,18 @@ def max_android_cmd(adb, args, timeout=None):
         # preexec_fn is unsafe with threads and unsupported on non-POSIX platforms.
         if _preexec_allowed():
             try:
-                return _run(True).stdout
+                return _proc_cmd_text(_run(True))
             except Exception as exc:
                 if not _preexec_unsupported(exc):
                     return ""
         try:
-            return _run(False).stdout
+            return _proc_cmd_text(_run(False))
         except Exception:
             return ""
     else:
         cmd = " ".join(shlex.quote(a) for a in args)
-        out, _, _ = adb.shell(cmd, check=False, timeout=effective_timeout)
-        return out
+        out, err, rc = adb.shell(cmd, check=False, timeout=effective_timeout)
+        return _format_android_cmd_result(out, err, rc)
 
 
 def max_remove_device_from_conf(conf_text, target_mac):
@@ -1006,24 +1043,25 @@ def install(s, profile):
                          "/data/data/com.yandex.tv.services/no_backup/appmetrica/analytics/appmetrica*.db "
                          "/data/data/com.yandex.io.sdk/databases/appmetrica* 2>/dev/null; true")
 
-    # Ensure clock pattern and anim directories exist
-    try:
-        clock_dir = s.PATTERNS["clock"]
-        os.makedirs(clock_dir, exist_ok=True)
-        os.makedirs(f"{s.MY_ANIM_DIR}/clock", exist_ok=True)
-        os.makedirs(f"{s.MY_ANIM_DIR}/ring", exist_ok=True)
-        os.makedirs(f"{s.OVR_DIR}/ledpatterns/clock", exist_ok=True)
-        if not os.path.exists(s.BOOT_TARGET):
-            for fname in ("boot.binscled.zst", "alice_listening.binscled.zst", "alice_thinking.binscled.zst", "error.binscled.zst", "timer.binscled.zst"):
-                src = f"/data/local/tmp/{fname}"
-                dst = f"{clock_dir}/{fname}"
-                if os.path.exists(src) and not os.path.exists(dst):
-                    try:
-                        shutil.copyfile(src, dst)
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+    # Ensure clock pattern and anim directories exist only when running on the speaker itself
+    if os.path.exists("/system/bin/sh") and os.path.isdir("/data/quasar"):
+        try:
+            clock_dir = s.PATTERNS["clock"]
+            os.makedirs(clock_dir, exist_ok=True)
+            os.makedirs(f"{s.MY_ANIM_DIR}/clock", exist_ok=True)
+            os.makedirs(f"{s.MY_ANIM_DIR}/ring", exist_ok=True)
+            os.makedirs(f"{s.OVR_DIR}/ledpatterns/clock", exist_ok=True)
+            if not os.path.exists(s.BOOT_TARGET):
+                for fname in ("boot.binscled.zst", "alice_listening.binscled.zst", "alice_thinking.binscled.zst", "error.binscled.zst", "timer.binscled.zst"):
+                    src = f"/data/local/tmp/{fname}"
+                    dst = f"{clock_dir}/{fname}"
+                    if os.path.exists(src) and not os.path.exists(dst):
+                        try:
+                            shutil.copyfile(src, dst)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     original_set_volume = P.set_volume
 
@@ -1525,11 +1563,12 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
     def max_patterns(self):
         """Return stock and custom animations for Station Max."""
         res = {}
+        is_local = bool(getattr(self.adb, "is_local", False))
         for kind in ("ring", "clock"):
             d = s.PATTERNS.get(kind, "")
             my_d = f"{s.MY_ANIM_DIR}/{kind}"
             std = []
-            if d and os.path.exists(d):
+            if d and is_local and os.path.exists(d):
                 ext = ".led" if kind == "ring" else ".binscled"
                 std = [f for f in os.listdir(d) if ext in f and not f.startswith(".")]
             elif d:
@@ -1538,7 +1577,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
                 std = [l.strip() for l in out.splitlines() if ext in l and not l.strip().startswith(".")]
 
             mine = []
-            if os.path.exists(my_d):
+            if is_local and os.path.exists(my_d):
                 mine = [f"my/{f}" for f in os.listdir(my_d) if not f.startswith(".")]
             else:
                 out, _, _ = self.adb.shell(f"for f in {shlex.quote(my_d)}/*; do [ -f \"$f\" ] && echo \"${{f##*/}}\"; done; true", check=False)
@@ -1647,9 +1686,18 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
 
     def max_play_ring_pattern(self, name, seconds=5):
         max_stop_ring_pattern(self)
-        led_path = f"{s.QUASAR}/ledpatterns/{name}"
+        name_s = str(name or "")
+        if name_s.startswith("my/"):
+            sub = name_s[3:]
+            if not sub or sub in (".", "..") or "/" in sub or "\\" in sub or "\x00" in sub:
+                return {"ok": False, "error": "Invalid pattern name"}
+            led_path = f"{s.MY_ANIM_DIR}/ring/{sub}"
+        else:
+            if not name_s or name_s in (".", "..") or "/" in name_s or "\\" in name_s or "\x00" in name_s:
+                return {"ok": False, "error": "Invalid pattern name"}
+            led_path = f"{s.PATTERNS['ring']}/{name_s}"
         try:
-            if os.path.exists(led_path):
+            if getattr(self.adb, "is_local", False) and os.path.exists(led_path):
                 with open(led_path, "r", encoding="utf-8", errors="replace") as f:
                     text = f.read()
             else:
@@ -1705,7 +1753,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         def __init__(self, adb):
             self.adb = adb
             self.is_local = getattr(adb, "is_local", False) or os.path.exists(MAX_SCREEN_DEV)
-            self.lock = threading.Lock()
+            self.lock = threading.RLock()
             self.running = False
             self.mode = None
             self.raw_frame = None
@@ -1772,9 +1820,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
                 try:
                     now_str = time.strftime("%H:%M")
                     cur_clock = render_matrix_text(now_str, 180)
-                    if self.is_local:
-                        with open(MAX_SCREEN_DEV, "wb") as f:
-                            f.write(cur_clock)
+                    self._write_frame(cur_clock)
                 except Exception:
                     pass
                 max_resume_alice_leds(self.adb)
@@ -1825,9 +1871,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
                         try:
                             now_str = time.strftime("%H:%M")
                             cur_clock = render_matrix_text(now_str, 180)
-                            if self.is_local:
-                                with open(MAX_SCREEN_DEV, "wb") as f:
-                                    f.write(cur_clock)
+                            self._write_frame(cur_clock)
                         except Exception:
                             pass
                         max_resume_alice_leds(self.adb)
@@ -1950,6 +1994,31 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         return {"ok": True}
 
     P.display_set = max_display_set
+
+    def max_display_eq_frame(self, pixels):
+        """Update the 25x16 display with an equalizer frame, taking it over once."""
+        mgr = get_disp_mgr(self)
+        values = list(pixels or [])[:MAX_SCREEN_PIXELS]
+        if len(values) < MAX_SCREEN_PIXELS:
+            values.extend([0] * (MAX_SCREEN_PIXELS - len(values)))
+        with mgr.lock:
+            need_pin = not mgr.running or mgr.mode != "eq"
+        if need_pin:
+            mgr.pin_frame(values, brightness=255, seconds=0)
+            with mgr.lock:
+                mgr.mode = "eq"
+        raw = bytearray(MAX_SCREEN_BYTES)
+        for i, val in enumerate(values):
+            b = max(0, min(255, int(val)))
+            raw[i * 3] = b
+            raw[i * 3 + 1] = b
+            raw[i * 3 + 2] = b
+        with mgr.lock:
+            mgr.raw_frame = bytes(raw)
+            mgr.running = True
+        return {"ok": True}
+
+    P.display_eq_frame = max_display_eq_frame
 
     def max_display_stop(self):
         return get_disp_mgr(self).stop()
@@ -2355,7 +2424,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             # Синхронизация в стиле Яндекса: выключаем стриминг и видимость через Алису,
             # не трогая BluetoothAdapter, чтобы не отваливался BLE-пульт (Yandex Remote 2).
             self._bt_send_alice_command("выключи блютуз", require_glagol=True)
-            max_set_bt_off(self.adb, bt_off_path, False)
+            max_set_bt_off(self.adb, bt_off_path, True)
             self._bt_set_alice_state(False, pending=True)
         elif act == "power_on":
             max_set_bt_off(self.adb, bt_off_path, False)
@@ -3244,6 +3313,8 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         sound_orig = str(getattr(s, "SOUND_ORIG", ""))
         patterns = getattr(s, "PATTERNS", {})
         clock_dir = str(patterns.get("clock", "")) if isinstance(patterns, dict) else ""
+        ring_dir = str(patterns.get("ring", "")) if isinstance(patterns, dict) else ""
+        sounds_dir = str(getattr(s, "SOUNDS_DIR", ""))
         quasar = str(getattr(s, "QUASAR", ""))
 
         rm_owned = " ".join(
@@ -3259,11 +3330,24 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             restore_sound = (f"if [ -f {q(sound_orig)} ]; then mkdir -p {q(posixpath.dirname(sound_target))} && "
                              f"mv -f {q(sound_orig)} {q(sound_target)} 2>/dev/null; fi; ")
         unmount_overrides = ""
-        if ovr and clock_dir and quasar:
+        if ovr and (clock_dir or ring_dir or sounds_dir or quasar):
+            mount_checks = []
+            if clock_dir:
+                mount_checks.append(f't={q(clock_dir)}/"$rel"; grep -q " $t " /proc/mounts && umount "$t" 2>/dev/null')
+            if quasar:
+                mount_checks.append(f't2={q(quasar)}/"$rel"; grep -q " $t2 " /proc/mounts && umount "$t2" 2>/dev/null')
+            case_arms = []
+            if ring_dir:
+                case_arms.append(f'ledpatterns/ring/*) tr={q(ring_dir)}/"${{rel#ledpatterns/ring/}}"; grep -q " $tr " /proc/mounts && umount "$tr" 2>/dev/null ;;')
+            if clock_dir:
+                case_arms.append(f'ledpatterns/clock/*) tc={q(clock_dir)}/"${{rel#ledpatterns/clock/}}"; grep -q " $tc " /proc/mounts && umount "$tc" 2>/dev/null ;;')
+            if sounds_dir:
+                case_arms.append(f'sounds/*) ts={q(sounds_dir)}/"${{rel#sounds/}}"; grep -q " $ts " /proc/mounts && umount "$ts" 2>/dev/null ;;')
+            case_stmt = f'case "$rel" in {" ".join(case_arms)} esac; ' if case_arms else ""
+            checks_stmt = "; ".join(mount_checks) + "; " if mount_checks else ""
             unmount_overrides = (
                 f"[ -d {q(ovr)} ] && (cd {q(ovr)} && find . -type f) | while read -r f; do "
-                f"  t={q(clock_dir)}/${{f#./}}; grep -q \" $t \" /proc/mounts && umount \"$t\" 2>/dev/null; "
-                f"  t2={q(quasar)}/${{f#./}}; grep -q \" $t2 \" /proc/mounts && umount \"$t2\" 2>/dev/null; "
+                f'rel="${{f#./}}"; {checks_stmt}{case_stmt}'
                 f"done; "
             )
 
@@ -3372,11 +3456,75 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
     P.dsp_status = max_dsp_status
     P.dsp_action = max_dsp_action
 
+    original_system = getattr(P, "system", None)
+
+    def _quasar_pid_poll(adb):
+        is_local = bool(getattr(adb, "is_local", False))
+        for attempt in range(4):
+            pid = None
+            if is_local:
+                pid = find_quasar_pid()
+                if pid is None:
+                    try:
+                        res = subprocess.run(["pidof", "com.yandex.io.sdk"], capture_output=True, text=True, timeout=5)
+                        tokens = (getattr(res, "stdout", "") or "").strip().split()
+                        if tokens and tokens[0].isdigit():
+                            pid = int(tokens[0])
+                    except (OSError, subprocess.SubprocessError):
+                        pid = None
+            else:
+                out, _, _ = adb.shell("pidof com.yandex.io.sdk 2>/dev/null || true", check=False, timeout=5)
+                tokens = (out or "").strip().split()
+                if tokens and tokens[0].isdigit():
+                    pid = int(tokens[0])
+            if pid:
+                return pid
+            if attempt < 3:
+                time.sleep(0.4)
+        return None
+
+    def max_system(self, action):
+        """Real Quasar restart on Station Max Android (force-stop + KeepAliveService wake)."""
+        if action == "quasar_restart":
+            stop_out = max_android_cmd(self.adb, ["am", "force-stop", "com.yandex.io.sdk"], timeout=15)
+            if _AM_ERROR_RE.search(str(stop_out or "")):
+                raise s.AdbError(f"Не удалось остановить Quasar: {str(stop_out).strip()[-300:]}")
+            time.sleep(0.5)
+            wake_out = max_android_cmd(
+                self.adb,
+                [
+                    "am", "startservice",
+                    "-n", "com.yandex.io.sdk/com.yandex.tv.alice.app.KeepAliveService",
+                    "-a", "com.yandex.tv.alice.app.KeepAliveService.WakeUp",
+                ],
+                timeout=15,
+            )
+            if _AM_ERROR_RE.search(str(wake_out or "")):
+                raise s.AdbError(f"Не удалось запустить Quasar: {str(wake_out).strip()[-300:]}")
+            pid = _quasar_pid_poll(self.adb)
+            if not pid:
+                raise s.AdbError("Quasar не запустился после перезапуска")
+            return {"ok": True, "pid": pid}
+        if callable(original_system):
+            return original_system(self, action)
+        raise s.AdbError("неизвестное действие")
+
+    P.system = max_system
+
     # On Station Max boot/startup, ensure hardware DSP matches the configured profile
     try:
-        from dsp_max import MaxDSP
-        _init_dsp = MaxDSP(s)
-        if _init_dsp.is_supported():
-            _init_dsp.restore_hardware_state()
+        from dsp_max import MaxDSP, TWEETER_SYS, WOOFER_SYS
+        if os.path.exists(WOOFER_SYS) and os.path.exists(TWEETER_SYS):
+            boot_panel = type(
+                "_BootLocalPanel",
+                (),
+                {
+                    "adb": type("_LocalAdb", (), {"is_local": True})(),
+                    "_load_settings": staticmethod(getattr(s, "load_settings", dict)),
+                },
+            )()
+            _init_dsp = MaxDSP(boot_panel)
+            if _init_dsp.is_supported():
+                _init_dsp.restore_hardware_state()
     except Exception:
         pass

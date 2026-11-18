@@ -130,6 +130,7 @@ class Device:
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.wlock = threading.Lock()
         self.streams, self.next_id, self.lock = {}, 1, threading.Lock()
+        self._forwards = set()
         self.max_data, self.banner, self.alive = 4096, "", True
         self._send(_packet(A_CNXN, A_VERSION, MAX_PAYLOAD, b"host::\0"))
         cmd, a0, a1, data = self._read_packet()
@@ -178,7 +179,8 @@ class Device:
         try:
             while True:
                 cmd, a0, a1, data = self._read_packet()
-                st = self.streams.get(a1)
+                with self.lock:
+                    st = self.streams.get(a1)
                 if cmd == A_OKAY and st:
                     st.remote = a0
                     st.opened.set()
@@ -202,6 +204,7 @@ class Device:
                 self.streams.clear()
             for st in streams:
                 st._on_close()
+            self._close_forwards()
 
     def _forget(self, st):
         with self.lock:
@@ -225,6 +228,16 @@ class Device:
             raise AdbError("error: closed")
         return st
 
+    def _close_forwards(self):
+        forwards = getattr(self, "_forwards", None)
+        if not forwards:
+            return
+        with self.lock:
+            items = list(forwards)
+            forwards.clear()
+        for srv in items:
+            _unregister_forward(srv)
+
     def close(self):
         self.alive = False
         try:
@@ -236,6 +249,7 @@ class Device:
             self.streams.clear()
         for st in streams:
             st._on_close()
+        self._close_forwards()
 
 
 # ---------- реестр подключённых устройств (как у сервера adb) ----------
@@ -370,6 +384,7 @@ def pull(dev, remote, local):
 
 
 _forwards, _forwards_lock = [], threading.Lock()
+_forward_owners = {}
 
 
 def _close_socket(sock):
@@ -392,6 +407,16 @@ def _unregister_forward(srv):
             _forwards.remove(srv)
         except ValueError:
             pass
+        owner = _forward_owners.pop(srv, None)
+    if owner is not None:
+        owner_forwards = getattr(owner, "_forwards", None)
+        owner_lock = getattr(owner, "lock", None)
+        if owner_forwards is not None:
+            if owner_lock is not None:
+                with owner_lock:
+                    owner_forwards.discard(srv)
+            else:
+                owner_forwards.discard(srv)
     _close_socket(srv)
 
 
@@ -423,6 +448,11 @@ def forward(dev, remote_port):
         raise
     with _forwards_lock:
         _forwards.append(srv)
+        _forward_owners[srv] = dev
+    dev_forwards = getattr(dev, "_forwards", None)
+    if dev_forwards is not None:
+        with dev.lock:
+            dev_forwards.add(srv)
 
     def pump(conn):
         st = None

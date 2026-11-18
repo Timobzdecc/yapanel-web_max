@@ -290,7 +290,7 @@ def load_config(path):
         identifier = item.get('id','')
         if not isinstance(identifier,str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,39}',identifier) or identifier in result:
             raise ValueError('speaker ids must be unique lowercase URL-safe names')
-        model = item.get('model','lite2')
+        model = item.get('model','max')
         if model not in PROFILES: raise ValueError('unknown model')
         device = item.get('device')
         if not isinstance(device,str) or not device.strip() or any(character.isspace() for character in device):

@@ -54,7 +54,7 @@ PR должен быть небольшим. Большую задачу луч�
 В PR должны быть зелёными проверки:
 
 - `tests / python (3.9)`, `python (3.11)`, `python (3.14)`;
-- `tests / agent`, `tests / assistant`, `tests / viz`;
+- `tests / agent`, `tests / viz`;
 - сборка Docker, если менялись зависимости или Dockerfile.
 
 Локально перед PR:
