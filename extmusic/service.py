@@ -1930,9 +1930,17 @@ class ExtMusicService:
                         self.error = str(error)
 
 
+_SERVICE_LOCK = threading.Lock()
+
+
 def get_service(panel) -> ExtMusicService:
+    """Return the singleton ExtMusicService bound to ``panel`` thread-safely."""
     service = getattr(panel, "_extmusic_service", None)
-    if service is None:
-        service = ExtMusicService(panel)
-        panel._extmusic_service = service
-    return service
+    if service is not None:
+        return service
+    with _SERVICE_LOCK:
+        service = getattr(panel, "_extmusic_service", None)
+        if service is None:
+            service = ExtMusicService(panel)
+            panel._extmusic_service = service
+        return service
