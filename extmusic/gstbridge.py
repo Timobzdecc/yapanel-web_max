@@ -12,7 +12,9 @@ local streaming proxy (http://127.0.0.1:8788/stream.mp4?seek=<sec>).
 from __future__ import annotations
 
 import base64
+import http.client
 import http.server
+import logging
 import os
 import re
 import shlex
@@ -21,11 +23,15 @@ import struct
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import ipv4_urlopen
+from .fast_yt import VISIONOS_USER_AGENT
+
+_log = logging.getLogger("yapanel.gst")
 
 OVERRIDE_PATH = "/data/data/com.yandex.io.sdk/files/override_url.txt"
 PID_TRACK_PATH = "/data/data/com.yandex.io.sdk/files/injected_pid.txt"
@@ -33,10 +39,52 @@ USER_SEEK_FLAG = "/data/data/com.yandex.io.sdk/files/user_seek.txt"
 HOOK_SCRIPT = "/data/local/tmp/hook_location.js"
 FALLBACK_TRACK_ID = "153109827"
 PROXY_PORT = 8788
+_NON_RETRYABLE_HTTP = (400, 401, 404, 410, 416)
 
 
 class GstBridgeError(ValueError):
     pass
+
+
+def _open_range(
+    url: str,
+    start: int,
+    end: Optional[int] = None,
+    attempts: int = 12,
+    timeout: float = 3.0,
+    max_elapsed: Optional[float] = None,
+):
+    """Open an upstream byte-range stream via IPv4, retrying transient stalls and multi-exit 403s."""
+    range_val = f"bytes={start}-{end}" if end is not None else f"bytes={start}-"
+    deadline = (time.monotonic() + max_elapsed) if max_elapsed is not None else None
+    user_agent: Optional[str] = VISIONOS_USER_AGENT
+    last_err: Optional[BaseException] = None
+    total_attempts = max(1, attempts)
+    for attempt in range(total_attempts):
+        req_timeout = timeout
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            if rem <= 0.2 and attempt > 0:
+                break
+            req_timeout = min(timeout, max(0.5, rem))
+        headers = {"Range": range_val}
+        if user_agent is not None:
+            headers["User-Agent"] = user_agent
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            return ipv4_urlopen(req, timeout=req_timeout)
+        except urllib.error.HTTPError as err:
+            if err.code in _NON_RETRYABLE_HTTP:
+                raise
+            last_err = err
+            if err.code == 403:
+                user_agent = None if user_agent is not None else VISIONOS_USER_AGENT
+        except (OSError, TimeoutError, urllib.error.URLError, http.client.HTTPException) as err:
+            last_err = err
+        if attempt + 1 < total_attempts:
+            time.sleep(0.05)
+    assert last_err is not None
+    raise last_err
 
 
 class MP4Streamer:
@@ -52,29 +100,37 @@ class MP4Streamer:
         self._lock = threading.Lock()
         self._parse()
 
+    def _read_range(self, start: int, end: int) -> Tuple[bytes, int]:
+        total_size = 0
+        with _open_range(self.url, start, end, attempts=12, timeout=2.0) as resp:
+            chunk = resp.read()
+            cr = resp.headers.get("Content-Range")
+            if cr and "/" in cr:
+                try:
+                    total_size = int(cr.split("/")[-1])
+                except ValueError:
+                    pass
+        return chunk, total_size
+
     def _parse(self) -> None:
         total_size = 0
+        m = re.search(r"clen=(\d+)", self.url)
+        if m:
+            total_size = int(m.group(1))
         try:
-            m = re.search(r"clen=(\d+)", self.url)
-            if m:
-                total_size = int(m.group(1))
-
-            req = urllib.request.Request(self.url, headers={"Range": "bytes=0-8192"})
-            with ipv4_urlopen(req, timeout=10) as resp:
-                data = resp.read()
-                cr = resp.headers.get("Content-Range")
-                if cr and "/" in cr:
-                    try:
-                        total_size = int(cr.split("/")[-1])
-                    except ValueError:
-                        pass
-        except Exception:
+            data, cr_total = self._read_range(0, 32767)
+            if cr_total:
+                total_size = cr_total
+        except Exception as err:  # noqa: BLE001
+            _log.warning("MP4Streamer initial range failed: %s", err)
             return
 
         offset = 0
         sidx_data = None
         hdr_end = 0
-        while offset < len(data) - 8:
+        while True:
+            if offset + 8 > len(data):
+                break
             size, tag = struct.unpack(">I4s", data[offset:offset + 8])
             tag_str = tag.decode("latin1", "replace")
             if size == 1:
@@ -83,13 +139,34 @@ class MP4Streamer:
                 size = struct.unpack(">Q", data[offset + 8:offset + 16])[0]
             if size < 8:
                 break
+            box_end = offset + size
             if tag_str == "sidx":
-                sidx_data = data[offset:offset + size]
+                if box_end > len(data):
+                    try:
+                        extra, _ = self._read_range(len(data), box_end - 1)
+                        data += extra
+                    except Exception as err:  # noqa: BLE001
+                        _log.warning("MP4Streamer sidx tail fetch failed: %s", err)
+                        return
+                if box_end > len(data):
+                    _log.warning("MP4Streamer sidx truncated (%d > %d)", box_end, len(data))
+                    return
+                sidx_data = data[offset:box_end]
                 hdr_end = offset
                 break
-            offset += size
+            if box_end > len(data) and tag_str in ("moov", "ftyp", "free") and box_end <= 262144:
+                try:
+                    extra, _ = self._read_range(len(data), box_end + 16383)
+                    if not extra:
+                        break
+                    data += extra
+                except Exception as err:  # noqa: BLE001
+                    _log.warning("MP4Streamer header fetch failed: %s", err)
+                    return
+            offset = box_end
 
         if not sidx_data or hdr_end == 0:
+            _log.warning("MP4Streamer sidx box not found (bytes=%d)", len(data))
             return
 
         hdr = data[:hdr_end]
@@ -157,26 +234,87 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
     bridge: Optional[GstBridge] = None
 
     @staticmethod
-    def _patch_tfdt(chunk: bytearray, base_decode_time: int) -> None:
-        if base_decode_time <= 0:
+    def _patch_tfdt_range(chunk: bytearray, start_scan: int, end_scan: int, base_decode_time: int) -> None:
+        if base_decode_time <= 0 or start_scan >= end_scan:
             return
-        pos = 0
-        while True:
-            idx = chunk.find(b'tfdt', pos)
+        pos = start_scan
+        limit = len(chunk)
+        while pos < end_scan:
+            idx = chunk.find(b"tfdt", pos, end_scan)
             if idx == -1:
                 break
-            if idx >= 4:
-                b_sz = struct.unpack(">I", chunk[idx-4:idx])[0]
-                ver = chunk[idx+4]
-                if ver == 0 and b_sz == 16 and idx + 12 <= len(chunk):
-                    dt = struct.unpack(">I", chunk[idx+8:idx+12])[0]
-                    new_dt = max(0, dt - base_decode_time)
-                    struct.pack_into(">I", chunk, idx+8, new_dt)
-                elif ver == 1 and b_sz == 20 and idx + 16 <= len(chunk):
-                    dt = struct.unpack(">Q", chunk[idx+8:idx+16])[0]
-                    new_dt = max(0, dt - base_decode_time)
-                    struct.pack_into(">Q", chunk, idx+8, new_dt)
+            if idx >= 4 and idx + 5 <= limit:
+                b_sz = struct.unpack(">I", chunk[idx - 4:idx])[0]
+                ver = chunk[idx + 4]
+                if ver == 0 and b_sz == 16 and idx + 12 <= limit:
+                    dt = struct.unpack(">I", chunk[idx + 8:idx + 12])[0]
+                    struct.pack_into(">I", chunk, idx + 8, max(0, dt - base_decode_time))
+                elif ver == 1 and b_sz == 20 and idx + 16 <= limit:
+                    dt = struct.unpack(">Q", chunk[idx + 8:idx + 16])[0]
+                    struct.pack_into(">Q", chunk, idx + 8, max(0, dt - base_decode_time))
             pos = idx + 4
+
+    @classmethod
+    def _patch_tfdt(cls, chunk: bytearray, base_decode_time: int) -> None:
+        cls._patch_tfdt_range(chunk, 0, len(chunk), base_decode_time)
+
+    @staticmethod
+    def _extract_clen(url: str) -> int:
+        m = re.search(r"(?:[?&])clen=(\d+)", url)
+        return int(m.group(1)) if m else 0
+
+    @staticmethod
+    def _parse_upstream_sizes(resp: Any, start: int) -> Tuple[int, Optional[int]]:
+        hdrs = getattr(resp, "headers", None) or {}
+        cr = str(hdrs.get("Content-Range") or "")
+        total = 0
+        m = re.search(r"/(\d+)\s*$", cr)
+        if m:
+            total = int(m.group(1))
+        cl_raw = hdrs.get("Content-Length")
+        cl = int(cl_raw) if (cl_raw is not None and str(cl_raw).strip().isdigit()) else None
+        if total <= 0 and cl is not None and cl > 0:
+            total = start + cl
+        return total, cl
+
+    def _stream_upstream(self, upstream: Any, bytes_left: Optional[int], base_decode_time: int) -> int:
+        if base_decode_time <= 0:
+            while bytes_left is None or bytes_left > 0:
+                to_read = 65536 if bytes_left is None else min(65536, bytes_left)
+                raw = upstream.read(to_read)
+                if not raw:
+                    break
+                self.wfile.write(raw)
+                if bytes_left is not None:
+                    bytes_left -= len(raw)
+            return bytes_left if bytes_left is not None else 0
+
+        prefix = b""
+        pending = bytearray()
+        while bytes_left is None or bytes_left > 0:
+            to_read = 65536 if bytes_left is None else min(65536, bytes_left)
+            raw = upstream.read(to_read)
+            if not raw:
+                break
+            if bytes_left is not None:
+                bytes_left -= len(raw)
+            buf = bytearray(prefix)
+            buf.extend(pending)
+            buf.extend(raw)
+            len_prefix = len(prefix)
+            safe_end = max(len_prefix, len(buf) - 20)
+            self._patch_tfdt_range(buf, len_prefix, safe_end, base_decode_time)
+            if safe_end > len_prefix:
+                self.wfile.write(buf[len_prefix:safe_end])
+                prefix = bytes(buf[max(0, safe_end - 4):safe_end])
+            pending = buf[safe_end:]
+        if pending:
+            buf = bytearray(prefix)
+            buf.extend(pending)
+            len_prefix = len(prefix)
+            self._patch_tfdt_range(buf, len_prefix, len(buf), base_decode_time)
+            self.wfile.write(buf[len_prefix:])
+        return bytes_left if bytes_left is not None else 0
 
     def log_message(self, format: str, *args: Any) -> None:
         pass  # Suppress default console clutter
@@ -230,81 +368,143 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if not total_size and segments:
             total_size = segments[-1][1] + segments[-1][2]
-        if not total_size:
-            total_size = 5000000
+        if not total_size and byte_off == 0:
+            total_size = self._extract_clen(upstream_url)
 
-        if byte_off == 0:
-            virtual_total = total_size
-        else:
-            virtual_total = hdr_len + max(0, total_size - byte_off)
+        virtual_total = (
+            hdr_len + max(0, total_size - byte_off)
+            if (byte_off > 0 and total_size > 0)
+            else total_size
+        )
 
         # Parse client Range header
         range_header = self.headers.get("Range", "")
         r_start = 0
-        r_end = virtual_total - 1
-
+        req_end: Optional[int] = None
         if range_header.startswith("bytes="):
-            parts = range_header[6:].split("-")
+            parts = range_header[6:].split("-", 1)
             if parts[0].isdigit():
                 r_start = int(parts[0])
             if len(parts) > 1 and parts[1].isdigit():
-                r_end = min(int(parts[1]), virtual_total - 1)
+                req_end = int(parts[1])
 
-        content_length = max(0, r_end - r_start + 1)
-
-        if range_header:
-            self.send_response(206)
-            self.send_header("Content-Range", f"bytes {r_start}-{r_end}/{virtual_total}")
-        else:
-            self.send_response(200)
-
-        self.send_header("Content-Type", "audio/mp4")
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Length", str(content_length))
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-
-        if head_only:
+        if virtual_total > 0 and r_start >= virtual_total:
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{virtual_total}")
+            self.end_headers()
             return
 
-        cur_vpos = r_start
-        bytes_left = content_length
+        if virtual_total > 0:
+            r_end: Optional[int] = min(req_end, virtual_total - 1) if req_end is not None else (virtual_total - 1)
+        else:
+            r_end = req_end
 
-        try:
-            # 1. Send header part if cur_vpos < hdr_len (for seeked stream)
-            if byte_off > 0 and cur_vpos < hdr_len and bytes_left > 0:
-                hdr_slice = hdr[cur_vpos:min(hdr_len, cur_vpos + bytes_left)]
-                self.wfile.write(hdr_slice)
-                bytes_left -= len(hdr_slice)
-                cur_vpos += len(hdr_slice)
-
-            if bytes_left <= 0:
+        if head_only and virtual_total == 0:
+            try:
+                with _open_range(upstream_url, 0, 0, attempts=8, timeout=1.35, max_elapsed=3.5) as probe:
+                    probe_total, _ = self._parse_upstream_sizes(probe, 0)
+                if probe_total > 0:
+                    virtual_total = probe_total
+                    if r_start >= virtual_total:
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{virtual_total}")
+                        self.end_headers()
+                        return
+                    r_end = min(req_end, virtual_total - 1) if req_end is not None else (virtual_total - 1)
+            except Exception as error:  # noqa: BLE001
+                _log.warning("[GST_PROXY] Upstream probe error: %s", error)
+                self.send_response(502)
+                self.end_headers()
                 return
 
-            # 2. Upstream request for media data
-            if byte_off == 0:
-                upstream_start = cur_vpos
-            else:
-                upstream_start = byte_off + (cur_vpos - hdr_len)
-            upstream_end = upstream_start + bytes_left - 1
+        content_length: Optional[int] = max(0, r_end - r_start + 1) if r_end is not None else None
+        hdr_slice = (
+            hdr[r_start:min(hdr_len, r_start + content_length)]
+            if (byte_off > 0 and content_length is not None and r_start < hdr_len and content_length > 0)
+            else b""
+        )
+        upstream_bytes_left: Optional[int] = (content_length - len(hdr_slice)) if content_length is not None else None
 
-            upstream_req = urllib.request.Request(
-                upstream_url,
-                headers={"Range": f"bytes={upstream_start}-{upstream_end}"}
-            )
-            with ipv4_urlopen(upstream_req, timeout=15) as upstream:
-                while bytes_left > 0:
-                    chunk = bytearray(upstream.read(min(65536, bytes_left)))
-                    if not chunk:
-                        break
-                    if base_decode_time > 0:
-                        self._patch_tfdt(chunk, base_decode_time)
-                    self.wfile.write(chunk)
-                    bytes_left -= len(chunk)
+        upstream = None
+        if not head_only and (upstream_bytes_left is None or upstream_bytes_left > 0):
+            cur_after = r_start + len(hdr_slice)
+            upstream_start = cur_after if byte_off == 0 else byte_off + (cur_after - hdr_len)
+            upstream_end = None if upstream_bytes_left is None else (upstream_start + upstream_bytes_left - 1)
+            try:
+                upstream = _open_range(upstream_url, upstream_start, upstream_end, attempts=12, timeout=1.35, max_elapsed=3.5)
+            except urllib.error.HTTPError as err:
+                if err.code == 416:
+                    self.send_response(416)
+                    if virtual_total > 0:
+                        self.send_header("Content-Range", f"bytes */{virtual_total}")
+                    self.end_headers()
+                    return
+                _log.warning("[GST_PROXY] Upstream open HTTP error: %s", err)
+                self.send_response(502)
+                self.end_headers()
+                return
+            except Exception as error:  # noqa: BLE001
+                _log.warning("[GST_PROXY] Upstream open error: %s", error)
+                self.send_response(502)
+                self.end_headers()
+                return
+
+            if virtual_total == 0 or r_end is None:
+                up_total, up_cl = self._parse_upstream_sizes(upstream, upstream_start)
+                if virtual_total == 0 and up_total > 0 and byte_off == 0:
+                    virtual_total = up_total
+                if byte_off == 0:
+                    if r_end is None:
+                        if up_cl is not None:
+                            r_end = r_start + up_cl - 1
+                        elif virtual_total > 0:
+                            r_end = virtual_total - 1
+                    else:
+                        if virtual_total > 0:
+                            r_end = min(r_end, virtual_total - 1)
+                        if up_cl is not None:
+                            r_end = min(r_end, r_start + up_cl - 1)
+                if r_end is not None:
+                    content_length = max(0, r_end - r_start + 1)
+                    if byte_off == 0:
+                        upstream_bytes_left = content_length
+
+        try:
+            if range_header and r_end is not None:
+                self.send_response(206)
+                total_label = str(virtual_total) if virtual_total > 0 else "*"
+                self.send_header("Content-Range", f"bytes {r_start}-{r_end}/{total_label}")
+            else:
+                self.send_response(200)
+
+            self.send_header("Content-Type", "audio/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            if content_length is not None:
+                self.send_header("Content-Length", str(content_length))
+                self.send_header("Connection", "keep-alive")
+            else:
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            self.end_headers()
+
+            if head_only:
+                return
+            if hdr_slice:
+                self.wfile.write(hdr_slice)
+            if upstream is not None and (upstream_bytes_left is None or upstream_bytes_left > 0):
+                rem = self._stream_upstream(upstream, upstream_bytes_left, base_decode_time)
+                if rem > 0:
+                    self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             print(f"[GST_PROXY] Stream error: {error}", flush=True)
+        finally:
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
 
 
 class _ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -335,6 +535,8 @@ class GstBridge:
         self._paused_pos: float = 0.0
         self._track_duration: float = 0.0
         self.streamer: Optional[MP4Streamer] = None
+        self._streamer_done: threading.Event = threading.Event()
+        self._streamer_done.set()
         self._server: Optional[_ReusableTCPServer] = None
         self._ensure_server()
 
@@ -424,11 +626,12 @@ class GstBridge:
                 self._last_injected_pid = pid
             return True
 
-        # Ensure hook script is in place and verify it exists
+        # Ensure hook script is present and up-to-date on the device
         q_hook = shlex.quote(HOOK_SCRIPT)
+        src_hook = "/data/yapanel/device/extmusic/hook_location.js"
         _, _, hook_rc = self._exec_result(
-            f"if [ ! -f {q_hook} ] && [ -f /data/yapanel/device/extmusic/hook_location.js ]; "
-            f"then cp /data/yapanel/device/extmusic/hook_location.js {q_hook} && chmod 666 {q_hook}; fi; "
+            f"if [ -f {src_hook} ] && {{ [ ! -f {q_hook} ] || ! cmp -s {src_hook} {q_hook}; }}; "
+            f"then cp {src_hook} {q_hook} && chmod 666 {q_hook}; fi; "
             f"[ -f {q_hook} ]"
         )
         if hook_rc != 0:
@@ -466,38 +669,73 @@ class GstBridge:
         if glagol and hasattr(glagol, "send"):
             glagol.send(payload)
 
-    def _write_override(self, url: str) -> None:
+    def _write_device_file(self, path: str, content: str) -> None:
         written = False
         if os.environ.get("PANEL_LOCAL") == "1" or not hasattr(self.panel, "adb"):
             try:
-                os.makedirs("/data/data/com.yandex.io.sdk/files", exist_ok=True)
-                with open(OVERRIDE_PATH, "w", encoding="utf-8") as f:
-                    f.write(url)
-                os.chmod(OVERRIDE_PATH, 0o666)
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.chmod(path, 0o666)
                 written = True
             except Exception:
                 pass
         if not written:
-            b64 = base64.b64encode(url.encode("utf-8")).decode("ascii")
-            self._exec(f"echo -n '{b64}' | base64 -d > {OVERRIDE_PATH} && chmod 666 {OVERRIDE_PATH}")
+            b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+            q_path = shlex.quote(path)
+            self._exec(f"echo -n '{b64}' | base64 -d > {q_path} && chmod 666 {q_path}")
+
+    def _write_override(self, url: str) -> None:
+        self._write_device_file(OVERRIDE_PATH, url)
 
     def _init_streamer(self, url: str) -> None:
         with self._lock:
             gen = self._stream_gen
             cur_url = self._last_url
             is_active = self._is_active
-        if cur_url and cur_url != url:
-            return
+            done_evt = self._streamer_done
         try:
-            streamer = MP4Streamer(url)
-        except Exception as error:
-            print(f"[GST] Failed to parse MP4Streamer: {error}", flush=True)
-            return
-        with self._lock:
-            if self._stream_gen != gen:
+            if cur_url and cur_url != url:
                 return
-            if self._last_url == url or (not self._last_url and not is_active and gen == 0):
-                self.streamer = streamer
+            try:
+                streamer = MP4Streamer(url)
+            except Exception as error:
+                print(f"[GST] Failed to parse MP4Streamer: {error}", flush=True)
+                return
+            if not getattr(streamer, "ready", False):
+                return
+            with self._lock:
+                if self._stream_gen != gen:
+                    return
+                if self._last_url == url or (not self._last_url and not is_active and gen == 0):
+                    # Never overwrite a healthy streamer already resolved by an urgent seek()
+                    if not (self.streamer is not None and getattr(self.streamer, "ready", False)):
+                        self.streamer = streamer
+        finally:
+            done_evt.set()
+
+    def _proxy_url(self, seek_sec: float = 0.0) -> Optional[str]:
+        with self._lock:
+            srv = self._server
+        if srv is None or not getattr(srv, "server_address", None):
+            return None
+        port = int(srv.server_address[1] or 0)
+        if port <= 0:
+            return None
+        return f"http://127.0.0.1:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}"
+
+    def _restart_glagol_playback(self, context: str) -> None:
+        try:
+            self._send_glagol({"command": "stop"})
+        except Exception:
+            pass
+        time.sleep(0.06)
+        try:
+            self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
+        except Exception as error:
+            print(f"[GST] Glagol playMusic failed on {context}: {error}", flush=True)
 
     def play(self, url: str, title: str = "", artist: str = "", duration: int = 0) -> int:
         if not url:
@@ -516,14 +754,15 @@ class GstBridge:
             self._paused_pos = 0.0
             self._seek_start_time = time.time()
             self.streamer = None
+            self._streamer_done = threading.Event()
             self._is_active = True
             self._is_paused = False
 
         # Parse sidx in background thread for instant seek readiness
         threading.Thread(target=self._init_streamer, args=(url,), daemon=True).start()
 
-        # 1. Write target URL to override file with 0666 permissions
-        self._write_override(url)
+        # 1. Route initial playback through local retry proxy when bound (avoids 403 / libsoup stalls)
+        self._write_override(self._proxy_url(0.0) or url)
 
         # 2. Trigger native playback via Glagol
         try:
@@ -536,11 +775,12 @@ class GstBridge:
 
     def pause(self) -> int:
         with self._lock:
-            self._is_paused = True
-            if self._seek_offset_sec > 0:
-                self._paused_pos = self._seek_offset_sec + max(0.0, time.time() - self._seek_start_time)
-            else:
-                self._paused_pos = max(0.0, time.time() - self._seek_start_time) if self._seek_start_time > 0 else 0.0
+            if not self._is_paused:
+                self._is_paused = True
+                if self._seek_offset_sec > 0:
+                    self._paused_pos = self._seek_offset_sec + max(0.0, time.time() - self._seek_start_time)
+                else:
+                    self._paused_pos = max(0.0, time.time() - self._seek_start_time) if self._seek_start_time > 0 else 0.0
         try:
             self._send_glagol({"command": "stop"})
         except Exception:
@@ -569,6 +809,7 @@ class GstBridge:
             self._paused_pos = 0.0
             self._seek_start_time = 0.0
             self.streamer = None
+            self._streamer_done.set()
         self._clear_override()
         return 1
 
@@ -590,50 +831,40 @@ class GstBridge:
             last_url = self._last_url
             streamer = self.streamer
             gen = self._stream_gen
+            done_evt = self._streamer_done
 
-        # If seeking to beginning, reload direct stream
+        # If seeking to beginning, reload via local retry proxy when bound
         if sec <= 0.5:
             with self._lock:
                 self._seek_offset_sec = 0.0
                 self._paused_pos = 0.0
                 self._seek_start_time = time.time()
+                self._is_paused = False
                 last_url = self._last_url
             if not last_url:
                 return 0
-            self._write_override(last_url)
-            try:
-                self._send_glagol({"command": "stop"})
-            except Exception:
-                pass
-            time.sleep(0.06)
-            try:
-                self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
-            except Exception as error:
-                print(f"[GST] Glagol playMusic failed on seek to 0: {error}", flush=True)
+            self._write_override(self._proxy_url(0.0) or last_url)
+            self._restart_glagol_playback("seek to 0")
             return 1
 
-        # Wait for streamer if still parsing
-        if (streamer is None or not streamer.ready) and last_url:
-            if streamer is None:
-                try:
-                    new_streamer = MP4Streamer(last_url)
-                    with self._lock:
-                        if self._stream_gen == gen and self._last_url == last_url and self.streamer is None:
-                            self.streamer = new_streamer
-                        streamer = self.streamer or new_streamer
-                except Exception as error:
-                    print(f"[GST] Failed to create MP4Streamer: {error}", flush=True)
-            if streamer:
-                deadline = time.time() + 2.5
-                while time.time() < deadline:
-                    with self._lock:
-                        if self.streamer is not None:
-                            streamer = self.streamer
-                    if streamer.ready:
-                        break
-                    time.sleep(0.05)
+        # Wait briefly if background init is in flight, then retry MP4Streamer if still unready
+        if (streamer is None or not getattr(streamer, "ready", False)) and not done_evt.is_set():
+            done_evt.wait(timeout=3.5)
+            with self._lock:
+                streamer = self.streamer
 
-        if streamer and streamer.ready and streamer.segments:
+        if (streamer is None or not getattr(streamer, "ready", False)) and last_url:
+            try:
+                new_streamer = MP4Streamer(last_url)
+                if getattr(new_streamer, "ready", False):
+                    with self._lock:
+                        if self._stream_gen == gen and self._last_url == last_url:
+                            self.streamer = new_streamer
+                    streamer = new_streamer
+            except Exception as error:
+                print(f"[GST] Failed to create MP4Streamer: {error}", flush=True)
+
+        if streamer and getattr(streamer, "ready", False) and streamer.segments:
             byte_off, actual_sec, base_decode_time = streamer.get_seek_offset(sec)
             with self._lock:
                 if self._stream_gen != gen:
@@ -641,21 +872,19 @@ class GstBridge:
                 self._seek_offset_sec = actual_sec
                 self._paused_pos = actual_sec
                 self._seek_start_time = time.time()
-            proxy_url = f"http://127.0.0.1:{PROXY_PORT}/stream.mp4?seek={actual_sec}&t={int(time.time())}"
+                self._is_paused = False
+            proxy_url = self._proxy_url(actual_sec) or f"http://127.0.0.1:{PROXY_PORT}/stream.mp4?seek={actual_sec}&t={int(time.time() * 1000)}"
             self._write_override(proxy_url)
             print(f"[GST] Seeking to {sec:.2f}s -> actual {actual_sec:.2f}s (offset {byte_off}, base_dt={base_decode_time}): {proxy_url}", flush=True)
-            try:
-                self._send_glagol({"command": "stop"})
-            except Exception:
-                pass
-            time.sleep(0.06)
-            try:
-                self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
-            except Exception as error:
-                print(f"[GST] Glagol playMusic failed on seek: {error}", flush=True)
+            self._restart_glagol_playback("seek")
             return 1
 
         print(f"[GST] Falling back to Glagol rewind ({sec:.2f}s), streamer={streamer}", flush=True)
+        self._write_device_file(USER_SEEK_FLAG, "1")
+        with self._lock:
+            self._seek_offset_sec = sec
+            self._paused_pos = sec
+            self._seek_start_time = time.time()
         try:
             self._send_glagol({"command": "rewind", "position": sec})
         except Exception:
@@ -684,6 +913,7 @@ class GstBridge:
             effective_pos = paused_pos
         elif is_playing or is_active:
             status = "playing"
+            is_playing = True
             if seek_offset_sec > 0:
                 effective_pos = seek_offset_sec + max(0.0, time.time() - seek_start_time)
             elif seek_start_time > 0:

@@ -1531,8 +1531,7 @@ class ExtMusicService:
         with self.lock:
             if self._is_gst_current():
                 self.gst.seek(position_ms)
-                if position_ms <= 500:
-                    self._ext_started_at = time.time()
+                self._ext_started_at = time.time()
             elif self._is_native_current():
                 duration = int((self.native.status().get("duration") or 0))
                 if not duration:
