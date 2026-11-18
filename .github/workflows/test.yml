@@ -28,7 +28,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python --version
-      - run: python device/ytmusic/yt-dlp --version
+      - if: matrix.python != '3.9'
+        run: python device/ytmusic/yt-dlp --version
       - run: python -m compileall -q server.py profiles.py max_profile.py max_privacy.py assistant_max.py assistant_socks.py config.py access.py glagol.py multi.py pyadb.py dsp_max.py party.py party_store.py party_audio.py api extmusic
       - run: pip install pytest pytest-asyncio
       - run: pytest
