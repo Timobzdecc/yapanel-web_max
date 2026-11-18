@@ -17,3 +17,5 @@ install_to_max.ps1 linguist-generated
 /tests export-ignore
 /docs export-ignore
 /.github export-ignore
+device/ytmusic/yt-dlp binary
+device/extmusic/*.dex binary

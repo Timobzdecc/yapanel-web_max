@@ -25,7 +25,7 @@ def test_remote_quasar_dir_parameterization(clean_env):
 def test_remote_yam_directories_defaults():
     """Verify YAM package manager paths are configured with defaults."""
     cfg = load_config()
-    assert cfg.remote.yam_dir == "/data/quazar/yam"
+    assert cfg.remote.yam_dir == "/data/quasar/yam"
     assert cfg.remote.yam2_root == "/data/yam"
 
 

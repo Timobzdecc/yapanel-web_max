@@ -23,8 +23,6 @@ PROFILES = {
     ),
 }
 
-TRIAL_FEATURES = ("assistant", "scenes", "alarm", "anims", "sounds", "say", "yam2", "btout", "btpower", "privacy", "viz")
-
 
 def install(s, model='max', auto=False):
     """Install hardware profile adapter for Station Max."""

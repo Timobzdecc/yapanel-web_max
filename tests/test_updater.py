@@ -23,7 +23,7 @@ class FakeResponse:
         return self.payload
 
 
-def release_payload(tag="v0.4.0", published="2026-11-06T00:00:00Z"):
+def release_payload(tag="v9.9.0", published="2026-11-06T00:00:00Z"):
     return {
         "tag_name": tag,
         "published_at": published,
@@ -51,10 +51,10 @@ def test_check_returns_latest_release_and_update_flag(monkeypatch):
     result = updater.check(refresh=True)
 
     assert result["install"] in ("zip", "git", "docker", "android")
-    assert result["latest"] == "0.4.0"
+    assert result["latest"] == "9.9.0"
     assert result["latest_date"] == "2026-11-06"
     assert result["update"] is True
-    assert result["url"].endswith("/v0.4.0")
+    assert result["url"].endswith("/v9.9.0")
     assert "disabled" not in result
     assert "error" not in result
     assert calls and calls[0][0].endswith("/releases/latest")
@@ -113,10 +113,25 @@ def test_check_keeps_last_successful_release_on_refresh_error(monkeypatch):
     monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
     updater = server.PanelUpdater()
     first = updater.check(refresh=True)
-    assert first["latest"] == "0.4.0"
+    assert first["latest"] == "9.9.0"
 
     state["fail"] = True
     second = updater.check(refresh=True)
-    assert second["latest"] == "0.4.0"
+    assert second["latest"] == "9.9.0"
     assert second["update"] is True
     assert "error" in second
+
+
+def test_current_version_does_not_prompt_downgrade_to_v0312(monkeypatch):
+    def fake_urlopen(request, timeout=0):
+        return FakeResponse(release_payload(tag="v0.3.12", published="2026-11-12T10:46:50Z"))
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", fake_urlopen)
+    updater = server.PanelUpdater()
+    result = updater.check(refresh=True)
+
+    assert not server.PanelUpdater._newer("0.3.12", server.VERSION)
+    assert server.PanelUpdater._newer(server.VERSION, "0.3.12")
+    assert result["version"] == server.VERSION
+    assert result["latest"] == "0.3.12"
+    assert result["update"] is False

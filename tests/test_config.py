@@ -74,6 +74,7 @@ def test_default_initialization():
     # Remote defaults
     assert cfg.remote.web_dir == "/data/quasar/webpanel"
     assert cfg.remote.quasar_dir == "/system/vendor/quasar"
+    assert cfg.remote.yam_dir == "/data/quasar/yam"
     assert cfg.remote.yam_port == 8099
     assert cfg.remote.wake_port == 8780
     assert cfg.remote.wake_data_dir == "/data/wakeword"
@@ -192,14 +193,13 @@ def test_path_resolution_and_derivation():
         cfg.resolve_paths()
 
         assert custom_dir.is_dir()
-        resolved_dir = custom_dir.resolve()
-        assert cfg.server.auth_file == resolved_dir / ".yandex_auth.json"
-        assert cfg.server.panel_auth_file == resolved_dir / ".panel_auth.json"
-        assert cfg.server.metrics_file == resolved_dir / ".metrics.json"
-        assert cfg.server.tls_dir == resolved_dir / ".tls"
-        assert cfg.server.settings_file == resolved_dir / ".panel_settings.json"
-        assert cfg.server.agent_file == resolved_dir / ".agent.json"
-        assert cfg.server.journal_file == resolved_dir / ".panel_journal.jsonl"
+        assert cfg.server.auth_file == custom_dir / ".yandex_auth.json"
+        assert cfg.server.panel_auth_file == custom_dir / ".panel_auth.json"
+        assert cfg.server.metrics_file == custom_dir / ".metrics.json"
+        assert cfg.server.tls_dir == custom_dir / ".tls"
+        assert cfg.server.settings_file == custom_dir / ".panel_settings.json"
+        assert cfg.server.agent_file == custom_dir / ".agent.json"
+        assert cfg.server.journal_file == custom_dir / ".panel_journal.jsonl"
 
 
 def test_malformed_json_handling():
@@ -260,13 +260,13 @@ def test_legacy_flat_json_loading():
         settings_file = tdp / ".panel_settings.json"
         settings_file.write_text(json.dumps({
             "device": "192.168.1.50:5555",
-            "model": "station2",
+            "model": "max",
             "eq_preset": "flat"
         }), encoding="utf-8")
 
         cfg = PanelConfig.load(settings_path=tdp, env={})
         assert cfg.device.serial == "192.168.1.50:5555"
-        assert cfg.device.model == "station2"
+        assert cfg.device.model == "max"
 
 
 def test_structured_json_loading():

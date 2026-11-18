@@ -194,4 +194,17 @@ class HTTPSRecoveryTests(unittest.TestCase):
                     tls.shutdown.assert_called_once()
                     tls.server_close.assert_called_once()
 
+class LoadConfigTests(unittest.TestCase):
+    def test_load_config_defaults_to_max_and_validates_example(self):
+        root = Path(__file__).resolve().parents[1]
+        example = gateway.load_config(root / 'speakers.example.json')
+        self.assertTrue(example)
+        self.assertTrue(all(spec['model'] == 'max' for spec in example.values()))
+        with tempfile.TemporaryDirectory() as directory:
+            cfg_path = Path(directory) / 'speakers.json'
+            cfg_path.write_text(json.dumps({'speakers': [{'id': 'room', 'device': '192.168.1.50:5555'}]}), encoding='utf8')
+            loaded = gateway.load_config(cfg_path)
+            self.assertEqual(loaded['room']['model'], 'max')
+            self.assertEqual(loaded['room']['name'], 'Станция Макс')
+
 if __name__=='__main__':unittest.main(verbosity=2)

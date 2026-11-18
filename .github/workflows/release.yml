@@ -21,21 +21,19 @@ jobs:
           test "${GITHUB_REF_NAME#v}" = "$(cat VERSION)" || { echo "метка $GITHUB_REF_NAME, а в VERSION $(cat VERSION)"; exit 1; }
       - uses: actions/setup-go@v5
         with:
-          go-version-file: device/assistant/go.mod
+          go-version-file: device/viz/go.mod
       - name: Сборка
         run: |
           VER="${GITHUB_REF_NAME#v}"
           [ "$GITHUB_REF_TYPE" = tag ] || VER="dev-${GITHUB_SHA::7}"
           .github/build-windows-zip.sh "$VER" amd64 dist
           .github/build-windows-zip.sh "$VER" arm64 dist
-          # программа помощника для колонки: панель без Go скачивает её с релиза и сверяет SHA256SUMS
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go -C device/assistant build -trimpath \
-            -ldflags "-s -w -X main.version=$VER" -o "$PWD/dist/assistantd-linux-arm64" .
+          # бинарники для колонки (агент и визуализатор): панель без Go скачивает их с релиза и сверяет SHA256SUMS
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go -C device/agent build -trimpath \
             -ldflags "-s -w -X main.version=$VER" -o "$PWD/dist/yapanel-agent-linux-arm64" .
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go -C device/viz build -trimpath \
             -ldflags "-s -w -X main.version=$VER" -o "$PWD/dist/vizd-linux-arm64" .
-          (cd dist && sha256sum assistantd-linux-arm64 yapanel-agent-linux-arm64 vizd-linux-arm64 > SHA256SUMS)
+          (cd dist && sha256sum yapanel-agent-linux-arm64 vizd-linux-arm64 > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -56,7 +54,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           NOTES_FILE="${{ steps.notes.outputs.file }}"
-          ASSETS="dist/*.zip dist/assistantd-linux-arm64 dist/yapanel-agent-linux-arm64 dist/vizd-linux-arm64 dist/SHA256SUMS"
+          ASSETS="dist/*.zip dist/yapanel-agent-linux-arm64 dist/vizd-linux-arm64 dist/SHA256SUMS"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" $ASSETS --clobber
             if [ -n "$NOTES_FILE" ]; then

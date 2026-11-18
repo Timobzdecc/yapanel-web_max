@@ -415,6 +415,10 @@ class MaxDSP:
                     values[token] = " ".join(tail)
         return values
 
+    def _is_local(self) -> bool:
+        """Return True when local sysfs endpoints exist or ADB runs locally."""
+        return (os.path.exists(WOOFER_SYS) and os.path.exists(TWEETER_SYS)) or bool(getattr(self.adb, "is_local", False))
+
     @_serialized_hardware
     def verify_registers(self) -> Optional[bool]:
         """True — регистры совпадают, False — явное расхождение, None — нет read-back."""
@@ -426,8 +430,7 @@ class MaxDSP:
             by_target.setdefault(target, []).append((reg, value))
 
         texts: Dict[str, str] = {}
-        is_local = os.path.exists(WOOFER_SYS) and os.path.exists(TWEETER_SYS)
-        if is_local:
+        if self._is_local():
             for target in by_target:
                 try:
                     with open(target, "r", errors="replace") as f:
@@ -663,9 +666,7 @@ class MaxDSP:
         Execute I2C write batch commands with soft-mute zero-cross ramp to prevent clicks/pops.
         commands: list of (target_sysfs_path, addr_hex, payload_str)
         """
-        is_local = (os.path.exists(WOOFER_SYS) and os.path.exists(TWEETER_SYS)) or getattr(self.adb, "is_local", False)
-
-        if is_local:
+        if self._is_local():
             try:
                 for target_path, addr, payload in commands:
                     if target_path == "__SLEEP__":
@@ -751,6 +752,7 @@ class MaxDSP:
             self.filters = {k: False for k in self.filters}
             self.params["bass_gain"] = 0.0
             self.params["treble_gain"] = 0.0
+            self.params["subsonic_freq"] = 48
 
         elif profile_name == "hifi":
             # Golden Hi-Fi calibration
@@ -796,6 +798,7 @@ class MaxDSP:
                 "treble": False,
                 "drc_bypass": cur_drc,
             }
+            self.params["bass_gain"] = 0.0
             self.params["subsonic_freq"] = 65
             self.params["treble_gain"] = -2.5
 

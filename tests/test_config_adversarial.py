@@ -394,7 +394,7 @@ class TestPrecedenceConflicts:
             https_port=None,
             data_dir=None,
             device="192.168.1.50:5555",
-            model="mini3",
+            model="max",
             find=None,
             open=True,
         )
@@ -405,7 +405,7 @@ class TestPrecedenceConflicts:
         assert cfg.server.host == "127.0.0.2"
         assert cfg.server.port == 9200
         assert cfg.device.serial == "192.168.1.50:5555"
-        assert cfg.device.model == "mini3"
+        assert cfg.device.model == "max"
         assert cfg.server.open_browser is True
 
     def test_cli_open_store_true_default_does_not_stomp_env(self):

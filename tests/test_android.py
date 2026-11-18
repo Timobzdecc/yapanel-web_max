@@ -27,11 +27,25 @@ class Restart(unittest.TestCase):
 
 
 class Packaging(unittest.TestCase):
-    def test_midi_runtime_is_in_android_assets(self):
+    def test_max_runtime_and_dirs_are_in_android_assets(self):
         root = Path(__file__).resolve().parents[1]
-        gradle = (root / 'android/app/build.gradle.kts').read_text()
-        files = gradle.split('val panelFiles = listOf(', 1)[1].split(')', 1)[0]
-        self.assertIn('"midi.py"', files)
+        gradle = (root / 'android/app/build.gradle.kts').read_text(encoding='utf-8')
+        files_block = gradle.split('val panelFiles = listOf(', 1)[1].split(')', 1)[0]
+        self.assertNotIn('"midi.py"', files_block)
+        self.assertNotIn('"managed_yam.py"', files_block)
+        expected_files = (
+            "server.py", "config.py", "access.py", "agent.py", "glagol.py",
+            "profiles.py", "max_profile.py", "max_privacy.py", "dsp_max.py",
+            "assistant_max.py", "assistant_socks.py", "party.py", "party_store.py",
+            "party_audio.py", "multi.py", "pyadb.py", "VERSION", "LICENSE", "README.md",
+        )
+        for name in expected_files:
+            self.assertIn(f'"{name}"', files_block)
+            self.assertTrue((root / name).is_file(), f"Missing packaged file: {name}")
+        copy_block = gradle.split('val copyPanel by tasks.registering(Sync::class)', 1)[1]
+        for directory in ("api", "extmusic", "static", "device"):
+            self.assertIn(f'"{directory}/**"', copy_block)
+            self.assertTrue((root / directory).is_dir(), f"Missing packaged dir: {directory}")
 
 
 if __name__ == "__main__":

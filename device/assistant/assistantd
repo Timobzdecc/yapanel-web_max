@@ -7,7 +7,18 @@ fi
 SCRIPT_DIR="$(dirname "$0")"
 # Одинаковый CA bundle для запуска через boot hook и Python worker.
 # Не переопределяем сертификат, явно заданный вызывающей стороной.
-if [ -z "${SSL_CERT_FILE:-}" ] && [ -r /data/yapanel/certs/cacert.pem ]; then
-    export SSL_CERT_FILE=/data/yapanel/certs/cacert.pem
+if [ -z "${SSL_CERT_FILE:-}" ]; then
+    for ca in /data/etc/ssl/cert.pem /data/yapanel/certs/cacert.pem; do
+        if [ -s "$ca" ] && [ -r "$ca" ]; then
+            export SSL_CERT_FILE="$ca"
+            break
+        fi
+    done
+fi
+if [ -z "${REQUESTS_CA_BUNDLE:-}" ] && [ -n "${SSL_CERT_FILE:-}" ]; then
+    export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+fi
+if [ -z "${YAPANEL_URL:-}" ]; then
+    export YAPANEL_URL="http://127.0.0.1:8765"
 fi
 exec "$PYTHON" "$SCRIPT_DIR/assistant_max.py" "$@"

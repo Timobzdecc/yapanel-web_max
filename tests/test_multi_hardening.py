@@ -81,7 +81,7 @@ class GatewayHardeningTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        gateway.DEVICES[DEVICE] = {"name": "Hardening", "model": "station2"}
+        gateway.DEVICES[DEVICE] = {"name": "Hardening", "model": "max"}
         cls.worker = ThreadingHTTPServer(("127.0.0.1", 0), EchoWorker)
         gateway.DEVICES[DEVICE]["port"] = cls.worker.server_port
         HardeningGateway.data_dir = Path(cls.tmp.name)
@@ -301,7 +301,7 @@ class GatewayHardeningTests(unittest.TestCase):
              patch.object(gateway.subprocess, "Popen", side_effect=fake_popen), \
              patch.object(gateway.secrets, "token_urlsafe", return_value="gateway-secret"):
             workers = gateway.Workers(
-                {"speaker": {"device": "1.2.3.4:5555", "model": "lite2"}},
+                {"speaker": {"device": "1.2.3.4:5555", "model": "max"}},
                 Path(directory), timeout=2, cookie_name="panel_sid")
             self.assertEqual(workers.start(), "gateway-secret")
             workers.stop()
