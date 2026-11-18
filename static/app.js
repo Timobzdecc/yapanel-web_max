@@ -4551,13 +4551,20 @@ document.addEventListener('click', e => {
     return res;
   }, 'Включаю');
 });
+let muSeekTimer = null;
 document.addEventListener('input', e => {
-  if (e.target.matches('input.mu-seek')) { mu.seeking = true; $$('.mu-pos').forEach(x => x.textContent = fmtDur(+e.target.value)); }
+  if (e.target.matches('input.mu-seek')) { clearTimeout(muSeekTimer); mu.seeking = true; $$('.mu-pos').forEach(x => x.textContent = fmtDur(+e.target.value)); }
   if (e.target.matches('input.mu-vol')) { mu.volSet = Date.now(); $$('.mu-vol-v').forEach(x => x.textContent = e.target.value); unmuteUi(+e.target.value); }
 });
 document.addEventListener('change', e => {
-  if (e.target.matches('input.mu-seek'))
-    muCmd(null, { command: 'rewind', position: +e.target.value }).finally(() => setTimeout(() => mu.seeking = false, 800));
+  if (e.target.matches('input.mu-seek')) {
+    clearTimeout(muSeekTimer);
+    muSeekTimer = setTimeout(() => { mu.seeking = false; }, 10000);
+    muCmd(null, { command: 'rewind', position: +e.target.value }).finally(() => {
+      clearTimeout(muSeekTimer);
+      muSeekTimer = setTimeout(() => { mu.seeking = false; }, 800);
+    });
+  }
   if (e.target.matches('input.mu-vol')) { mu.volSet = Date.now(); act(null, () => api('/api/volume', { level: +e.target.value })); }
 });
 async function sendAlice(form, submitter) {

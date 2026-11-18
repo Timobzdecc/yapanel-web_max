@@ -1,19 +1,14 @@
 var LIB_GST = 'libquasar_gstreamer.so';
 var logPath = '/data/data/com.yandex.io.sdk/files/gst_prop_log.txt';
 var overridePath = '/data/data/com.yandex.io.sdk/files/override_url.txt';
-
-var logFile = null;
-try {
-  logFile = new File(logPath, 'a');
-} catch(e) {}
+var userSeekFlagPath = '/data/data/com.yandex.io.sdk/files/user_seek.txt';
 
 function writeLog(str) {
-  if (logFile) {
-    try {
-      logFile.write(str);
-      logFile.flush();
-    } catch(e) {}
-  }
+  try {
+    var f = new File(logPath, 'a');
+    f.write(str);
+    f.close();
+  } catch (e) {}
 }
 
 function getOverrideUrl() {
@@ -24,70 +19,103 @@ function getOverrideUrl() {
     if (url.length > 10) {
       return url;
     }
-  } catch(e) {}
+  } catch (e) {}
   return null;
+}
+
+function checkAndClearUserSeekFlag() {
+  try {
+    var f = new File(userSeekFlagPath, 'r');
+    var content = f.readText(16);
+    f.close();
+    if (content && content.indexOf('1') !== -1) {
+      try {
+        var fw = new File(userSeekFlagPath, 'w');
+        fw.write('0');
+        fw.close();
+      } catch (e) {}
+      return true;
+    }
+  } catch (e) {}
+  return false;
 }
 
 var isAttached = false;
 
-function attachHook(setPropAddr) {
-  if (isAttached) return;
+function attachHooks() {
+  if (isAttached) return true;
+
+  var parseLaunchAddr = Module.findExportByName(LIB_GST, 'gst_parse_launch');
+  var seekAddr = Module.findExportByName(LIB_GST, 'gst_element_seek');
+  var seekSimpleAddr = Module.findExportByName(LIB_GST, 'gst_element_seek_simple');
+
+  if (!parseLaunchAddr) {
+    return false;
+  }
   isAttached = true;
 
-  var g_value_get_string_addr = Module.findExportByName(LIB_GST, 'g_value_get_string');
-  var g_value_set_string_addr = Module.findExportByName(LIB_GST, 'g_value_set_string');
-
-  if (!g_value_get_string_addr || !g_value_set_string_addr) {
-    writeLog('WARN: g_value string functions not found\n');
-    return;
-  }
-
-  var g_value_get_string = new NativeFunction(g_value_get_string_addr, 'pointer', ['pointer']);
-  var g_value_set_string = new NativeFunction(g_value_set_string_addr, 'void', ['pointer', 'pointer']);
-
-  Interceptor.attach(setPropAddr, {
+  // 1. Hook gst_parse_launch: replace stream location and strip aesctrdec for external URLs
+  Interceptor.attach(parseLaunchAddr, {
     onEnter: function(args) {
       try {
-        var propNamePtr = args[1];
-        if (!propNamePtr.isNull()) {
-          var propName = propNamePtr.readUtf8String();
-          if (propName === 'location' || propName === 'uri') {
-            var valGVal = args[2];
-            var origUrlPtr = g_value_get_string(valGVal);
-            var origUrl = (!origUrlPtr.isNull()) ? origUrlPtr.readUtf8String() : '';
-            var override = getOverrideUrl();
+        if (args[0].isNull()) return;
+        var str = args[0].readUtf8String();
+        var override = getOverrideUrl();
 
-            if (override && origUrl.indexOf('googlevideo') === -1) {
-              writeLog('[NATIVE_INJECT] Overriding location: ' + origUrl.substr(0, 50) + ' -> ' + override.substr(0, 60) + '...\n');
-              var newStrPtr = Memory.allocUtf8String(override);
-              g_value_set_string(valGVal, newStrPtr);
-            } else {
-              writeLog('[NATIVE_INJECT] Pass-through location -> ' + origUrl.substr(0, 60) + '...\n');
-            }
-          }
+        if (override && str.indexOf('yio_souphttpsrc') !== -1) {
+          var modified = str;
+          modified = modified.replace(/alt-locations="[^"]*"\s*/g, '');
+          modified = modified.replace(/location="[^"]*"/g, 'location="' + override + '"');
+          modified = modified.replace(/!\s*aesctrdec\s+key=[0-9a-fA-F]+\s*!/g, '!');
+          writeLog('[GST_PARSE_LAUNCH] External URL -> ' + override.substr(0, 120) + '\n');
+          this.pipePtr = Memory.allocUtf8String(modified);
+          args[0] = this.pipePtr;
+        } else if (override && str.indexOf('filesrc') !== -1) {
+          var modFile = str.replace(
+            /filesrc\s+location="[^"]*"\s*!\s*aesctrdec\s+key=[0-9a-fA-F]+\s*!/g,
+            'souphttpsrc location="' + override + '" name=yio_souphttpsrc !'
+          );
+          writeLog('[GST_PARSE_LAUNCH] External filesrc -> ' + override.substr(0, 120) + '\n');
+          this.pipePtr = Memory.allocUtf8String(modFile);
+          args[0] = this.pipePtr;
         }
-      } catch(e) {
-        writeLog('set_prop err: ' + e + '\n');
+      } catch (e) {
+        writeLog('[GST_PARSE_LAUNCH] Error: ' + e + '\n');
       }
     }
   });
 
-  writeLog('NATIVE INJECTION HOOK ATTACHED\n');
-}
-
-function tryAttach() {
-  var addr = Module.findExportByName(LIB_GST, 'g_object_set_property');
-  if (addr) {
-    attachHook(addr);
-    return true;
+  // 2. Hook gst_element_seek: absorb Yandex startup seeks on external tracks; allow explicit fallback user seeks
+  if (seekAddr && seekSimpleAddr) {
+    var realSeekSimple = new NativeFunction(seekSimpleAddr, 'int', ['pointer', 'int', 'int', 'int64']);
+    Interceptor.replace(seekAddr, new NativeCallback(function(elem, rate, format, flags, startType, startPos, stopType, stopPos) {
+      var override = getOverrideUrl();
+      if (override) {
+        if (!checkAndClearUserSeekFlag()) {
+          writeLog('[GST_SEEK] Absorbed internal seek startPos=' + startPos + '\n');
+          return 1;
+        }
+        writeLog('[GST_SEEK] User seek startPos=' + startPos + '\n');
+        var res = realSeekSimple(elem, 3, 5, startPos);
+        if (res === 0) {
+          res = realSeekSimple(elem, 3, 1, startPos);
+        }
+        writeLog('[GST_SEEK] realSeekSimple returned ' + res + '\n');
+        return res !== 0 ? 1 : 0;
+      }
+      return realSeekSimple(elem, format, flags, startPos);
+    }, 'int', ['pointer', 'double', 'int', 'int', 'int', 'int64', 'int', 'int64']));
+    writeLog('[GST_SEEK] Hooked gst_element_seek via realSeekSimple\n');
   }
-  return false;
+
+  writeLog('NATIVE INJECTION HOOKS ATTACHED\n');
+  return true;
 }
 
-if (!tryAttach()) {
-  var intervalId = setInterval(function() {
-    if (tryAttach()) {
-      clearInterval(intervalId);
+if (!attachHooks()) {
+  var checkTimer = setInterval(function() {
+    if (attachHooks()) {
+      clearInterval(checkTimer);
     }
-  }, 250);
+  }, 500);
 }
