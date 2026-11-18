@@ -201,3 +201,8 @@ def register(router: Router):
         track=r.data.get("track"),
         browse_id=str(r.data.get("browse_id") or ""),
     ))
+    router.post("/api/extmusic/yt/mix", lambda r: service(r).yt_mix_play(
+        name=str(r.data.get("name") or r.data.get("query") or ""),
+        index=r.data.get("index"),
+        browse_id=str(r.data.get("browse_id") or ""),
+    ))
