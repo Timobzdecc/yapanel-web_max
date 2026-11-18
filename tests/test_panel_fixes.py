@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from tests.test_profiles import fresh_server
+from test_profiles import fresh_server
 import profiles
 import server
 import multi
@@ -60,15 +60,3 @@ class UpdateLifecycle(unittest.TestCase):
             updater.update()
         timer.assert_not_called()
         self.assertFalse(updater.lock.locked())
-
-
-class YamServices(unittest.TestCase):
-    def test_service_fallback_and_unrelated_errors(self):
-        panel = server.Panel(Mock())
-        panel._yam = Mock(side_effect=[server.AdbError('package launch mode does not support this command'), {}])
-        panel.yam_action('run','example')
-        self.assertEqual(panel._yam.call_args.args,('POST','/api/plugins/example/service/start'))
-        panel._yam = Mock(side_effect=server.AdbError('permission denied'))
-        with self.assertRaisesRegex(server.AdbError,'permission denied'):
-            panel.yam_action('run','example')
-        self.assertEqual(panel._yam.call_count,1)

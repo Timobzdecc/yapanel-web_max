@@ -25,18 +25,17 @@ def panel(shell):
 class Detect(unittest.TestCase):
     def test_platforms_like_install_sh(self):
         d = server.Panel.yam2_detect
-        self.assertEqual(d("yandex,plum-evt2\nyandex,plum\namlogic, axg"), "plum")
-        self.assertEqual(d("Yandex,Station-Mini2\namlogic,axg"), "yandexmini_2")
-        self.assertEqual(d("yandex,bergamot"), "bergamot")
-        self.assertEqual(d("yandex,station-micro\namlogic,axg"), "yandexmicro")
-        self.assertEqual(d("amlogic,axg"), "yandexmini")
+        self.assertEqual(d("yandexstation_2\namlogic,g12a"), "yandexstation_2")
+        self.assertEqual(d("Yandex,Station-Max\namlogic,g12a"), "yandexstation_2")
+        self.assertIsNone(d("yandex,plum-evt2\nyandex,plum\namlogic, axg"))
+        self.assertIsNone(d("yandex,bergamot"))
         self.assertIsNone(d("something,else"))
 
     def test_installed_platform_wins(self):
-        p = panel(lambda cmd, **kw: ("bergamot\n@\nyandex,plum\n", "", 0))
-        self.assertEqual(p.yam2_platform(), "bergamot")
-        p = panel(lambda cmd, **kw: ("@\nyandex,plum\n", "", 0))
-        self.assertEqual(p.yam2_platform(), "plum")
+        p = panel(lambda cmd, **kw: ("yandexstation_2\n@\nyandexstation_2\n", "", 0))
+        self.assertEqual(p.yam2_platform(), "yandexstation_2")
+        p = panel(lambda cmd, **kw: ("@\nyandex,station-max\n", "", 0))
+        self.assertEqual(p.yam2_platform(), "yandexstation_2")
 
 
 class Names(unittest.TestCase):
@@ -53,7 +52,7 @@ class Catalog(unittest.TestCase):
     def test_tls_error_is_explained(self):
         p = server.Panel(Mock())
         p.yam2_status = lambda: {"registries": [{"name": "official", "url": "https://repo.yse.wtf/v2"}],
-                                 "platform": "cucumber"}
+                                 "platform": "yandexstation_2"}
         err = urllib.error.URLError(ssl.SSLError("EOF"))
         with patch("server.urllib.request.urlopen", side_effect=err), \
              patch("server.time.sleep", return_value=None):
@@ -73,9 +72,9 @@ class Services(unittest.TestCase):
         if "webpanel_yam2_yam~luna~luna.pid" in cmd and "boot" in cmd:
             return ("run:yam~luna~luna\n", "", 0)
         if "YAM_PLATFORM=" in cmd:
-            return ("plum\n@\n", "", 0)
-        if "platforms/plum.yaml" in cmd:
-            return ("id: plum\npaths:\n  root: /data/yam\n  etc: /data/yam/etc\n  var: /data/yam/var\n  run: /tmp/yam\n", "", 0)
+            return ("yandexstation_2\n@\n", "", 0)
+        if "platforms/yandexstation_2.yaml" in cmd:
+            return ("id: yandexstation_2\npaths:\n  root: /data/yam\n  etc: /data/yam/etc\n  var: /data/yam/var\n  run: /tmp/yam\n", "", 0)
         return ("", "", 0)
 
     def test_parse_skips_bad_names(self):
@@ -127,7 +126,7 @@ class Install(unittest.TestCase):
              "digest": "sha256:" + digest}]}
 
     def test_bad_checksum_never_pushes(self):
-        p = panel(lambda cmd, **kw: ("@\nyandex,plum\n", "", 0))
+        p = panel(lambda cmd, **kw: ("@\nyandexstation_2\n", "", 0))
         p._yam2_releases = lambda refresh=False: [self.release("0" * 64)]
         p._yam2_sums = {}
         bodies = [io.BytesIO(("0" * 64 + "  yam-aarch64-unknown-linux-musl\n").encode()), io.BytesIO(b"evil")]
@@ -143,7 +142,7 @@ class Install(unittest.TestCase):
 
         def shell(cmd, **kw):
             if "YAM_PLATFORM=" in cmd:
-                return ("@\nyandex,plum\n", "", 0)
+                return ("@\nyandexstation_2\n", "", 0)
             if "sha256sum /data/yam/bin/yam.new" in cmd:
                 return (digest + "  /data/yam/bin/yam.new", "", 0)
             if "df -k" in cmd:
@@ -155,19 +154,19 @@ class Install(unittest.TestCase):
         p._yam2_sums = {}
         p.yam2_status = lambda refresh=False: {"installed": True}
         bodies = [io.BytesIO((digest + "  yam-aarch64-unknown-linux-musl\n").encode()), io.BytesIO(blob),
-                  io.BytesIO(b"id: plum\narch: aarch64\n")]
+                  io.BytesIO(b"id: yandexstation_2\narch: aarch64\n")]
         with patch.object(server.urllib.request, "urlopen", side_effect=bodies):
             res = p.yam2_install()
         self.assertEqual(res["installed_tag"], "yam-v0.2.2")
         self.assertEqual(pushed["/data/yam/bin/yam.new"], blob)
         wrapper = pushed["/data/yam/bin/yam-run.new"].decode()
-        self.assertIn("export YAM_PLATFORM='plum'\n", wrapper)
+        self.assertIn("export YAM_PLATFORM='yandexstation_2'\n", wrapper)
         self.assertIn("export YAM_PROFILES='/data/yam/platforms'\n", wrapper)   # по ней узнаёт себя install.sh --uninstall
         self.assertNotIn("\r", wrapper)
         cmds = " ".join(c.args[0] for c in p.adb.shell.call_args_list)
         self.assertNotIn("/usr/bin", cmds)
         self.assertNotIn("remount", cmds)
-        self.assertNotIn("/data/quazar/yam", cmds.replace("pidof yamd", ""))
+        self.assertNotIn("/data/quazar/yam", cmds)
 
 
 class Hook(unittest.TestCase):

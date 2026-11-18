@@ -222,7 +222,7 @@ class SecurityConfig:
 class RemotePathsConfig:
     web_dir: str = "/data/quasar/webpanel"
     quasar_dir: str = "/system/vendor/quasar"
-    yam_dir: str = "/data/quazar/yam"
+    yam_dir: str = "/data/quasar/yam"
     yam2_root: str = "/data/yam"
     yam_port: int = 8099
     yam_registry_url: str = "https://raw.githubusercontent.com/nyakokitsu/yapkg/registry/index.json"

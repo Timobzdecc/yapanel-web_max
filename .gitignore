@@ -38,6 +38,8 @@ device/assistant/build/
 .assistantd-*
 device/agent/build/
 device/viz/build/
+# ExtMusicPlayer DEX build output (the committed DEX is the release artifact)
+device/extmusic/build/
 .yapanel-agent-*
 
 # локальные настройки Command Code
@@ -48,3 +50,9 @@ device/viz/build/
 tools/
 *.zip
 yapanel_max.tar.gz
+
+.extmusic.json
+.superpowers/
+build/
+device/input/build/
+device/native_yt/build/

@@ -2,8 +2,6 @@
 <html lang="ru">
 <head>
 <script src="static/panel-context.js"></script>
-<script defer src="static/speaker-selector.js"></script>
-<link rel="stylesheet" href="static/speaker-selector.css">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>yapanel-web_max</title>
@@ -254,6 +252,7 @@
   .btn.primary:hover { filter: brightness(1.08); }
   .btn.danger { color: var(--danger); border-color: var(--danger-line); }
   .btn.danger-soft { background: var(--danger-soft); border-color: transparent; color: var(--danger); font-weight: 700; }
+  .btn.danger-soft:hover { border-color: var(--danger-line); }
   .btn.ghost { border-color: transparent; background: transparent; }
   .btn.ghost:hover { background: var(--field); }
   .btn.icon { width: 44px; padding: 0; }
@@ -297,6 +296,22 @@
     .dsp-eq-band { grid-template-columns: 58px minmax(80px, 1fr) 62px; }
     .dsp-eq-foot { padding: 10px 14px 14px; }
     .dsp-eq-foot .row:last-child { width: 100%; justify-content: space-between; }
+  }
+  /* Экран станции: не даём широкому изображению и кнопкам распирать диалог на телефоне */
+  #yt-screen-dialog { width: min(1040px, calc(100vw - 12px)); max-width: calc(100vw - 12px); }
+  #yt-screen-dialog > div { min-width: 0; max-width: 100%; box-sizing: border-box; }
+  #yt-screen-dialog .dsp-dialog-head > div { min-width: 0; flex: 1 1 auto; }
+  #yt-screen-dialog .dsp-dialog-head .hint { max-width: 100%; }
+  #yt-screen-dialog img { max-width: 100%; height: auto; }
+  #yt-screen-dialog .row { min-width: 0; max-width: 100%; }
+  #yt-screen-dialog .btn { white-space: normal; }
+  #yt-screen-dialog .field { min-width: 0; }
+  @media (max-width: 760px) {
+    #yt-screen-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; }
+    #yt-screen-dialog > div { padding-left: 12px !important; padding-right: 12px !important; }
+    #yt-screen-text-form { flex-direction: column; align-items: stretch; }
+    #yt-screen-text-form .field { width: 100%; }
+    #yt-screen-text-form .btn { width: 100%; }
   }
 
   .chip { min-height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--field); font-size: 13px; font-weight: 600; color: var(--text-2); }
@@ -421,9 +436,9 @@
   #model-settings { display: contents; }
   #model-settings[hidden] { display: none; }
 
-  /* ссылки на Яндекс Музыку: выглядят как обычный текст, подчёркиваются при наведении */
-  a.ym { color: inherit; text-decoration: none; border-radius: 4px; }
-  a.ym:hover { text-decoration: underline; text-decoration-thickness: from-font; text-underline-offset: .12em; color: var(--accent-ink); }
+  /* ссылки на Яндекс Музыку и внутреннюю вкладку YouTube Music: выглядят как обычный текст, подчёркиваются при наведении */
+  a.ym, a.yt-nav { color: inherit; text-decoration: none; border-radius: 4px; }
+  a.ym:hover, a.yt-nav:hover { text-decoration: underline; text-decoration-thickness: from-font; text-underline-offset: .12em; color: var(--accent-ink); }
   a.badge.ym:hover { text-decoration: none; background: var(--accent-soft); }
   /* музыка с телефона по Bluetooth: Яндекс-функции (лайки, повтор, очередь, обложка…) недоступны — прячем */
   body.mu-bt [data-mu="shuffle"], body.mu-bt [data-mu="repeat"], body.mu-bt [data-mu="like"], body.mu-bt [data-mu="dislike"],
@@ -449,22 +464,7 @@
   /* bluetooth (виджет) */
   .bt-pair { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--field); }
   .bt-pair.on { background: var(--accent-soft); }
-  /* звук через Bluetooth-колонку: текст сверху, кнопки — строкой под ним (две кнопки рядом с текстом не помещаются) */
-  .bt-out { flex-wrap: wrap; align-items: flex-start; }
-  .bt-pair.bt-out .info { flex: 1 1 100%; min-width: 0; }
-  .bt-out .info .meta { display: block; margin-top: 2px; }
-  .bt-out .actions { display: flex; flex-wrap: wrap; gap: 8px; flex-direction: row-reverse; justify-content: flex-end; }
-  .bt-eq { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-2); }
   .bt-memes-sound { margin-top: 8px; }
-  .bt-eq-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .bt-eq-head select { width: auto; min-width: 170px; }
-  .bt-eq canvas { display: block; width: 100%; height: 96px; margin-top: 8px; }
-  .eq-custom { display: grid; gap: 7px; margin-top: 10px; }
-  .eq-band { display: grid; grid-template-columns: 76px 18px 1fr 52px; align-items: center; gap: 8px; }
-  .eq-band input[type=number] { width: 76px; }
-  .eq-band input[type=range] { width: 100%; margin: 0; }
-  .eq-band .eq-gv { text-align: right; font-size: 12px; color: var(--muted); }
-  .eq-custom .hint { margin: 2px 0 0; }
   .app-panel { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; margin-top: 5px; min-width: 0; }
   .app-panel .badge { align-self: flex-start; max-width: 100%; white-space: normal; line-height: 1.25; }
   .app-panel .meta { overflow-wrap: anywhere; }
@@ -545,152 +545,6 @@
   .ev-list .ev-row { display: flex; gap: 12px; align-items: baseline; }
   .ev-list time { font-family: var(--mono); font-size: 12.5px; color: var(--muted); min-width: 44px; }
 
-  /* будильник */
-  .al-row { display: flex; align-items: center; gap: 16px; padding: 14px 0; border-top: 1px solid var(--line-2); }
-  .al-row:first-child { border-top: 0; }
-  .al-time { font-size: 34px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; min-width: 104px; }
-  .al-row.off .al-time, .al-row.off .al-info { opacity: .45; }
-  .al-info { flex: 1; min-width: 0; }
-  .al-info b { display: block; font-weight: 700; }
-  .al-info .meta { overflow-wrap: anywhere; }
-  .al-row .actions { flex: none; }
-  .al-row input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); }
-  @media (max-width: 560px) { .al-row { flex-wrap: wrap; gap: 8px 14px; } .al-time { font-size: 28px; min-width: 0; } .al-row .actions { width: 100%; } }
-  .sc-field { position: relative; height: 560px; resize: vertical; overflow: auto; border-radius: 14px; border: 1px solid var(--line);
-    background: var(--field) radial-gradient(circle, var(--line) 1px, transparent 1.2px) 0 0 / 22px 22px; }
-  /* поле бесконечное: без прокрутки, холст сдвигается целиком — фон тянут мышью или пальцем */
-  .sc-field { overflow: hidden; touch-action: none; }
-  @media (pointer: coarse) { .sc-node .port::after { content: ""; position: absolute; inset: -12px; border-radius: 50%; } }
-  .sc-field[hidden] { display: none; }
-  .sc-canvas { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: visible; }
-  .sc-canvas.glide { transition: transform .3s ease; }
-  .sc-wires { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
-  .sc-wires path { fill: none; stroke: var(--accent); stroke-width: 2.5; opacity: .75; }
-  .sc-wires path.tmp { stroke-dasharray: 6 5; opacity: .9; }
-  .sc-node { position: absolute; width: 232px; border-radius: 14px; background: var(--card); border: 1.5px solid var(--line);
-    box-shadow: 0 6px 18px rgba(0,0,0,.08); user-select: none; }
-  .sc-node.trig { width: 190px; border-color: var(--accent); }
-  .sc-node.drop { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .sc-node header { display: flex; align-items: center; gap: 6px; padding: 8px 10px; font-weight: 700; font-size: 13px; cursor: grab; touch-action: none;
-    border-bottom: 1px solid var(--line-2); }
-  .sc-node header .n { width: 20px; height: 20px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink); font-size: 11px; display: grid; place-items: center; }
-  .sc-node header button { margin-left: auto; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
-  .sc-node .v { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px; }
-  .sc-node .v .field { min-height: 32px; padding: 0 8px; font-size: 13px; }
-  .sc-node .v input[type=text], .sc-node .v select { width: 100%; }
-  .sc-node .v input[type=range] { flex: 1; min-width: 0; }
-  .sc-node .v input[type=number] { width: 72px; }
-  .sc-node .v input[type=color] { width: 38px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; }
-  .sc-node .port { position: absolute; top: 18px; width: 14px; height: 14px; border-radius: 50%; background: var(--card); border: 2.5px solid var(--accent); }
-  .sc-node .port.in { left: -8px; }
-  .sc-node .port.out { right: -8px; cursor: crosshair; }
-  .sc-node .port.out:hover { background: var(--accent); }
-  .sc-palette { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-  /* поле нод на весь экран: сверху заголовок и «закрыть», посередине поле, снизу — кнопки добавления нод */
-  .sc-field-wrap { position: relative; }
-  .sc-expand { position: absolute; top: 10px; right: 10px; z-index: 3; box-shadow: var(--shadow); }
-  .sc-field[hidden] + .sc-expand, .sc-board-top, .sc-open { display: none; }
-  .sc-board.full-open { position: fixed; inset: 0; z-index: 60; margin: 0; background: var(--bg); display: grid; gap: 12px;
-                        grid-template-columns: 250px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
-                        padding: calc(12px + var(--sa-top)) 12px calc(12px + var(--sa-bottom)); }
-  /* кнопки — поверх поля, в его правом верхнем углу */
-  .sc-board.full-open .sc-board-top { display: flex; gap: 6px; position: absolute; z-index: 5;
-                                      top: calc(22px + var(--sa-top)); right: 22px; }
-  .sc-board.full-open .sc-board-top .btn { box-shadow: var(--shadow); }
-  .sc-board.full-open .sc-field-wrap { grid-column: 2; grid-row: 1; min-height: 0; }
-  .sc-board.full-open .sc-field { height: 100%; resize: none; }
-  .sc-board.full-open .sc-expand, .sc-board.full-open .sc-arrange-row, .sc-board.full-open #sc-field-hint,
-  .sc-board.full-open .sc-steps { display: none; }
-  /* на компьютере — кнопки нод колонкой слева */
-  .sc-board.full-open .sc-palette { grid-column: 1; grid-row: 1; margin: 0; overflow-y: auto; gap: 14px; padding-right: 4px; }
-  .sc-board.full-open .sc-palette .grp { flex-direction: column; align-items: stretch; gap: 6px; }
-  .sc-board.full-open .sc-palette .grp .btn { justify-content: flex-start; }
-  .sc-fab, .sc-pal-backdrop { display: none; }
-  .sc-fab { position: absolute; z-index: 5; right: 22px; bottom: calc(22px + var(--sa-bottom)); width: 58px; height: 58px;
-            border-radius: 50%; border: 0; place-items: center; background: var(--accent); color: var(--on-accent);
-            box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 45%, transparent); }
-  .sc-field.panning { cursor: grabbing; }
-  .sc-field { cursor: grab; }
-  .sc-field .sc-node { cursor: default; }
-  body.sc-full { overflow: hidden; }
-  @media (max-width: 760px) {
-    /* на телефоне поле в форме не рисуем — только кнопка, поле открывается на весь экран */
-    .sc-board.fieldmode:not(.full-open) .sc-field-wrap, .sc-board.fieldmode:not(.full-open) .sc-arrange-row,
-    .sc-board.fieldmode:not(.full-open) #sc-field-hint, .sc-board.fieldmode:not(.full-open) .sc-palette { display: none; }
-    .sc-board.fieldmode:not(.full-open) .sc-open { display: flex; width: 100%; justify-content: center; min-height: 48px; }
-    .sc-expand { display: none; }
-    .sc-board.full-open { display: flex; flex-direction: column; gap: 8px; }
-    .sc-board.full-open .sc-field-wrap { flex: 1; }
-    .sc-board.full-open .sc-board-top { top: calc(20px + var(--sa-top)); right: 20px; }
-    .sc-board-top .sc-long { display: none; }
-    /* кнопки нод — листом снизу по кнопке «＋»: всё видно сразу, крупно, а поле занимает весь экран */
-    .sc-board.full-open .sc-fab { display: grid; }
-    .sc-board.full-open .sc-palette { position: absolute; left: 0; right: 0; bottom: 0; z-index: 7; max-height: 70%; overflow-y: auto;
-      overscroll-behavior: contain; background: var(--card); border-radius: 22px 22px 0 0; box-shadow: 0 -12px 40px rgba(0,0,0,.25);
-      padding: 18px 14px calc(16px + var(--sa-bottom)); gap: 14px;
-      transform: translateY(105%); visibility: hidden; transition: transform .25s ease, visibility 0s .25s; }
-    .sc-board.full-open.pal-open .sc-palette { transform: none; visibility: visible; transition: transform .25s ease; }
-    .sc-board.full-open .sc-palette .grp { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .sc-board.full-open .sc-palette .grp > .meta { grid-column: 1 / -1; min-width: 0; }
-    .sc-board.full-open .sc-palette .btn { min-height: 48px; font-size: 14px; justify-content: flex-start; text-align: left; line-height: 1.2; }
-    .sc-board.full-open .sc-pal-backdrop { display: block; position: absolute; inset: 0; z-index: 6; background: rgba(0,0,0,.35);
-      opacity: 0; pointer-events: none; transition: opacity .25s; }
-    .sc-board.full-open.pal-open .sc-pal-backdrop { opacity: 1; pointer-events: auto; }
-  }
-  .sc-palette .grp { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  .sc-palette .grp > .meta { min-width: 92px; font-weight: 600; }
-  .sc-node.sel { border-color: var(--accent); }
-  /* у условия и повтора выходы на 52 и 86 px — нода не короче, чтобы нижний не висел в воздухе */
-  .sc-node.k-if, .sc-node.k-repeat { min-height: 108px; }
-  .sc-node.k-if header, .sc-node.k-repeat header { background: var(--accent-soft); border-radius: 12px 12px 0 0; }
-  .sc-node.k-note { background: #fff7d6; border-color: #f0dc8a; }
-  .sc-node.k-note textarea { width: 100%; resize: vertical; background: transparent; border: 0; padding: 0; font-size: 13px; }
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .sc-node.k-note { background: #3a3420; border-color: #5c5230; } }
-  :root[data-theme="dark"] .sc-node.k-note { background: #3a3420; border-color: #5c5230; }
-  .sc-node .port.out[data-port="next"]:has(i) { top: 52px; }
-  .sc-node .port.out[data-port="else"] { top: 86px; }
-  /* подпись выхода — снаружи ноды, над кружком: внутри мешала бы кнопке удаления и полям */
-  .sc-node .port.out i { position: absolute; left: 14px; top: -15px; font-style: normal; font-size: 11px; font-weight: 700; color: var(--accent-ink); white-space: nowrap; pointer-events: none; }
-  .sc-step .v select.field { width: auto; }
-  .sc-wires path.w-else { stroke-dasharray: 7 5; }
-  /* сценарии */
-  .sc-steps { display: flex; flex-direction: column; gap: 8px; }
-  .sc-step { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 12px; background: var(--field); flex-wrap: wrap; }
-  .sc-step .n { width: 22px; height: 22px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink); font-size: 12px; font-weight: 700; display: grid; place-items: center; flex: none; }
-  .sc-step .k { font-weight: 700; font-size: 13.5px; min-width: 112px; display: flex; align-items: center; gap: 6px; }
-  .sc-step .v { flex: 1 1 220px; display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
-  .sc-step .v .field { min-height: 36px; padding: 0 10px; }
-  .sc-step .v input[type=text] { flex: 1; min-width: 160px; }
-  .sc-step .v input[type=number] { width: 84px; }
-  .sc-step .v input[type=range] { flex: 1; min-width: 100px; }
-  .sc-step .v input[type=color] { width: 40px; height: 34px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; }
-  .sc-step .ctl { display: flex; gap: 2px; flex: none; margin-left: auto; }
-  .sc-step .ctl .btn { color: var(--muted); }
-  .sc-flow { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 4px; }
-  .sc-flow span { font-size: 12px; color: var(--text-2); background: var(--field); border-radius: 999px; padding: 2px 9px; }
-  .al-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; }
-  .al-form .full { grid-column: 1 / -1; }
-  .al-form label.f { display: flex; flex-direction: column; gap: 6px; font-weight: 600; font-size: 13.5px; color: var(--text-2); min-width: 0; }
-  .al-form .field { width: 100%; }
-  .al-form input[type=time] { font-size: 28px; font-weight: 800; min-height: 56px; font-variant-numeric: tabular-nums; }
-  @media (max-width: 640px) { .al-form { grid-template-columns: minmax(0, 1fr); } }
-  @media (max-width: 760px) { .day-chips { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
-                              .day-chips .chip { padding: 0; min-height: 38px; } }
-  .day-chips .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-  .al-note { background: var(--accent-soft); border-radius: 12px; padding: 12px 14px; color: var(--text-2); font-size: 14px; }
-  .al-note b { color: var(--text); }
-  .al-points code { font-family: var(--mono); font-size: 12.5px; }
-  ul.al-points { margin: 0; padding-left: 18px; color: var(--text-2); font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
-  #alarm-bar { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 14px;
-               background: var(--accent); color: var(--on-accent); padding: 10px 12px 10px 18px; border-radius: 16px; box-shadow: 0 8px 28px -8px rgba(0,0,0,.45);
-               max-width: calc(100vw - 32px); flex-wrap: wrap; }
-  #alarm-bar b { font-size: 15px; }
-  #alarm-bar .btn { background: rgba(255,255,255,.16); border-color: transparent; color: inherit; }
-  #alarm-bar .btn.primary { background: #fff; color: var(--accent-ink); }
-  #alarm-bar svg.ring-ic { animation: al-shake 1s ease-in-out infinite; }
-  @keyframes al-shake { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-14deg); } 75% { transform: rotate(14deg); } }
-  @media (prefers-reduced-motion: reduce) { #alarm-bar svg.ring-ic { animation: none; } }
-
   /* экран подключения */
   #conn-screen { justify-content: center; align-items: center; min-height: 80vh; }
   .conn-card { max-width: 560px; width: 100%; text-align: center; align-items: center; gap: 12px; padding: 36px 32px 28px; }
@@ -751,22 +605,6 @@
   .untested strong { display: block; color: var(--danger); font-size: 18px; line-height: 1.3; }
   .untested code { font-size: 13px; }
   .untested p { margin: 6px 0 0; font-size: 14px; line-height: 1.5; }
-  /* «Радио» */
-  .rd-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-  .rd-chips .btn { gap: 8px; }
-  .rd-chips img, .rd-chips .rd-logo { width: 24px; height: 24px; border-radius: 6px; flex: none; object-fit: cover; }
-  .rd-chips .rd-logo { display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-ink); font-size: 11px; font-weight: 700; }
-  .rd-list { display: grid; gap: 6px; }
-  .rd-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--field); min-width: 0; }
-  .rd-row .rd-name { flex: 1; min-width: 0; }
-  .rd-row .rd-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rd-row .rd-name small { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rd-row.on { outline: 2px solid var(--accent); }
-  .rd-row .rd-warn { flex: none; color: var(--danger); cursor: help; font-size: 16px; }
-  .rd-note { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--danger-soft); border: 1px solid var(--danger-line); font-size: 13px; line-height: 1.5; color: var(--text-2); }
-  .rd-now { display: flex; align-items: center; gap: 14px; }
-  .rd-now .rd-name { flex: 1; min-width: 0; }
-  .rd-now b { font-size: 17px; }
   .as-keys { display: flex; flex-wrap: wrap; gap: 6px; }
   .as-keys:empty { display: none; }
   .as-keys span { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--field); font-size: 12.5px; }
@@ -993,6 +831,7 @@
     .pl-mtop { display: flex; align-items: center; gap: 6px; flex: none; touch-action: none; }
     .pl-mtop #pl-msrc { flex: 1; min-width: 0; text-align: center; font-size: 12.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
                         color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pl-mtop #pl-m-ext-stop { min-height: 30px; padding: 0 10px; font-size: 12px; border-radius: 999px; flex: none; }
     #tab-player .pl-hero { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 0; background: none; border: 0;
                            box-shadow: none; }
     /* обложка — квадрат по свободному месту: коробка занимает остаток высоты, обложка — меньшая из её сторон */
@@ -1057,6 +896,7 @@
   a.trow { color: inherit; text-decoration: none; }
   .trow.cur { background: var(--accent-soft); }
   .trow img, .trow .ph { flex: none; width: 40px; height: 40px; border-radius: 6px; object-fit: cover; background: var(--field); }
+  .trow .ph { display: grid; place-items: center; color: var(--muted); }
   .trow .tt { flex: 1; min-width: 0; }
   .trow .tt b, .trow .tt span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .trow .tt span { font-size: 12.5px; color: var(--muted); }
@@ -1064,6 +904,62 @@
   .artist-grid { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 18px; align-items: start; }
   @media (max-width: 600px) { .artist-grid { grid-template-columns: 1fr; } }
   .artist-grid > img { width: 140px; height: 140px; border-radius: 50%; object-fit: cover; background: var(--field); }
+  .trow.trow-with-acts { padding: 0 6px 0 0; gap: 4px; }
+  .trow.trow-with-acts:active { transform: none; filter: none; }
+  .trow-main { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 0; border-radius: 10px; background: transparent; text-align: left; flex: 1; min-width: 0; cursor: pointer; transition: transform .12s ease, filter .12s ease; }
+  .trow-main:active:not(:disabled) { transform: scale(.98); filter: brightness(.92); }
+  .trow-main:disabled { opacity: .45; cursor: default; }
+  .trow-acts { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+  .trow-acts .cbtn { width: 32px; height: 32px; font-size: 14px; color: var(--muted); }
+  .trow-acts .cbtn:hover { background: var(--card); color: var(--text); }
+  .trow-acts .cbtn.liked { color: #E0457B; }
+  .trow-acts .cbtn[data-q-del]:hover { background: var(--danger-soft); color: var(--danger); }
+
+  /* общие компоненты каталога и карточек YouTube Music (#tab-player и #tab-yt) */
+  .alert.error { margin: 0; padding: 10px 14px; border-radius: 12px; background: var(--danger-soft); border: 1px solid var(--danger-line); color: var(--danger); font-size: 13.5px; font-weight: 600; }
+  .yt-warn { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0; padding: 10px 14px; border-radius: 12px; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); color: var(--text); font-size: 13.5px; }
+  .yt-hero { display: grid; grid-template-columns: minmax(140px, 190px) minmax(0, 1fr); gap: 22px; align-items: center; }
+  .yt-hero-cover, .yt-hero-ph { width: 100%; aspect-ratio: 1; border-radius: 18px; object-fit: cover; background: var(--field); box-shadow: 0 14px 32px -16px rgba(0,0,0,.4); }
+  .yt-hero-ph { display: grid; place-items: center; color: var(--muted); }
+  .yt-hero-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .yt-hero-title { margin: 0; font-size: clamp(22px, 3vw, 32px); font-weight: 800; letter-spacing: -0.02em; line-height: 1.15; }
+  .yt-hero-sub { color: var(--muted); font-size: 14px; line-height: 1.45; }
+  .yt-hero-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+  .yt-artist-circle { border-radius: 50% !important; }
+  .yt-section { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  #pl-autoradio-wrap[hidden], .yt-section[hidden], .row[hidden], [hidden] { display: none !important; }
+  .yt-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .yt-detail-subhead { margin: 4px 0 0; font-size: 15px; font-weight: 800; }
+  .yt-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(156px, 1fr)); gap: 12px; }
+  .yt-shelf { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(148px, 174px); gap: 12px; overflow-x: auto; padding: 2px 2px 8px; scroll-snap-type: x proximity; scrollbar-width: thin; }
+  .yt-shelf > * { scroll-snap-align: start; }
+  .yt-tile { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--text); text-align: left; text-decoration: none; min-width: 0; transition: border-color .15s, background-color .15s, transform .12s; }
+  .yt-tile:hover { border-color: var(--accent); background: var(--field); }
+  .yt-tile:active { transform: scale(.97); }
+  .yt-tile-cover { width: 100%; aspect-ratio: 1; border-radius: 10px; background: var(--field); color: var(--muted); display: grid; place-items: center; overflow: hidden; }
+  .yt-tile-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .yt-tile-artist .yt-tile-cover, .yt-tile-artist .yt-tile-cover img { border-radius: 50%; }
+  .yt-cover-ph { width: 100%; height: 100%; display: grid; place-items: center; color: var(--muted); }
+  .yt-tile-title { font-size: 14px; font-weight: 700; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .yt-tile-sub { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .yt-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .yt-chip { min-height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--field); color: var(--text-2); font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+  .yt-chip:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+  .yt-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .yt-moods { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+  .yt-mood { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--field); color: var(--text); font-size: 13.5px; font-weight: 600; text-align: left; min-width: 0; }
+  .yt-mood:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+  .yt-mood-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--mood-c, var(--accent)); flex: none; }
+  .yt-mood span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .yt-rank { width: 22px; text-align: center; font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--muted); flex: none; }
+  @media (max-width: 760px) {
+    .yt-hero { grid-template-columns: 1fr; gap: 14px; text-align: center; }
+    .yt-hero-cover, .yt-hero-ph { max-width: 180px; margin: 0 auto; }
+    .yt-hero-acts { justify-content: center; }
+    .yt-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    #yt-tabs { display: flex; overflow-x: auto; max-width: 100%; scrollbar-width: none; }
+    #yt-tabs button { flex: 0 0 auto; padding: 0 11px; font-size: 13px; }
+  }
 
   /* папки звуков */
   .folders { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1232,7 +1128,6 @@
     <symbol id="i-term" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 17l6-5-6-5M12 19h8"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></g></symbol>
     <symbol id="i-wave" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h2M7 8v8M11 4v16M15 7v10M19 10v4"/></g></symbol>
-    <symbol id="i-radio" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="12" rx="2"/><path d="M7 8l9-5"/><circle cx="15" cy="14" r="2.5"/><path d="M6 12h3M6 16h3"/></g></symbol>
     <symbol id="i-music" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></g></symbol>
     <symbol id="i-link" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></g></symbol>
     <symbol id="i-play" viewBox="0 0 24 24"><path fill="currentColor" d="M7 4.5v15l13-7.5z"/></symbol>
@@ -1252,7 +1147,6 @@
     <symbol id="i-next" viewBox="0 0 24 24"><g fill="currentColor"><path d="M6 5.5v13l9-6.5z"/><rect x="16.5" y="5" width="2.5" height="14" rx="1"/></g></symbol>
     <symbol id="i-shuffle" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M16 4h4v4M4 20L20 4M20 16v4h-4M15 15l5 5M4 4l5 5"/></symbol>
     <symbol id="i-bulb" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-7 7c0 2.5 1.3 4.7 3.2 6 .8.6 1.3 1.5 1.5 2.5h4.6c.2-1 .7-1.9 1.5-2.5A7 7 0 0 0 12 2z"/></g></symbol>
-    <symbol id="i-flow"  viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="15" y="3" width="6" height="6" rx="1.5"/><rect x="15" y="15" width="6" height="6" rx="1.5"/><path d="M9 6h6M6 9v6a3 3 0 0 0 3 3h6"/></g></symbol>
     <symbol id="i-repeat" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M17 2l3 3-3 3M3 11V9a4 4 0 0 1 4-4h13M7 22l-3-3 3-3M21 13v2a4 4 0 0 1-4 4H4"/></symbol>
     <symbol id="i-like" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 20s-7-4.4-9-9.2C1.7 7.6 3.8 4.5 7 4.5c2 0 3.3 1.1 5 3 1.7-1.9 3-3 5-3 3.2 0 5.3 3.1 4 6.3C19 15.6 12 20 12 20z"/></symbol>
     <symbol id="i-dislike" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></g></symbol>
@@ -1262,7 +1156,6 @@
     <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></g></symbol>
     <symbol id="i-palette" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.7-.9 1.4-1.9l-.3-.9c-.4-1.2.5-2.2 1.7-2.2H17a4 4 0 0 0 4-4c0-5-4-9-9-9z"/><circle cx="7.5" cy="11" r="1"/><circle cx="10" cy="7" r="1"/><circle cx="15" cy="7.5" r="1"/></g></symbol>
     <symbol id="i-chart" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 4v16h16M7 15l4-5 3 3 5-6"/></symbol>
-    <symbol id="i-alarm" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M5 3 2 6M19 3l3 3"/></g></symbol>
     <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></g></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-target" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></g></symbol>
@@ -1280,12 +1173,8 @@
       <div class="sheet-head" role="presentation"><span></span></div>
       <a href="#overview" data-tab="overview"><svg width="20" height="20" aria-hidden="true"><use href="#i-grid"/></svg>Обзор</a>
       <a href="#player" data-tab="player"><svg width="20" height="20" aria-hidden="true"><use href="#i-music"/></svg>Плеер</a>
-      <!-- «Радио» временно скрыто: проигрыватель своих станций ломал общий микшер звука колонки (см. radio.go) -->
-      <a href="#radio" data-tab="radio" hidden><svg width="20" height="20" aria-hidden="true"><use href="#i-radio"/></svg>Радио</a>
+      <a href="#yt" data-tab="yt" id="nav-yt"><svg width="20" height="20" aria-hidden="true"><use href="#i-music"/></svg>YouTube Music</a>
       <div class="nav-group" role="presentation">Колонка</div>
-      <a href="#led" data-tab="led" hidden><svg width="20" height="20" aria-hidden="true"><use href="#i-palette"/></svg>LED-панель</a>
-      <a href="#alarm" data-tab="alarm"><svg width="20" height="20" aria-hidden="true"><use href="#i-alarm"/></svg>Будильник</a>
-      <a href="#scenes" data-tab="scenes"><svg width="20" height="20" aria-hidden="true"><use href="#i-flow"/></svg>Сценарии</a>
       <a href="#wakeword" data-tab="wakeword" id="nav-wakeword" hidden><svg width="20" height="20" aria-hidden="true"><use href="#i-wave"/></svg>Активация</a>
       <a href="#assistant" data-tab="assistant"><svg width="20" height="20" aria-hidden="true"><use href="#i-mic"/></svg>Ассистент</a>
       <a href="#boot" data-tab="boot"><svg width="20" height="20" aria-hidden="true"><use href="#i-power"/></svg>Анимации</a>
@@ -1307,11 +1196,10 @@
   <div class="nav-backdrop" id="nav-backdrop"></div>
   <nav class="mbar" aria-label="Главные разделы">
     <a href="#overview" data-tab="overview"><svg aria-hidden="true"><use href="#i-grid"/></svg><span>Обзор</span></a>
-    <a href="#player" data-tab="player" class="mbar-opt" hidden><svg aria-hidden="true"><use href="#i-music"/></svg><span>Плеер</span></a>
-    <a href="#boot" data-tab="boot" class="mbar-opt" hidden><svg aria-hidden="true"><use href="#i-power"/></svg><span>Анимации</span></a>
-    <a href="#party" data-tab="party" class="mbar-opt" hidden><svg aria-hidden="true"><use href="#i-bulb"/></svg><span>Светомузыка</span></a>
-    <a href="#alarm" data-tab="alarm"><svg aria-hidden="true"><use href="#i-alarm"/></svg><span>Будильник</span></a>
-    <a href="#scenes" data-tab="scenes"><svg aria-hidden="true"><use href="#i-flow"/></svg><span>Сценарии</span></a>
+    <a href="#player" data-tab="player"><svg aria-hidden="true"><use href="#i-music"/></svg><span>Плеер</span></a>
+    <a href="#yt" data-tab="yt"><svg aria-hidden="true"><use href="#i-play"/></svg><span>YouTube</span></a>
+    <a href="#boot" data-tab="boot"><svg aria-hidden="true"><use href="#i-power"/></svg><span>Анимации</span></a>
+    <a href="#party" data-tab="party"><svg aria-hidden="true"><use href="#i-bulb"/></svg><span>Светомузыка</span></a>
     <button type="button" id="mbar-more" aria-expanded="false" aria-controls="nav-sheet"><svg aria-hidden="true"><use href="#i-more"/></svg><span>Ещё</span></button>
   </nav>
 
@@ -1724,15 +1612,6 @@
           </div>
           <div class="bt-list" id="bt-list"><div class="empty">Загрузка…</div></div>
           <div class="vol-bt"><label for="vol-bt" title="Громкость звука с телефона по Bluetooth">Громкость</label><input type="range" id="vol-bt" min="0" max="255"><span id="vol-bt-v">—</span></div>
-          <div class="bt-pair bt-out" id="bt-out-row">
-            <div class="info"><b id="bt-out-text">Звук — встроенный динамик</b><span class="meta" id="bt-out-hint">Можно играть через Bluetooth-колонку: Алиса слушает и отвечает, а звук — из неё</span></div>
-            <div class="actions"><button class="btn sm" id="bt-out-other" hidden>Другая колонка</button>
-              <button class="btn sm" id="bt-out-btn">Выбрать колонку</button></div>
-          </div>
-          <div id="bt-out-pick" hidden>
-            <p class="hint">Включите на Bluetooth-колонке режим сопряжения — панель поищет её рядом. Колонки и наушники — первыми.</p>
-            <div class="bt-list" id="bt-out-list"></div>
-          </div>
           <div class="bt-pair" id="bt-memes-row" hidden>
             <div class="info"><b>Звуки Bluetooth</b><span class="meta" id="bt-memes-hint">—</span></div>
             <div class="actions"><button class="btn sm" id="bt-memes-setup">Настроить</button>
@@ -1758,12 +1637,6 @@
               <input type="file" id="bt-memes-silent-file" accept=".mp3,.opus,.ogg" hidden>
             </div>
             <p class="hint">Демон глушит фразу Алисы на время переключения и включает выбранный звук. Исходные звуки Quasar сохраняются и вернутся при выключении.</p>
-          </div>
-          <div class="bt-eq" id="bt-eq-row" hidden>
-            <div class="bt-eq-head"><b>Эквалайзер</b><select class="field" id="bt-eq" aria-label="Пресет эквалайзера"></select></div>
-            <canvas id="bt-eq-curve" width="360" height="96" aria-label="АЧХ эквалайзера"></canvas>
-            <div class="eq-custom" id="bt-eq-custom" hidden></div>
-            <p class="hint">При усилении частот громкость может снижаться для запаса от перегрузки. Сравнивайте пресеты на одинаковой слышимой громкости.</p>
           </div>
         </section>
 
@@ -1802,8 +1675,6 @@
           <div class="set-ctl"><input type="checkbox" class="switch" id="set-minibar"></div></label>
         <div class="set-item"><div class="set-label"><b>«Обзор»</b><small>Виджеты, 3D-модель и визуализатор</small></div>
           <div class="set-ctl"><button class="btn sm" id="set-layout-edit">Настроить «Обзор»</button><button class="btn sm" id="set-layout-reset">По умолчанию</button></div></div>
-        <div class="set-item"><div class="set-label"><b>Галерея 3D-моделей</b><small>Все корпуса, которые знает панель, — без подключения к колонке</small></div>
-          <div class="set-ctl"><a class="btn sm" id="model-gallery" href="./static/model-preview.html" target="_blank" rel="noopener">Открыть ↗</a></div></div>
       </section>
 
       <section class="card set-card">
@@ -1847,12 +1718,12 @@
         <label class="set-item" id="privacy-row"><div class="set-label"><b>Блокировать аналитику Яндекса</b><small id="privacy-state">Свой hosts: адреса аналитики
           (clck, appmetrica, metrica) → 127.0.0.1 / ::1. Системный раздел не меняется, Алиса и музыка работают как обычно</small></div>
           <div class="set-ctl"><button class="btn sm" id="privacy-purge" hidden>Очистить очередь</button><input type="checkbox" class="switch" id="privacy-on" disabled></div></label>
-        <div class="set-item"><div class="set-label"><b>Резервная копия</b><small>Заставка, звук запуска, будильники со звуками, флаги автозапуска, оформление и раскладка.
+        <div class="set-item"><div class="set-label"><b>Резервная копия</b><small>Заставка, звук запуска, флаги автозапуска, оформление и раскладка.
           Пароль, вход в Яндекс и история графиков в копию не входят</small></div>
           <div class="set-ctl"><button class="btn sm" id="bk-save"><svg width="18" height="18" aria-hidden="true"><use href="#i-dl"/></svg>Скачать</button>
             <button class="btn sm" id="bk-restore"><svg width="18" height="18" aria-hidden="true"><use href="#i-ul"/></svg>Восстановить…</button></div>
           <input type="file" id="bk-file" accept=".gz,.tgz,application/gzip" hidden></div>
-        <div class="set-item set-danger"><div class="set-label"><b>Удалить всё с колонки</b><small>Вернёт стандартные заставку и звук, удалит будильники и настройки автозапуска. Перезагрузка не нужна</small></div>
+        <div class="set-item set-danger"><div class="set-label"><b>Удалить всё с колонки</b><small>Вернёт стандартные заставку и звук, сбросит настройки автозапуска. Перезагрузка не нужна</small></div>
           <div class="set-ctl"><button class="btn sm danger" id="fp-reset" disabled>Удалить всё</button></div></div>
       </section>
 
@@ -1867,8 +1738,8 @@
         <div class="set-item" id="upd-row" hidden><div class="set-label"><b>Доступна версия <span id="upd-latest">—</span></b><small id="upd-how">—</small></div>
           <div class="set-ctl"><a class="btn sm" id="upd-notes" target="_blank" rel="noopener">Что нового ↗</a><button class="btn sm primary" id="upd-go">Обновить</button></div></div>
         <pre class="set-cmd" id="upd-cmd" hidden></pre>
-        <div class="set-item"><div class="set-label"><b>Что-то не работает?</b><small>Отчёт для Issue: версии панели, adb и прошивки, хук,
-          своё на колонке и журнал панели (вкладка «Логи» → «журнал панели»). Токены, ключи, адреса и MAC в нём скрыты — но перед отправкой
+        <div class="set-item"><div class="set-label"><b>Что-то не работает?</b><small>Отчёт для Issue: версии, колонка, хук, журнал панели,
+          недавние трассировки, хвост yapanel.log и ошибки браузера. Токены, ключи, адреса и MAC в нём скрыты — но перед отправкой
           всё равно просмотрите.</small></div>
           <div class="set-ctl"><button class="btn sm" data-report="set-report">Скопировать отчёт</button></div></div>
         <textarea class="field mono report-text" id="set-report" readonly hidden aria-label="Отчёт для Issue"></textarea>
@@ -1877,9 +1748,236 @@
     </div>
   </main>
 
+  <!-- ================= YOUTUBE MUSIC ================= -->
+  <main id="tab-yt" data-page hidden>
+    <header class="page-head">
+      <div>
+        <h1>YouTube Music</h1>
+        <div class="sub" id="yt-acct-sub">Гость · каталог и воспроизведение через DSP Станции</div>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn sm danger-soft" id="yt-ext-stop" hidden>■ Стоп</button>
+        <div class="seg" id="yt-tabs" role="tablist" aria-label="Разделы YouTube Music">
+          <button type="button" role="tab" class="active" data-yt-tab="home" aria-selected="true">Главная</button>
+          <button type="button" role="tab" data-yt-tab="explore" aria-selected="false">Навигатор</button>
+          <button type="button" role="tab" data-yt-tab="search" aria-selected="false">Поиск</button>
+          <button type="button" role="tab" data-yt-tab="library" aria-selected="false">Библиотека</button>
+          <button type="button" role="tab" data-yt-tab="account" aria-selected="false">Аккаунт</button>
+        </div>
+      </div>
+    </header>
+
+    <p class="alert error" id="yt-error" role="alert" hidden></p>
+
+    <div id="yt-detail-view" class="col" hidden>
+      <div class="row" style="justify-content:space-between">
+        <button type="button" class="btn sm" id="yt-detail-back">← Назад</button>
+        <span class="meta" id="yt-detail-crumb"></span>
+      </div>
+      <section class="card" id="yt-detail-card">
+        <div id="yt-detail-hero"></div>
+        <div id="yt-detail-body" class="col"></div>
+      </section>
+    </div>
+
+    <div id="yt-sec-home" class="yt-section" data-yt-sec="home">
+      <div class="yt-warn" id="yt-home-warn" hidden>
+        <span id="yt-home-warn-text"></span>
+        <button type="button" class="btn sm" id="yt-home-warn-account">Открыть «Аккаунт»</button>
+      </div>
+      <section class="card" id="yt-home-recent-wrap" hidden>
+        <div class="card-head">
+          <h2>Недавнее</h2>
+          <span class="meta" id="yt-home-recent-count"></span>
+        </div>
+        <div class="tlist" id="yt-home-recent"></div>
+      </section>
+      <section class="card" id="yt-home-qp-wrap">
+        <div class="card-head">
+          <h2>Быстрый выбор</h2>
+          <button type="button" class="btn sm" id="yt-home-refresh">↻ Обновить</button>
+        </div>
+        <div class="tlist" id="yt-home-qp"><div class="empty">Загрузка подборки…</div></div>
+      </section>
+      <section class="card" id="yt-home-mixes-wrap" hidden>
+        <div class="card-head">
+          <h2>Миксы для вас</h2>
+          <span class="meta" id="yt-home-mixes-meta"></span>
+        </div>
+        <div class="yt-shelf" id="yt-home-mixes"></div>
+      </section>
+      <section class="card" id="yt-home-feed-wrap" hidden>
+        <div class="card-head">
+          <h2>Из вашей ленты YouTube</h2>
+        </div>
+        <div class="tlist" id="yt-home-feed"></div>
+      </section>
+    </div>
+
+    <div id="yt-sec-explore" class="yt-section" data-yt-sec="explore" hidden>
+      <section class="card" id="yt-explore-charts-card">
+        <div class="card-head">
+          <h2>Чарты</h2>
+          <div class="yt-chips" id="yt-charts-countries" role="group" aria-label="Страна чартов">
+            <button type="button" class="yt-chip active" data-yt-country="RU" aria-pressed="true">Россия</button>
+            <button type="button" class="yt-chip" data-yt-country="ZZ" aria-pressed="false">Мир</button>
+            <button type="button" class="yt-chip" data-yt-country="US" aria-pressed="false">США</button>
+          </div>
+        </div>
+        <div class="tlist" id="yt-charts-tracks"><div class="empty">Загрузка чартов…</div></div>
+        <div id="yt-charts-artists-wrap" class="col" style="gap:8px" hidden>
+          <h3 class="yt-detail-subhead">Популярные исполнители</h3>
+          <div class="yt-shelf" id="yt-charts-artists"></div>
+        </div>
+        <div id="yt-charts-videos-wrap" class="col" style="gap:8px" hidden>
+          <h3 class="yt-detail-subhead">Топ клипов и подборок</h3>
+          <div id="yt-charts-videos"></div>
+        </div>
+      </section>
+      <section class="card" id="yt-explore-releases-card">
+        <div class="card-head">
+          <h2>Новые релизы</h2>
+          <button type="button" class="btn sm" id="yt-explore-refresh">↻ Обновить</button>
+        </div>
+        <div class="yt-cards" id="yt-explore-releases"><div class="empty">Загрузка новинок…</div></div>
+      </section>
+      <section class="card" id="yt-explore-moods-card">
+        <div class="card-head"><h2>Настроения и жанры</h2></div>
+        <div class="yt-moods" id="yt-explore-moods"><div class="empty">Загрузка…</div></div>
+      </section>
+    </div>
+
+    <div id="yt-sec-search" class="yt-section" data-yt-sec="search" hidden>
+      <section class="card" id="yt-search-card">
+        <form class="row" id="yt-search-form" style="gap:8px">
+          <label class="search" style="flex:1;min-width:220px">
+            <svg width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg>
+            <input id="yt-q" autocomplete="off" placeholder="Трек, исполнитель, альбом или плейлист" aria-label="Поиск в YouTube Music">
+            <button type="button" class="btn sm ghost" id="yt-q-clear" aria-label="Очистить поиск" hidden>✕</button>
+          </label>
+          <button class="btn primary" type="submit">Найти</button>
+        </form>
+        <div class="yt-chips" id="yt-search-filters" role="group" aria-label="Фильтр поиска">
+          <button type="button" class="yt-chip active" data-yt-kind="songs" aria-pressed="true">Треки</button>
+          <button type="button" class="yt-chip" data-yt-kind="albums" aria-pressed="false">Альбомы</button>
+          <button type="button" class="yt-chip" data-yt-kind="artists" aria-pressed="false">Исполнители</button>
+          <button type="button" class="yt-chip" data-yt-kind="playlists" aria-pressed="false">Плейлисты</button>
+          <button type="button" class="yt-chip" data-yt-kind="videos" aria-pressed="false">Видео</button>
+        </div>
+        <div id="yt-search-results"><div class="empty">Введите запрос для поиска</div></div>
+      </section>
+    </div>
+
+    <div id="yt-sec-library" class="yt-section" data-yt-sec="library" hidden>
+      <section class="card" id="yt-library-card">
+        <div class="card-head">
+          <h2>Библиотека</h2>
+          <div class="row" style="gap:8px">
+            <span class="badge" id="yt-library-badge">не подключён</span>
+            <button type="button" class="btn sm" id="yt-library-refresh">↻ Обновить</button>
+            <button type="button" class="btn sm primary" id="yt-account-login">Подключить аккаунт</button>
+          </div>
+        </div>
+        <p class="hint" id="yt-library-hint"><b id="yt-library-account">Аккаунт не подключён</b> — только просмотр и воспроизведение вашей медиатеки.</p>
+        <div class="yt-chips" id="yt-library-filters" role="group" aria-label="Разделы библиотеки" hidden>
+          <button type="button" class="yt-chip active" data-lib-filter="all" aria-pressed="true">Всё</button>
+          <button type="button" class="yt-chip" data-lib-filter="playlists" aria-pressed="false">Плейлисты</button>
+          <button type="button" class="yt-chip" data-lib-filter="artists" aria-pressed="false">Исполнители</button>
+          <button type="button" class="yt-chip" data-lib-filter="liked" aria-pressed="false">♥ Мне понравилось</button>
+        </div>
+        <span class="meta" id="yt-library-state"></span>
+        <div id="yt-library-list"></div>
+      </section>
+    </div>
+
+    <div id="yt-sec-account" class="yt-section" data-yt-sec="account" hidden>
+      <section class="card" id="yt-account-status-card">
+        <div class="card-head">
+          <h2>Состояние и источник</h2>
+          <span class="badge" id="yt-account-badge">не подключено</span>
+        </div>
+        <dl class="kv" id="yt-diag-list">
+          <dt>Аккаунт</dt><dd id="yt-diag-account">Гость</dd>
+          <dt>Способ входа</dt><dd id="yt-diag-auth">—</dd>
+          <dt>Аудиовывод</dt><dd id="yt-diag-pipeline">—</dd>
+          <dt>Воспроизведение</dt><dd id="yt-diag-playback">Ожидание</dd>
+        </dl>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button class="btn danger-soft" type="button" id="yt-account-logout" hidden>Выйти из аккаунта</button>
+          <button class="btn danger-soft" type="button" id="yt-cookies-clear-btn" hidden>Удалить cookies</button>
+        </div>
+      </section>
+
+      <section class="card" id="yt-account-card">
+        <div class="card-head"><h2>Авторизация</h2></div>
+        <p class="hint">Поиск, чарты, альбомы и воспроизведение работают <b>без входа</b>. Авторизация открывает лайки ♥, личные миксы и библиотеку.</p>
+        <div id="yt-auth-tabs" class="row" style="gap:8px;margin-bottom:4px">
+          <button class="btn primary" type="button" id="yt-tab-oauth-btn" aria-pressed="true">1. QR-код (Google / YouTube)</button>
+          <button class="btn" type="button" id="yt-tab-cookies-btn" aria-pressed="false">2. Файл cookies.txt</button>
+        </div>
+        <div id="yt-auth-oauth-panel" class="col" style="gap:12px">
+          <div class="login-grid" id="yt-oauth-prompt" hidden>
+            <div class="qr" id="yt-oauth-qr"><div class="empty">QR-код…</div></div>
+            <div class="col" style="gap:8px;min-width:0">
+              <b>Отсканируйте QR-код телефоном</b>
+              <p class="hint">Откройте <span class="mono" id="yt-oauth-url">https://www.google.com/device</span> и введите код:</p>
+              <div style="font-size:1.5em;font-weight:bold;letter-spacing:3px;color:var(--accent-ink)" id="yt-oauth-code">----</div>
+              <a class="btn primary" id="yt-oauth-link" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center">Открыть страницу входа</a>
+              <div class="row" style="gap:10px">
+                <span class="meta" id="yt-oauth-poll-status">Ожидание подтверждения...</span>
+                <span class="mono meta" id="yt-oauth-timer"></span>
+              </div>
+            </div>
+          </div>
+          <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn primary" type="button" id="yt-oauth-start-btn">Показать QR-код для входа</button>
+            <button class="btn danger-soft" type="button" id="yt-oauth-cancel-btn" hidden>Отмена</button>
+            <span class="meta" id="yt-oauth-state"></span>
+          </div>
+          <details style="margin-top:4px">
+            <summary>Собственные ключи Google Cloud (опционально)</summary>
+            <div class="col" style="gap:8px;margin-top:8px">
+              <p class="hint">По умолчанию используется стандартный TV-клиент YouTube. Заполняйте эти поля, только если хотите использовать собственный проект Google Cloud.</p>
+              <label class="col" style="gap:4px">
+                <span class="meta">OAuth Client ID</span>
+                <input class="field" id="yt-oauth-client-id" type="text" placeholder="xxxxxx.apps.googleusercontent.com" spellcheck="false">
+              </label>
+              <label class="col" style="gap:4px">
+                <span class="meta">Client Secret</span>
+                <input class="field" id="yt-oauth-client-secret" type="text" placeholder="GOCSPX-..." spellcheck="false">
+              </label>
+            </div>
+          </details>
+        </div>
+        <div id="yt-auth-cookies-panel" class="col" style="gap:10px" hidden>
+          <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap">
+            <label class="btn primary" style="cursor:pointer">
+              Выбрать файл cookies.txt
+              <input type="file" id="yt-cookies-file" accept=".txt,text/plain" hidden>
+            </label>
+            <span class="meta">или вставьте текст cookies ниже:</span>
+          </div>
+          <textarea class="field" id="yt-cookies-paste" rows="3" placeholder="Вставьте сюда текст cookies.txt или заголовок Cookie (SAPISID, SID, HSID, SSID...)" style="font-family:monospace;font-size:12px"></textarea>
+          <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn primary" type="button" id="yt-cookies-save-btn">Сохранить cookies</button>
+            <span class="meta" id="yt-cookies-state"></span>
+          </div>
+          <details>
+            <summary>Как получить cookies</summary>
+            <p class="hint">1. Откройте <a href="https://music.youtube.com" target="_blank" rel="noopener">music.youtube.com</a> в браузере, где вы вошли в аккаунт.<br>
+            2. Экспортируйте cookies с помощью расширения (например, <b>Get cookies.txt LOCALLY</b> для Chrome / Firefox) и загрузите файл кнопкой выше.<br>
+            3. Либо откройте инструменты разработчика (F12) → вкладка Network → обновите страницу → откройте любой запрос к music.youtube.com → скопируйте значение заголовка <code>Cookie:</code> и вставьте в поле выше.</p>
+          </details>
+        </div>
+      </section>
+    </div>
+  </main>
   <!-- ================= ПЛЕЕР ================= -->
   <main id="tab-player" data-page hidden>
-    <header class="page-head"><div><h1>Плеер</h1><div class="sub" id="pl-source">—</div></div></header>
+    <header class="page-head">
+      <div><h1>Плеер</h1><div class="sub" id="pl-source">—</div></div>
+      <div class="actions"><button type="button" class="btn sm danger-soft" id="pl-ext-stop" hidden>■ Стоп YouTube</button></div>
+    </header>
     <section class="card" id="pl-login" hidden>
       <h2>Нужен вход в Яндекс</h2>
       <p class="hint">Войдите в виджете «Сейчас играет» на «Обзоре» — по QR-коду или через страницу Яндекса.</p>
@@ -1889,6 +1987,7 @@
       <div class="pl-mtop">
         <button type="button" class="cbtn" id="pl-back" aria-label="Назад"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/></svg></button>
         <span id="pl-msrc"></span>
+        <button type="button" class="btn sm danger-soft" id="pl-m-ext-stop" hidden>■ Стоп</button>
         <button type="button" class="cbtn" id="pl-vol-btn" aria-label="Громкость и колонки"><svg width="20" height="20" aria-hidden="true"><use href="#i-vol"/></svg></button>
       </div>
       <section class="card pl-hero">
@@ -1928,7 +2027,14 @@
         </section>
         <div class="col pl-ya-only">
           <section class="card" data-pl-sec="queue">
-            <div class="card-head"><h2 id="pl-q-title">Очередь</h2><span class="meta" id="pl-q-count"></span></div>
+            <div class="card-head">
+              <h2 id="pl-q-title">Очередь</h2>
+              <div class="row" style="gap:8px">
+                <label class="row" id="pl-autoradio-wrap" style="gap:6px;font-size:12.5px" hidden><input type="checkbox" class="switch" id="pl-autoradio"><span>Авто-радио</span></label>
+                <button type="button" class="btn sm" id="pl-q-clear" hidden>Очистить</button>
+                <span class="meta" id="pl-q-count"></span>
+              </div>
+            </div>
             <div class="tlist" id="pl-queue"><div class="empty">—</div></div>
           </section>
           <section class="card" data-pl-sec="similar">
@@ -1954,147 +2060,6 @@
     </div>
   </main>
 
-  <!-- ================= ЗАПУСК ================= -->
-  <main id="tab-alarm" data-page hidden>
-    <header class="page-head">
-      <div><h1>Будильник</h1><div class="sub">Локальный: срабатывает на самой колонке, без интернета и без этого компьютера</div></div>
-      <div class="actions"><button class="btn primary" id="al-add"><svg width="18" height="18" aria-hidden="true"><use href="#i-plus"/></svg>Новый будильник</button></div>
-    </header>
-    <section class="card" id="al-setup" hidden>
-      <div class="card-head"><h2>Будильник не установлен на колонке</h2><span class="badge">нужна установка</span></div>
-      <p style="margin:0;color:var(--text-2)">Локальный будильник работает на самой колонке, поэтому на неё нужно поставить несколько файлов.
-        Установка ничего не меняет в прошивке, и её можно в любой момент полностью удалить.</p>
-      <ul class="al-points">
-        <li>скрипт будильника, ~8 КБ, и звук по умолчанию (таймер Алисы, ~1,7 МБ) — в <code>/data/quasar/webpanel/alarm</code>;</li>
-        <li>файл часового пояса этого компьютера — чтобы колонка знала местное время;</li>
-        <li>строка автозапуска в <code>/data/quasar/rootkeeper.sh</code> — тот же хук, что у заставки (копия оригинала сохраняется).</li>
-      </ul>
-      <div class="row"><button class="btn primary" id="al-install">Установить на колонку</button><span class="meta" id="al-install-note"></span></div>
-    </section>
-    <section class="card" id="al-snoozed" hidden>
-      <div class="row" style="justify-content:space-between"><span id="al-snoozed-text">—</span><button class="btn sm" id="al-snooze-cancel">Отменить</button></div>
-    </section>
-    <section class="card" id="al-editor" hidden>
-      <div class="card-head"><h2 id="al-ed-title">Новый будильник</h2></div>
-      <form class="al-form" id="al-form">
-        <label class="f">Время<input type="time" class="field" id="al-time" required></label>
-        <label class="f">Подпись<input type="text" class="field" id="al-label" maxlength="40" placeholder="например, «Работа»"></label>
-        <div class="f full"><label class="f" style="flex-direction:row;justify-content:space-between;align-items:center">Повторять
-          <span class="chips" id="al-presets"><button type="button" class="chip" data-d="">Один раз</button><button type="button" class="chip" data-d="12345">Будни</button><button type="button" class="chip" data-d="67">Выходные</button><button type="button" class="chip" data-d="1234567">Каждый день</button></span></label>
-          <div class="chips day-chips" id="al-days" style="margin-top:8px"></div></div>
-        <label class="f full">Что играет
-          <select class="field" id="al-mode">
-            <option value="wave">Моя волна</option>
-            <option value="show">Утреннее шоу Алисы</option>
-            <option value="music">Включить музыку…</option>
-            <option value="text">Попросить Алису…</option>
-            <option value="sound">Только звук (полностью локально)</option>
-          </select></label>
-        <label class="f full" id="al-query-l" hidden><span id="al-query-cap">Что включить</span><input type="text" class="field" id="al-query" maxlength="200"></label>
-        <p class="hint full" id="al-mode-hint"></p>
-        <label class="f full"><span id="al-sound-cap">Звук</span>
-          <span class="row" style="flex-wrap:nowrap"><select class="field" id="al-sound"></select>
-          <button type="button" class="btn sm" id="al-sound-play" title="Послушать" aria-label="Послушать выбранный звук"><svg width="14" height="14" aria-hidden="true"><use href="#i-play"/></svg></button>
-          <button type="button" class="btn sm" id="al-sound-up" title="Загрузить свой" aria-label="Загрузить свой звук"><svg width="14" height="14" aria-hidden="true"><use href="#i-ul"/></svg></button></span>
-          <input type="file" id="al-sound-file" accept="audio/*" hidden></label>
-        <label class="f"><span>Громкость: <span id="al-vol-v">50</span>%</span><input type="range" id="al-vol" min="1" max="10" step="1" value="5"></label>
-        <label class="f">Нарастание громкости
-          <select class="field" id="al-ramp"><option value="0">Сразу</option><option value="30">За 30 с</option><option value="60">За 1 мин</option><option value="180" selected>За 3 мин</option><option value="300">За 5 мин</option><option value="600">За 10 мин</option></select></label>
-        <label class="f">Выключить сам через
-          <select class="field" id="al-dur"><option value="5">5 мин</option><option value="10">10 мин</option><option value="15" selected>15 мин</option><option value="30">30 мин</option><option value="60">1 час</option><option value="0">Не выключать</option></select></label>
-        <label class="f">Отложить на
-          <select class="field" id="al-snz"><option value="5">5 мин</option><option value="9" selected>9 мин</option><option value="10">10 мин</option><option value="15">15 мин</option><option value="0">Не откладывать</option></select></label>
-        <div class="actions full">
-          <button class="btn primary" id="al-save">Сохранить</button>
-          <button type="button" class="btn" id="al-cancel">Отмена</button>
-          <button type="button" class="btn danger" id="al-del" hidden>Удалить</button>
-        </div>
-      </form>
-    </section>
-    <section class="card" id="al-list-card">
-      <div class="card-head"><h2>Будильники</h2><span class="badge" id="al-badge">—</span></div>
-      <div id="al-list"><div class="empty">Загрузка…</div></div>
-    </section>
-    <div class="cols" id="al-cols">
-      <section class="card">
-        <div class="card-head"><h2>Как это работает</h2></div>
-        <div class="al-note"><b>Это отдельный, локальный будильник.</b> Он хранится и срабатывает на самой колонке, поэтому,
-          в отличие от встроенных будильников Алисы, не зависит от интернета, серверов Яндекса и этого компьютера.
-          Будильники из приложения Алисы живут в облаке: здесь их не видно, и работают они как раньше.</div>
-        <ul class="al-points">
-          <li><b>Музыка Алисы</b> («Моя волна», утреннее шоу, свой запрос) требует интернета. Если его нет или Алиса за 30 секунд
-            ничего не включила, вместо музыки играет выбранный звук.</li>
-          <li><b>Выключить:</b> кнопка на колонке, «Алиса, стоп» или кнопка в панели. <b>Отложить</b> — из панели.</li>
-          <li>Время — по часовому поясу этого компьютера: <span id="al-tz">—</span>.</li>
-        </ul>
-        <div class="set-item" id="al-inst-row" style="padding-bottom:0">
-          <div class="set-label"><b>Установлено на колонке</b><small id="al-inst-info">—</small></div>
-          <div class="set-ctl"><button class="btn sm" id="al-update" hidden>Обновить скрипт</button><button class="btn sm danger" id="al-uninstall">Удалить с колонки</button></div>
-        </div>
-      </section>
-      <section class="card">
-        <div class="card-head"><h2>Журнал</h2><span class="meta" id="al-devtime"></span></div>
-        <pre class="out" id="al-log" style="max-height:240px">—</pre>
-      </section>
-    </div>
-  </main>
-
-  <main id="tab-scenes" data-page hidden>
-    <header class="page-head">
-      <div><h1>Сценарии</h1><div class="sub">Несколько действий подряд — по времени, после включения, по команде ассистенту или вручную; с условиями и повторами</div></div>
-      <div class="actions"><button class="btn primary" id="sc-add"><svg width="16" height="16" aria-hidden="true"><use href="#i-plus"/></svg>Новый сценарий</button></div>
-    </header>
-    <section class="card" id="sc-editor" hidden>
-      <div class="card-head"><h2 id="sc-ed-title">Новый сценарий</h2>
-        <div class="seg" id="sc-view" role="group" aria-label="Вид редактора"><button type="button" data-v="list">Список</button><button type="button" data-v="field">Поле</button></div></div>
-      <form class="al-form" id="sc-form">
-        <label class="f">Название<input type="text" class="field" id="sc-name" maxlength="40" placeholder="например, «Ночь»" required></label>
-        <label class="f">Когда
-          <select class="field" id="sc-trigger"><option value="time">По времени</option><option value="boot">После включения колонки</option><option value="voice">По команде ассистенту</option><option value="manual">Только вручную</option></select></label>
-        <label class="f full" data-sc-voice hidden>Фразы, через запятую<input type="text" class="field" id="sc-phrases" maxlength="300" placeholder="спать, пора спать"></label>
-        <p class="hint full" data-sc-voice hidden id="sc-voice-hint"></p>
-        <label class="f" data-sc-time>Время<input type="time" class="field" id="sc-time"></label>
-        <div class="f full" data-sc-time><label class="f" style="flex-direction:row;justify-content:space-between;align-items:center"><span id="sc-days-cap">Повторять</span>
-          <span class="chips" id="sc-presets"><button type="button" class="chip" data-d="" id="sc-once">Один раз</button><button type="button" class="chip" data-d="12345">Будни</button><button type="button" class="chip" data-d="67">Выходные</button><button type="button" class="chip" data-d="1234567">Каждый день</button></span></label>
-          <div class="chips day-chips" id="sc-days" style="margin-top:8px"></div></div>
-        <p class="hint full" id="sc-boot-hint" hidden>Запустится примерно через минуту после того, как Алиса загрузится, — при каждом включении колонки.</p>
-        <div class="full sc-board" id="sc-board">
-          <div class="sc-board-top">
-            <button type="button" class="btn sm" id="sc-arrange-full">Разложить<span class="sc-long"> по порядку</span></button>
-            <button type="button" class="btn sm icon" data-sc-center aria-label="К нодам" title="К нодам — если поле уехало"><svg width="16" height="16" aria-hidden="true"><use href="#i-target"/></svg></button>
-            <button type="button" class="btn sm icon" id="sc-full-close" aria-label="Закрыть поле" title="Закрыть">✕</button>
-          </div>
-          <div class="sc-steps" id="sc-steps"></div>
-          <button type="button" class="btn sc-open" id="sc-open-field"><svg width="18" height="18" aria-hidden="true"><use href="#i-flow"/></svg>Открыть поле нод</button>
-          <div class="sc-field-wrap">
-            <div class="sc-field" id="sc-field" hidden></div>
-            <button type="button" class="btn sm icon sc-expand" id="sc-expand" aria-label="Открыть поле на весь экран" title="На весь экран"><svg width="16" height="16" aria-hidden="true"><use href="#i-expand"/></svg></button>
-          </div>
-          <button type="button" class="sc-fab" id="sc-fab" aria-label="Добавить ноду" aria-controls="sc-add-step"><svg width="26" height="26" aria-hidden="true"><use href="#i-plus"/></svg></button>
-          <div class="sc-pal-backdrop" id="sc-pal-backdrop"></div>
-          <div class="row sc-arrange-row" style="justify-content:flex-end;margin-top:6px"><button type="button" class="btn sm" id="sc-arrange" hidden>Разложить по порядку</button>
-            <button type="button" class="btn sm icon" data-sc-center aria-label="К нодам" title="К нодам — если поле уехало"><svg width="16" height="16" aria-hidden="true"><use href="#i-target"/></svg></button></div>
-          <p class="hint" id="sc-field-hint" hidden>Поле бесконечное: тяните за фон, чтобы его сдвинуть, «К нодам» вернёт обратно. Тяните за заголовок, чтобы переставить ноду. Связь — от кружка справа к другой ноде; отпустить
-            на пустом месте — убрать связь. У условия и повтора два выхода. Новая нода сама цепляется к выбранной.</p>
-          <div class="sc-palette" id="sc-add-step"></div>
-        </div>
-        <div class="actions full">
-          <button class="btn primary" id="sc-save">Сохранить</button>
-          <button type="button" class="btn" id="sc-cancel">Отмена</button>
-          <button type="button" class="btn danger" id="sc-del" hidden>Удалить</button>
-        </div>
-      </form>
-    </section>
-    <section class="card">
-      <div class="card-head"><h2>Сценарии</h2><span class="badge" id="sc-badge">—</span></div>
-      <p class="hint">Выполняются на самой колонке — компьютер не нужен. Запросы и речь Алисы — через её облако, нужен интернет.</p>
-      <div id="sc-list"><div class="empty">Загрузка…</div></div>
-    </section>
-    <section class="card">
-      <div class="card-head"><h2>Журнал сценариев</h2></div>
-      <pre class="out" id="sc-log">—</pre>
-    </section>
-  </main>
   <main id="tab-charts" data-page hidden>
     <header class="page-head">
       <div><h1>Графики</h1><div class="sub">Раз в 10 секунд за последние сутки. История хранится на компьютере</div></div>
@@ -2453,7 +2418,7 @@
               <input type="text" class="field" id="party-bulb-name" required placeholder="Например: Люстра центр">
             </label>
             <label class="f">IP-адрес в Wi-Fi
-              <input type="text" class="field" id="party-bulb-ip" required placeholder="192.168.1.105">
+              <input type="text" class="field" id="party-bulb-ip" required placeholder="192.168.1.50">
             </label>
             <label class="f">ID устройства (Device ID)
               <input type="text" class="field" id="party-bulb-id" required placeholder="20–22 знака (bf...)">
@@ -2513,7 +2478,7 @@
           <button class="btn sm" type="button" id="party-import-close-btn" title="Закрыть" aria-label="Закрыть импорт ламп">✕</button>
         </div>
         <p class="hint" style="margin-bottom:10px;">Вставьте сюда список из <code>devices.json</code> (tinytuya wizard) или массив ламп в формате <code>[{"name": "...", "ip": "...", "id": "...", "key": "..."}]</code>.</p>
-        <textarea id="party-import-text" class="field" style="width:100%; height:120px; font-family:monospace; font-size:12px; margin-bottom:10px;" placeholder='[&#10;  {&#10;    "name": "Люстра",&#10;    "ip": "192.168.1.105",&#10;    "id": "bf0123456789abcdef",&#10;    "key": "0123456789abcdef",&#10;    "role": "kick"&#10;  }&#10;]'></textarea>
+        <textarea id="party-import-text" class="field" style="width:100%; height:120px; font-family:monospace; font-size:12px; margin-bottom:10px;" placeholder='[&#10;  {&#10;    "name": "Люстра",&#10;    "ip": "192.168.1.50",&#10;    "id": "bf0123456789abcdef",&#10;    "key": "0123456789abcdef",&#10;    "role": "kick"&#10;  }&#10;]'></textarea>
         <div class="row" style="gap:10px;">
           <button class="btn primary" type="button" id="party-import-apply-btn">Импортировать</button>
           <button class="btn" type="button" id="party-import-export-btn">Экспорт текущих</button>
@@ -2575,8 +2540,7 @@
         <div class="actions"><span class="badge" id="y2-badge">—</span></div>
       </div>
       <p class="hint" id="y2-intro">yam 2 — менеджер пакетов прямо на колонке (github.com/nyakokitsu/yam). Панель скачает последний релиз,
-        сверит контрольную сумму и положит его в <code>/data/yam</code> — как их установщик, но не трогая системный раздел.
-        Старый yamd ниже от этого не изменится.</p>
+        сверит контрольную сумму и положит его в <code>/data/yam</code> — как их установщик, но не трогая системный раздел.</p>
       <div class="set-item">
         <div class="set-label"><b>Версия</b><small id="y2-ver">проверяем…</small></div>
         <div class="set-ctl"><a class="btn sm" id="y2-notes" target="_blank" rel="noopener" hidden>Что нового ↗</a>
@@ -2595,8 +2559,6 @@
             <button class="btn sm danger" id="y2-uninstall">Удалить yam 2</button></div>
         </div>
         <pre class="out" id="y2-out" hidden style="max-height:220px"></pre>
-        <p class="hint untested-note" id="y2-legacy-note" hidden>Работает старый yamd. Он слушает порт 8099 — тот же, что Luna из
-          каталога yam 2, поэтому вместе они не запустятся: при запуске Luna панель предложит остановить yamd.</p>
       </div>
     </section>
 
@@ -2628,70 +2590,6 @@
       </section>
     </div>
 
-    <details class="legacy" id="yam-legacy">
-      <summary><b>Старый yam (yamd, v0.1)</b> <span class="meta" id="yam-legacy-state"></span></summary>
-
-    <section class="card" id="yam-missing" hidden>
-      <h2>yam не установлен</h2>
-      <p class="hint">yam — менеджер пакетов для Станций (github.com/nyakokitsu/yam). Панель скачает последний релиз yamd с GitHub, сверит контрольную сумму, положит его на колонку в /data/quazar/yam и запустит — как официальный установщик.</p>
-      <div class="row"><button class="btn primary" id="yam-install">Установить yam</button></div>
-    </section>
-
-    <section class="card" id="yam-card">
-      <div class="card-head">
-        <h2>yamd</h2>
-        <div class="actions">
-          <span class="badge" id="yam-badge">—</span>
-          <button class="btn sm primary" id="yam-start" hidden><svg width="14" height="14" aria-hidden="true"><use href="#i-play"/></svg>Запустить</button>
-          <a class="btn sm" id="yam-web" target="_blank" rel="noopener" hidden>Веб-интерфейс yam ↗</a>
-        </div>
-      </div>
-      <p class="hint" id="yam-off" hidden>Демон не работает — без него устанавливать и запускать пакеты нельзя.</p>
-      <div class="set-item" id="yam-ver-row">
-        <div class="set-label"><b>Версия</b><small id="yam-ver">проверяем…</small></div>
-        <div class="set-ctl"><a class="btn sm" id="yam-notes" target="_blank" rel="noopener" hidden>Что нового ↗</a>
-          <button class="btn sm primary" id="yam-update" hidden>Обновить yamd</button></div>
-      </div>
-      <div id="yam-update-confirm" hidden class="hint">
-        <p id="yam-update-text"></p>
-        <button class="btn primary" id="yam-update-confirm-btn">Обновить сейчас</button>
-        <button class="btn" id="yam-update-cancel">Отмена</button>
-      </div>
-      <p id="yam-update-result" role="status" class="hint" hidden></p>
-      <label class="toggle"><span>Запускать yamd при загрузке колонки</span>
-        <input type="checkbox" id="yam-autostart"></label>
-    </section>
-
-    <div id="yam-on" hidden>
-      <div class="cols" style="margin-bottom:14px">
-        <section class="card">
-          <div class="card-head"><h2>Установлено</h2><span class="meta" id="yam-count"></span></div>
-          <div id="yam-installed"><div class="empty">Загрузка…</div></div>
-        </section>
-        <section class="card">
-          <h2>Настройки yamd</h2>
-          <label class="toggle"><span>Разрешить бинарные пакеты <span class="meta" style="font-weight:500">— почти все пакеты реестра — программы; без этого они ставятся, но не запускаются</span></span>
-            <input type="checkbox" id="yam-binaries"></label>
-          <p class="hint">У API и веб-интерфейса yamd на порту 8099 нет авторизации — любой в локальной сети может ставить и запускать пакеты.</p>
-          <div class="card-head"><h2 style="font-size:15px">Лог пакета</h2><span class="meta mono" id="yam-log-id"></span></div>
-          <pre class="out" id="yam-log" style="min-height:120px;max-height:300px">Нажмите «Лог» у пакета.</pre>
-          <p class="hint">Разовые пакеты (как fastfetch) пишут результат сюда — он откроется сам после «Запустить».
-            Программы из пакетов можно запускать и в «Консоли» по имени, например <code>fastfetch</code>.</p>
-        </section>
-      </div>
-      <section class="card">
-        <div class="card-head">
-          <h2>Каталог</h2>
-          <div class="row" style="gap:8px">
-            <label class="search" style="min-width:220px"><svg width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg>
-              <input type="search" id="yam-filter" placeholder="Найти пакет" aria-label="Найти пакет"></label>
-            <button class="btn sm icon" id="yam-refresh" aria-label="Обновить каталог"><svg width="16" height="16" aria-hidden="true"><use href="#i-refresh"/></svg></button>
-          </div>
-        </div>
-        <div class="apps-grid" id="yam-catalog"><div class="empty">Загрузка…</div></div>
-      </section>
-    </div>
-    </details>
   </main>
 
   <main id="tab-assistant" data-page hidden>
@@ -2701,13 +2599,14 @@
       <div class="untested" id="as-experimental" role="alert" hidden>
         <svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2 1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z"/></svg>
         <div>
-          <strong>На <span id="as-exp-model">этой модели</span> ассистент не тестировался и может работать не так, как надо</strong>
-          <p>Он проверен только на Станции Лайт 2: читает журнал Алисы и отменяет её ответ через отладочный CLI, а здесь это
-            может быть устроено иначе. При загрузке колонки ассистент запускается через хук автозапуска — если после перезагрузки он не запустился сам, включите его здесь.
-            Заработало или нет — напишите, пожалуйста, в <a href="https://github.com/dimap/yapanel-web/issues" target="_blank" rel="noopener">Issues</a>
-            с моделью и версией прошивки.</p>
+          <strong>Экспериментальный режим для <span id="as-exp-model">Станции Макс</span></strong>
+          <p>На Станции Макс ассистент читает распознанные фразы и отменяет штатный ответ Алисы локально; при загрузке он
+            запускается через хук автозапуска — если после перезагрузки помощник не поднялся сам, включите его здесь.
+            Если заметили проблему, напишите в <a href="https://github.com/Timobzdecc/yapanel-web_max/issues" target="_blank" rel="noopener">Issues</a>
+            с версией прошивки.</p>
         </div>
       </div>
+    </header>
 
     <section class="card" id="as-missing" hidden>
       <h2>Помощник не установлен</h2>
@@ -2886,91 +2785,6 @@
     </section>
   </main>
 
-  <main id="tab-radio" data-page hidden>
-    <header class="page-head">
-      <div><h1>Радио</h1><div class="sub">Станции Алисы и свои интернет-радиостанции</div></div>
-    </header>
-
-    <section class="card" id="rd-miss" style="margin-bottom:14px" hidden>
-      <div class="row" style="gap:10px;align-items:center">
-        <div style="flex:1 1 260px;min-width:0"><b>Алиса услышала «<span id="rd-miss-phrase"></span>», но такой станции нет.</b>
-          <div class="hint" style="margin:2px 0 0">Привяжите это название к станции — в следующий раз она найдётся сразу.</div></div>
-        <select class="field" id="rd-miss-station" aria-label="Станция"></select>
-        <button class="btn sm primary" id="rd-miss-bind">Привязать</button>
-        <button class="btn sm" id="rd-miss-skip">Не нужно</button>
-      </div>
-    </section>
-
-    <section class="card" id="rd-now" style="margin-bottom:14px" hidden>
-      <div class="rd-now">
-        <svg width="28" height="28" aria-hidden="true"><use href="#i-radio"/></svg>
-        <div class="rd-name"><b id="rd-now-name">—</b><div class="hint" id="rd-now-title" style="margin:2px 0 0"></div></div>
-        <button class="btn" id="rd-stop">Выключить</button>
-      </div>
-      <p class="rd-note" id="rd-now-note" hidden></p>
-    </section>
-
-    <div class="cols" style="margin-bottom:14px">
-      <section class="card">
-        <div class="card-head"><h2>Станции Алисы</h2></div>
-        <p class="hint" style="margin-top:0">Включает сама Алиса — как «Алиса, включи радио …». Управление и громкость — в «Плеере».</p>
-        <div class="rd-chips" id="rd-alice"></div>
-        <form class="row" id="rd-alice-form" style="margin-top:12px;gap:8px">
-          <input class="field" name="name" placeholder="Другая станция Алисы" style="flex:1;min-width:160px" aria-label="Название станции Алисы">
-          <button class="btn sm">Включить</button>
-        </form>
-      </section>
-
-      <section class="card">
-        <div class="card-head"><h2>Свои станции</h2><span class="meta" id="rd-count"></span></div>
-        <div id="rd-missing" hidden>
-          <p class="hint" style="margin-top:0">Свои станции играет программа панели на колонке — та же, что у «Ассистента».
-            Она работает сама, компьютер с панелью для радио не нужен.</p>
-          <p class="hint" id="rd-unsupported" hidden>Пока только для Станции Лайт 2.</p>
-          <button class="btn primary" id="rd-install">Установить на колонку</button>
-        </div>
-        <p class="rd-note" id="rd-own-off" hidden style="margin:0 0 12px">Свои станции временно отключены: их проигрыватель
-          при переключении станций ломал звук всей колонки (Алиса переставала говорить до перезапуска). Список сохранён —
-          включу, как только найду безопасный способ. Станции Алисы слева работают.</p>
-        <div id="rd-own" hidden>
-          <div class="rd-list" id="rd-list"><div class="empty">Добавьте станцию ниже или найдите в каталоге.</div></div>
-          <form class="row" id="rd-add" style="margin-top:12px;gap:8px">
-            <input class="field" name="name" placeholder="Название — как вы его скажете" style="flex:1 1 160px;min-width:0" aria-label="Название станции" required>
-            <input class="field" name="url" placeholder="http://…/stream.mp3" style="flex:2 1 220px;min-width:0" aria-label="Адрес потока" required>
-            <button class="btn sm">Добавить</button>
-          </form>
-          <label class="toggle" style="margin-top:10px"><span>Включать голосом <span class="meta" style="font-weight:500" id="rd-voice-hint"></span></span>
-            <input type="checkbox" id="rd-voice"></label>
-          <form class="row" id="rd-proxy-form" style="gap:8px;margin-top:12px">
-            <input class="field" name="proxy" placeholder="Прокси для радио: http://адрес:порт" style="flex:1;min-width:180px" aria-label="Прокси для радио">
-            <button class="btn sm">Сохранить</button>
-          </form>
-          <p class="hint">Если провайдер не пускает к некоторым станциям, колонка возьмёт поток через этот HTTP-прокси
-            (можно с логином: http://логин:пароль@адрес:порт). Пусто — напрямую.</p>
-          <p class="hint">Играют потоки MP3, AAC и FLAC по HTTP и HTTPS; OGG Vorbis колонка не умеет. Пока вы говорите с Алисой, радио замолкает и потом
-            продолжает, если вы не попросили её включить что-то своё.</p>
-        </div>
-      </section>
-    </div>
-
-    <section class="card">
-      <div class="card-head"><h2>Найти станцию</h2></div>
-      <form class="row" id="rd-search" style="gap:8px">
-        <label class="search" style="flex:1;min-width:200px"><svg width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg>
-          <input type="search" name="q" placeholder="Название, например «jazz» или «рок»" aria-label="Название станции"></label>
-        <select class="field" name="country" aria-label="Страна">
-          <option value="">Все страны</option><option value="RU">Россия</option><option value="BY">Беларусь</option>
-          <option value="KZ">Казахстан</option><option value="UA">Украина</option><option value="US">США</option>
-          <option value="GB">Великобритания</option><option value="DE">Германия</option><option value="FR">Франция</option>
-        </select>
-        <button class="btn sm">Найти</button>
-      </form>
-      <p class="hint">Каталог <a href="https://www.radio-browser.info" target="_blank" rel="noopener">radio-browser.info</a> — открытый,
-        десятки тысяч станций. Запрос уходит с компьютера с панелью.</p>
-      <div class="rd-list" id="rd-results"></div>
-    </section>
-  </main>
-
   <!-- ================= ФАЙЛЫ ================= -->
   <main id="tab-files" data-page hidden>
     <header class="page-head">
@@ -3025,17 +2839,21 @@
 
   <!-- ================= ЛОГИ ================= -->
   <main id="tab-logs" data-page hidden>
-    <header class="page-head"><div><h1>Логи</h1><div class="sub">Демоны Quasar, журнал ядра и журнал самой панели</div></div></header>
+    <header class="page-head">
+      <div><h1>Логи</h1><div class="sub">Журнал панели, ошибки сервера/браузера и системные логи колонки</div></div>
+      <div class="actions"><button class="btn sm" id="log-copy">Скопировать лог</button><button class="btn sm primary" data-report="log-report">Отчёт для Issue</button></div>
+    </header>
     <section class="card">
       <div class="row" style="gap:8px">
         <select id="log-name" class="field" aria-label="Лог"></select>
         <select id="log-lines" class="field" aria-label="Строк"><option>100</option><option selected>300</option><option>1000</option></select>
         <button class="btn sm" id="log-load" style="min-height:42px"><svg width="16" height="16" aria-hidden="true"><use href="#i-refresh"/></svg>Обновить</button>
         <label class="toggle" style="min-height:42px;gap:8px;font-size:14px"><input type="checkbox" id="log-follow"> авто (3 с)</label>
-        <label class="toggle" style="min-height:42px;gap:8px;font-size:14px" title="Device ID, серийный номер, Wi‑Fi и MAC-адреса, логин, номер аккаунта и токены Яндекса"><input type="checkbox" id="log-mask" checked> скрыть личное</label>
+        <label class="toggle" style="min-height:42px;gap:8px;font-size:14px" title="Device ID, серийный номер, Wi‑Fi и MAC-адреса, логин, номер аккаунта и токены"><input type="checkbox" id="log-mask" checked> скрыть личное</label>
         <label class="search" style="flex:1;min-width:160px"><svg width="16" height="16" aria-hidden="true"><use href="#i-search"/></svg>
           <input type="search" id="log-filter" placeholder="Фильтр" aria-label="Фильтр"></label>
       </div>
+      <textarea class="field mono report-text" id="log-report" readonly hidden aria-label="Отчёт для Issue"></textarea>
       <pre class="out" id="log-out">—</pre>
     </section>
   </main>
@@ -3087,75 +2905,6 @@
   
 
   <!-- ================= КОНСОЛЬ ================= -->
-  
-
-  <main id="tab-led" data-page hidden>
-    <header class="page-head">
-      <div><h1>LED-панель</h1><div class="sub">88 диодов через штатную led-play — рисуй по диодам, запускай эффекты, анимации и свой GIF</div></div>
-      <div class="actions"><span class="badge" id="led-state">led-play</span></div>
-    </header>
-
-    <section class="card">
-      <div class="led-tools">
-        <label>Цвет <input type="color" id="led-color" value="#cc33cc"></label>
-        <label>Яркость <input type="range" id="led-bright" min="1" max="255" value="160"><b id="led-bright-v">160</b></label>
-        <label><input type="checkbox" id="led-erase"> Ластик</label>
-        <label><input type="checkbox" id="led-auto"> Авто-отправка</label>
-      </div>
-      <div class="led-presets" id="led-presets"></div>
-      <div class="led-stage"><div class="led-grid" id="led-grid" aria-label="Раскладка панели"></div></div>
-      <div class="led-actions">
-        <button class="btn" id="led-fill">Залить всё</button>
-        <button class="btn" id="led-clearlocal">Очистить холст</button>
-        <button class="btn primary" id="led-apply">Применить на колонку</button>
-        <button class="btn" id="led-off">Погасить</button>
-        <button class="btn" id="led-release">Вернуть Алисе</button>
-      </div>
-      <p class="hint">Рисуем все 88 диодов: 0–83 — основная панель, 84–87 (пунктир в центре) — логотип. Клик/протяжка —
-        красит выбранным цветом, «Ластик» — гасит. Нарисовал → «Применить»: кадр отдаётся штатной <code>led-play</code>
-        и <b>удерживается</b>, перебивая анимацию Алисы (при разговоре с ней кадр мигает — это нормально).
-        «Погасить» — чёрный экран. «Вернуть Алисе» — отдать панель прошивке.</p>
-    </section>
-
-    <section class="card">
-      <h2 style="margin:0 0 10px">Эффекты</h2>
-      <div class="led-actions">
-        <button class="btn" data-anim="rainbow">Радуга</button>
-        <button class="btn" data-anim="pulse">Пульс</button>
-        <button class="btn" data-anim="chase">Бегущая точка</button>
-        <button class="btn" data-anim="comet">Комета</button>
-        <button class="btn" data-anim="wave">Волна</button>
-        <button class="btn" data-anim="ripple">Рябь</button>
-        <button class="btn" data-anim="fire">Огонь</button>
-        <button class="btn" data-anim="stars">Звёзды</button>
-        <button class="btn" data-anim="matrix">Матрица</button>
-        <button class="btn" data-anim="gradient">Градиент</button>
-        <button class="btn" data-anim="strobe">Мигалки</button>
-        <button class="btn" id="led-stop">■ Стоп</button>
-      </div>
-      <p class="hint">Эффекты генерятся как <code>.led</code> и крутятся на колонке в фоне (переживают закрытие вкладки); «Стоп» гасит.
-        Выбранный выше цвет берут: пульс, бегущая точка, комета, волна, рябь, градиент. Радуга, огонь, звёзды,
-        матрица и мигалки — со своей палитрой.</p>
-    </section>
-
-    <section class="card">
-      <h2 style="margin:0 0 10px">Стандартные анимации прошивки</h2>
-      <div class="led-actions" id="led-patterns-list"><span class="hint">загрузка…</span></div>
-      <p class="hint">Те самые <code>.led</code>-ролики из <code>ledpatterns/panel/</code>, что Алиса крутит сама
-        (idle, candle, lavalamp, boot и др.). Проигрываются удержанием, зациклены; «Стоп» выше — остановить.</p>
-    </section>
-
-    <section class="card">
-      <h2 style="margin:0 0 10px">Свой GIF</h2>
-      <div class="led-actions">
-        <input type="file" id="led-gif-file" accept="image/gif" hidden>
-        <button class="btn primary" id="led-gif-btn">Выбрать GIF…</button>
-        <button class="btn" id="led-gif-stop">■ Стоп</button>
-      </div>
-      <p class="hint">Любая гифка проигрывается прямо на диодах (<code>led-play -g</code>, зациклено, до 4 МБ).
-        Панель всего 84 диода — крупные простые гифки читаются лучше мелких деталей.</p>
-    </section>
-  </main>
 </div>
 <div class="minibar" id="minibar" hidden>
   <div class="mb-track">
@@ -3214,20 +2963,47 @@
     </div>
   </div>
 </dialog>
+<dialog class="dsp-dialog" id="yt-screen-dialog" aria-labelledby="yt-screen-title">
+  <div class="dsp-dialog-head">
+    <div>
+      <h2 id="yt-screen-title">Экран станции</h2>
+      <p class="hint" id="yt-screen-hint">Вход в Google выполняется на станции. Сначала нажми «Открыть вход Google», затем тапни поле на экране и введи текст ниже. Пароль не сохраняется. Не открывай этот экран в недоверенной сети.</p>
+    </div>
+    <button class="cbtn" type="button" id="yt-screen-close" aria-label="Закрыть">✕</button>
+  </div>
+  <div style="padding:0 20px 18px;overflow:auto">
+    <div style="position:relative;background:#000;border-radius:12px;overflow:hidden;min-height:240px">
+      <img id="yt-screen-img" alt="Экран станции" style="display:block;width:100%;max-height:62vh;object-fit:contain;cursor:crosshair">
+      <div id="yt-screen-loading" class="meta" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;background:rgba(0,0,0,.35)">Загрузка экрана…</div>
+    </div>
+    <div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap">
+      <button class="btn primary" type="button" id="yt-screen-google">Открыть вход Google</button>
+      <button class="btn" type="button" id="yt-screen-back">Назад</button>
+      <button class="btn" type="button" id="yt-screen-home">Домой</button>
+      <button class="btn" type="button" id="yt-screen-key-enter">Enter</button>
+      <button class="btn" type="button" id="yt-screen-key-tab">Tab</button>
+      <button class="btn" type="button" id="yt-screen-clear">Очистить</button>
+      <span class="meta" id="yt-screen-status" role="status" aria-live="polite"></span>
+    </div>
+    <form class="row" id="yt-screen-text-form" style="margin-top:10px;gap:8px">
+      <input class="field" id="yt-screen-text" autocomplete="off" spellcheck="false" placeholder="Текст для активного поля на станции" style="flex:1;min-width:0">
+      <label class="meta" style="display:flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="yt-screen-secret"> скрыть</label>
+      <button class="btn" type="submit">Ввести</button>
+    </form>
+    <p class="hint" style="margin:8px 0 0">Сначала тапни поле на экране, затем введи текст здесь. Для пароля включи «скрыть»; после отправки поле очищается.</p>
+  </div>
+</dialog>
 <div id="toast" role="status" aria-live="polite"></div>
 <div class="msheet-bg" id="msheet-bg"></div>
 <div class="alice-wait" id="alice-wait" role="status" aria-live="polite" hidden>
   <div class="card"><div class="conn-ring"></div><b id="alice-wait-title">Алиса перезапускается</b>
     <span class="meta" id="alice-wait-text">Обычно это около 30 секунд — пока она недоступна, музыка и команды не работают</span></div>
 </div>
-<div id="alarm-bar" role="alert" hidden>
-  <svg class="ring-ic" width="22" height="22" aria-hidden="true"><use href="#i-alarm"/></svg>
-  <div><b id="ab-title">Будильник звенит</b><div style="font-size:12.5px;opacity:.85" id="ab-sub"></div></div>
-  <div class="actions"><button class="btn sm" id="ab-snooze">Отложить</button><button class="btn sm primary" id="ab-stop">Выключить</button></div>
-</div>
 
-<script src="static/anim-presets.js?v=0.3.12"></script>
-<script src="static/app.js?v=0.3.12"></script>
+<script src="static/vendor/qrcode.js"></script>
+<script src="static/anim-presets.js?v=0.3.11"></script>
+<script src="static/app.js?v=0.3.29"></script>
+<script src="static/extmusic.js?v=0.3.29"></script>
 <script type="module">
 import { bindVoiceInput } from './static/voice-input.js';
 import { startAsciiBackground } from './static/ascii-background.js';
@@ -3241,131 +3017,6 @@ pause.value = String(Math.round(Math.max(0, Math.min(3, Number.isFinite(saved) ?
 const pauseMs = () => Number(pause.value) * 1000;
 pause.addEventListener('change', () => store.set('ui.alice.pause', pause.value));
 voiceInput = bindVoiceInput(document, { store, ready: () => !!(online && mu.info?.auth?.logged_in && mu.info?.glagol?.connected), getGlagol: () => mu.info?.glagol, httpsPort: () => accessInfo?.ports?.https, send: form => sendAlice(form), pauseMs });
-</script>
-<script>
-// ---------- LED-панель (Станция 2, 88 диодов, /dev/fb0 через штатный led-play) ----------
-(function () {
-  const grid = $('#led-grid');
-  if (!grid) return;
-  // карта раскладки из визуализатора YSgen2: "ряд-колонка" -> индекс диода (сетка 15×13)
-  const COLS = 15, ROWS = 13, NLED = 88;  // индексы 0..87 (88-й в кадре не светится)
-  const gridMap = {};
-  const addRow = (row, cols, start) => cols.forEach((c, i) => gridMap[row + '-' + c] = start + i);
-  addRow(0, [1,3,5,7,9,11,13], 0);  addRow(1, [0,2,4,6,8,10,12,14], 7);
-  addRow(2, [1,3,5,7,9,11,13], 15); addRow(3, [0,2,4,6,8,10,12,14], 22);
-  addRow(4, [1,3,5,7,9,11,13], 30);
-  gridMap['5-0']=37; gridMap['5-2']=38; gridMap['5-6']=86; gridMap['5-8']=87; gridMap['5-12']=39; gridMap['5-14']=40;
-  gridMap['6-1']=41; gridMap['6-13']=42;
-  gridMap['7-0']=43; gridMap['7-2']=44; gridMap['7-6']=85; gridMap['7-8']=84; gridMap['7-12']=45; gridMap['7-14']=46;
-  addRow(8, [1,3,5,7,9,11,13], 47); addRow(9, [0,2,4,6,8,10,12,14], 54);
-  addRow(10,[1,3,5,7,9,11,13], 62); addRow(11,[0,2,4,6,8,10,12,14], 69);
-  addRow(12,[1,3,5,7,9,11,13], 77);
-
-  const colors = Array.from({ length: NLED }, () => ({ r: 0, g: 0, b: 0 }));
-  const cellByIdx = {};
-  let painting = false;
-
-  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
-    const idx = gridMap[r + '-' + c];
-    const cell = document.createElement('div');
-    cell.className = 'led-cell' + (idx === undefined ? ' empty' : '') + (idx >= 84 ? ' oknix' : '');
-    if (idx !== undefined) {
-      cellByIdx[idx] = cell;
-      cell.addEventListener('pointerdown', e => { e.preventDefault(); painting = true; paint(idx); });
-      cell.addEventListener('pointerenter', () => { if (painting) paint(idx); });
-    }
-    grid.appendChild(cell);
-  }
-  window.addEventListener('pointerup', () => { painting = false; });
-
-  const hex2rgb = h => ({ r: parseInt(h.slice(1,3),16), g: parseInt(h.slice(3,5),16), b: parseInt(h.slice(5,7),16) });
-  const curColor = () => $('#led-erase').checked ? { r:0,g:0,b:0 } : hex2rgb($('#led-color').value);
-  const scale = v => Math.round(v * (+$('#led-bright').value) / 255);
-
-  function drawCell(idx) {
-    const c = colors[idx], el = cellByIdx[idx];
-    const R = scale(c.r), G = scale(c.g), B = scale(c.b);
-    if (R || G || B) { el.style.background = `rgb(${R},${G},${B})`; el.style.boxShadow = `0 0 7px rgb(${R},${G},${B})`; }
-    else { el.style.background = '#1c1c24'; el.style.boxShadow = 'inset 0 0 0 1px #33333f'; }
-  }
-  const redraw = () => { for (let i = 0; i < NLED; i++) drawCell(i); };
-  function paint(idx) { colors[idx] = curColor(); drawCell(idx); autoApply(); }
-
-  // кадр для led-play: 88 токенов RRGGBBWW (0..83 панель + 84..87 центр логотипа), W=0; яркость — масштабом
-  function frameTokens() {
-    const out = [];
-    for (let i = 0; i < NLED; i++) {
-      const c = colors[i];
-      out.push([scale(c.r), scale(c.g), scale(c.b), 0].map(x => x.toString(16).padStart(2, '0')).join(''));
-    }
-    return out;
-  }
-  // led-play -r держит кадр и перебивает штатную анимацию прошивки
-  const applyNow = (btn, msg) => act(btn, () => api('/api/led', { cmd: 'frame', tokens: frameTokens() }), msg);
-  let autoT = null;
-  function autoApply() { if ($('#led-auto').checked) { clearTimeout(autoT); autoT = setTimeout(() => applyNow(null, null), 300); } }
-
-  const PRESETS = [['Тёплый','#ff7814'],['Красный','#ff0000'],['Зелёный','#00ff00'],['Синий','#0000ff'],
-                   ['Голубой','#00ffff'],['Малиновый','#ff00ff'],['Жёлтый','#ffc800'],['Белый','#ffffff']];
-  const pr = $('#led-presets');
-  PRESETS.forEach(([name, hex]) => {
-    const b = document.createElement('button');
-    b.className = 'led-swatch'; b.title = name; b.style.background = hex;
-    b.onclick = () => { $('#led-color').value = hex; $('#led-erase').checked = false;
-      const c = hex2rgb(hex); for (let i = 0; i < NLED; i++) colors[i] = c; redraw(); autoApply(); };
-    pr.appendChild(b);
-  });
-
-  $('#led-fill').onclick = () => { const c = curColor(); for (let i = 0; i < NLED; i++) colors[i] = c; redraw(); autoApply(); };
-  $('#led-clearlocal').onclick = () => { for (let i = 0; i < NLED; i++) colors[i] = { r:0,g:0,b:0 }; redraw(); autoApply(); };
-  $('#led-apply').onclick = e => applyNow(e.currentTarget, 'Отправлено на колонку');
-  // «Погасить» = удержание чёрного кадра (led-play -r), перебивает прошивку даже при активной Алисе
-  $('#led-off').onclick = e => { for (let i = 0; i < NLED; i++) colors[i] = { r:0,g:0,b:0 }; redraw();
-    act(e.currentTarget, () => api('/api/led', { cmd: 'off' }), 'Погашено'); };
-  $('#led-release').onclick = e => act(e.currentTarget, () => api('/api/led', { cmd: 'stop' }), 'Панель отдана Алисе');
-  $('#led-bright').oninput = e => { $('#led-bright-v').textContent = e.target.value; redraw(); autoApply(); };
-
-  $$('#tab-led [data-anim]').forEach(b => b.onclick = () => {
-    const c = hex2rgb($('#led-color').value);
-    act(b, () => api('/api/led', { cmd: 'anim', kind: b.dataset.anim, color: [c.r, c.g, c.b] }), 'Запущено: ' + b.textContent.trim());
-  });
-  $('#led-stop').onclick = e => act(e.currentTarget, () => api('/api/led', { cmd: 'stop' }), 'Остановлено');
-
-  // ---- свой GIF (led-play -g) ----
-  $('#led-gif-btn').onclick = () => $('#led-gif-file').click();
-  $('#led-gif-file').onchange = e => {
-    const f = e.target.files[0]; if (!f) return;
-    act($('#led-gif-btn'), async () => {
-      const buf = await f.arrayBuffer();
-      return api('/api/led/gif', buf, { raw: true, headers: { 'Content-Type': 'application/octet-stream' } });
-    }, 'GIF запущен: ' + f.name);
-    e.target.value = '';
-  };
-  $('#led-gif-stop').onclick = e => act(e.currentTarget, () => api('/api/led', { cmd: 'stop' }), 'Остановлено');
-
-  // ---- стандартные .led-анимации прошивки ----
-  let patLoaded = false;
-  function loadPatterns() {
-    if (patLoaded) return;
-    const box = $('#led-patterns-list'); if (!box) return;
-    api('/api/led/patterns').then(r => {
-      patLoaded = true;
-      const list = r.patterns || [];
-      if (!list.length) { box.innerHTML = '<span class="hint">нет файлов</span>'; return; }
-      box.innerHTML = '';
-      list.forEach(name => {
-        const b = document.createElement('button'); b.className = 'btn';
-        b.textContent = name.replace(/\.led$/, '');
-        b.onclick = () => act(b, () => api('/api/led', { cmd: 'play', args: [name] }), 'Играет: ' + b.textContent);
-        box.appendChild(b);
-      });
-    }).catch(() => {});  // оффлайн — подгрузим при следующем показе вкладки
-  }
-  window.addEventListener('hashchange', () => { if (location.hash === '#led') loadPatterns(); });
-  if (location.hash === '#led') loadPatterns();
-
-  redraw();
-})();
 </script>
 <script>
 // ---------- слова активации: тонкий клиент к API демона tangenx/wakeword ----------
@@ -3679,7 +3330,6 @@ wwLoad();
 wwActionsLoad();
 
 </script>
-<script src="static/vendor/qrcode.js"></script>
 <script src="static/vendor/xterm/xterm.js"></script>
 <script src="static/vendor/xterm/addon-fit.js"></script>
 <script type="module" src="static/model.js"></script>

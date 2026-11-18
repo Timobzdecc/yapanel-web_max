@@ -22,7 +22,7 @@ class Resp:
         return False
 
 
-def panel(platform="plum", shell=None):
+def panel(platform="yandexstation_2", shell=None):
     p = server.Panel(Mock())
     p.glagol = SimpleNamespace(platform=platform, host="192.0.2.10")
     p.adb.serial = "192.0.2.10:5555"
@@ -50,10 +50,10 @@ class Installed(unittest.TestCase):
         self.assertTrue(st["autostart"])
 
     def test_supported_platforms(self):
-        self.assertTrue(panel("plum")._wakeword_supported()[0])
-        self.assertTrue(panel("yandexmidi")._wakeword_supported()[0])
         self.assertTrue(panel("yandexstation_2")._wakeword_supported()[0])   # Макс
         self.assertEqual(panel("yandexstation_2")._wakeword_supported()[1], "yandexstation_2")
+        self.assertFalse(panel("plum")._wakeword_supported()[0])
+        self.assertFalse(panel("yandexmidi")._wakeword_supported()[0])
 
 
 class Api(unittest.TestCase):
@@ -218,7 +218,6 @@ if __name__ == "__main__":
 class Routing(unittest.TestCase):
     def setUp(self):
         self.p = panel()
-        self.p.scenes = Mock(return_value={"scenes": [{"id": "s1", "name": "Свет"}]})
         self.p._wakeword_apply_dry_run = Mock()
         self.saved = {}
         for target, effect in (("server.load_settings", lambda: dict(self.saved)),
@@ -231,29 +230,23 @@ class Routing(unittest.TestCase):
         self.p.wakeword_actions_set("дипсик", "alice")
         self.assertNotIn("дипсик", self.saved.get("wakeword_actions", {}))
 
-    def test_none_and_scene(self):
+    def test_none_and_assistant(self):
         self.p.wakeword_actions_set("дипсик", "none")
         self.assertEqual(self.saved["wakeword_actions"]["дипсик"], {"type": "none", "scene": ""})
-        self.p.wakeword_actions_set("дипсик", "scene", "s1")
-        self.assertEqual(self.saved["wakeword_actions"]["дипсик"], {"type": "scene", "scene": "s1"})
         self.p.wakeword_actions_set("дипсик", "assistant")
         self.assertEqual(self.saved["wakeword_actions"]["дипсик"], {"type": "assistant", "scene": ""})
 
-    def test_scene_validation(self):
-        with self.assertRaisesRegex(server.AdbError, "нет такого сценария"):
+    def test_invalid_action_rejected(self):
+        with self.assertRaisesRegex(server.AdbError, "неизвестное действие"):
             self.p.wakeword_actions_set("x", "scene", "nope")
 
     def test_fire_actions(self):
         self.p._wakeword_api = Mock()
-        self.p.scene_run = Mock()
         self.p.assistant_command = Mock()
         self.p._wakeword_fire({"word": "x", "name": "Икс"}, {"x": {"type": "alice"}})
         self.p._wakeword_api.assert_called_once_with("/api/listen", "POST", timeout=3)
         self.p._wakeword_api.reset_mock()
         self.p._wakeword_fire({"word": "x"}, {"x": {"type": "none"}})
-        self.p._wakeword_api.assert_not_called()
-        self.p._wakeword_fire({"word": "x"}, {"x": {"type": "scene", "scene": "s1"}})
-        self.p.scene_run.assert_called_once_with("s1")
         self.p._wakeword_api.assert_not_called()
         self.p._wakeword_fire({"word": "x"}, {"x": {"type": "assistant"}})
         self.p.assistant_command.assert_called_once_with({"route": True})

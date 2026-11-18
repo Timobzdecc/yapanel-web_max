@@ -3,9 +3,9 @@ from .router import ApiRequest, Response, Router
 
 
 def build_router():
-    from . import dsp, fs, media, party, phrases, yam
+    from . import dsp, extmusic, fs, media, party, phrases, yam
     router = Router()
-    for module in (party, dsp, yam, media, fs, phrases):
+    for module in (party, dsp, yam, media, fs, phrases, extmusic):
         module.register(router)
     return router
 

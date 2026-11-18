@@ -28,34 +28,53 @@ const manifest=JSON.parse(await readFile(new URL('../static/manifest.webmanifest
 assert.equal(manifest.scope,'./');assert.equal(manifest.start_url,'./#overview');
 // Exercise real service worker handlers without a browser or any network.
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+const swSource=await readFile(new URL('../static/sw.js',import.meta.url),'utf8');
+assert(swSource.includes("panel-v15:"),'service worker must use panel-v15 namespace');
+assert(swSource.includes('static/app.js?v=0.3.29'),'sw.js must preload app.js v=0.3.29');
+assert(swSource.includes('static/extmusic.js?v=0.3.29'),'sw.js must preload extmusic.js v=0.3.29');
+for(const script of [...swSource.matchAll(/static\/[a-z0-9_.-]+\.js\?v=[^'"]+/g)].map(m=>m[0])){
+  assert(html.includes(script),'index.html and sw.js script version must match: '+script);
+}
 for(const path of ['/','/speaker/room-a/','/speaker/room-b/']){
-  const handlers={},puts=[],deleted=[];
+  const handlers={},puts=[],deleted=[],fetchCalls=[];
   const base='https://panel.test'+path;
   const sw={
     URL,
     self:{location:{href:base+'sw.js'},addEventListener:(name,fn)=>handlers[name]=fn,clients:{claim:async()=>{}}},
-    fetch:async request=>({ok:true,clone:()=>({url:request.url})}),
+    fetch:async (request,init)=>{
+      if(request&&typeof request==='object'&&request.mode==='navigate'&&init&&Object.keys(init).length>0){
+        throw new TypeError("Cannot construct a Request with a Request whose mode is 'navigate' and a non-empty RequestInit");
+      }
+      fetchCalls.push({request,init});
+      const targetUrl=typeof request==='string'?request:request.url;
+      return {ok:true,clone:()=>({url:targetUrl})};
+    },
     caches:{
       open:async()=>({put:async(key,response)=>puts.push({key,response})}),
       match:async()=>null,
-      keys:async()=>['panel-v10:'+new URL(path,base).pathname+':shell','panel-v11:'+new URL(path,base).pathname+':shell'],
+      keys:async()=>['panel-v14:'+new URL(path,base).pathname+':shell','panel-v15:'+new URL(path,base).pathname+':shell'],
       delete:async key=>deleted.push(key),
     },
     Response:{error:()=>({error:true})},
   };
-  vm.runInNewContext(await readFile(new URL('../static/sw.js',import.meta.url),'utf8'),sw);
-  for(const leaf of ['api/status','api/clock','static/models/lite2.stl','ca.crt'])handlers.fetch({request:{method:'GET',url:base+leaf},respondWith:()=>assert.fail('must not cache '+leaf)});
-  // Навигация на саму панель кладётся под ключ оболочки; навигация в галерею — нет.
+  vm.runInNewContext(swSource,sw);
+  for(const leaf of ['api/status','api/clock','ca.crt','sw.js','static/sw.js'])handlers.fetch({request:{method:'GET',url:base+leaf},respondWith:()=>assert.fail('must not cache '+leaf)});
+  // Навигация на саму панель кладётся под ключ оболочки и всегда обходит HTTP-кэш (строковый URL + cache: 'no-store').
   const panel={method:'GET',url:base,mode:'navigate'};let response;
-  handlers.fetch({request:panel,respondWith:p=>response=p});await response;await tick();
+  handlers.fetch({request:panel,respondWith:p=>response=p});const res=await response;await tick();
+  assert(!res.error,'panel navigation fetch must not throw Fetch Standard TypeError');
   assert.equal(puts.at(-1).key,base,'panel navigation caches the shell');
-  const preview={method:'GET',url:base+'static/model-preview.html',mode:'navigate'};
-  handlers.fetch({request:preview,respondWith:p=>response=p});await response;await tick();
-  assert.equal(puts.at(-1).key,preview,'gallery navigation must not overwrite the shell');
+  assert.equal(fetchCalls.at(-1).request,base,'panel navigation fetch must pass string URL, not navigate Request');
+  assert.equal(fetchCalls.at(-1).init?.cache,'no-store','panel navigation fetch must bypass HTTP cache');
+  assert.equal(fetchCalls.at(-1).init?.credentials,'same-origin','panel navigation fetch must pass same-origin credentials');
+  assert.equal(Object.keys(fetchCalls.at(-1).init||{}).length,2);
+  const other={method:'GET',url:base+'other.html',mode:'navigate'};
+  handlers.fetch({request:other,respondWith:p=>response=p});await response;await tick();
+  assert.equal(puts.at(-1).key,other,'subpage navigation must not overwrite the shell');
   assert.notEqual(puts.at(-1).key,base);
   // Обновление namespace удаляет старый кэш.
   let activation;handlers.activate({waitUntil:p=>activation=p});await activation;
-  assert(deleted.some(key=>key.startsWith('panel-v10:')),'old panel cache is deleted');
-  assert(!deleted.some(key=>key.startsWith('panel-v11:')),'current cache is kept');
+  assert(deleted.some(key=>key.startsWith('panel-v14:')),'old panel cache is deleted');
+  assert(!deleted.some(key=>key.startsWith('panel-v15:')),'current cache is kept');
 }
 console.log('Page context, scoped storage, WebSocket, manifest, shell-only navigation cache and cache version cases passed');

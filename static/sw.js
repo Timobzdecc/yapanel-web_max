@@ -1,10 +1,10 @@
 // One shell/cache per explicit device base. API responses are never cached.
 const BASE=new URL('./',self.location.href);
-const NAMESPACE='panel-v11:'+BASE.pathname+':';
+const NAMESPACE='panel-v15:'+BASE.pathname+':';
 const CACHE=NAMESPACE+'shell';
 // Кэши прошлых версий для этой же панели: имя оканчивается на «:<base>:shell» при любом panel-vN.
 const CACHE_SUFFIX=':'+BASE.pathname+':shell';
-const SHELL=[BASE.href,new URL('static/app.js?v=0.3.12',BASE).href,new URL('static/anim-presets.js?v=0.3.12',BASE).href,new URL('static/icons/icon-192.png',BASE).href];
+const SHELL=[BASE.href,new URL('static/app.js?v=0.3.29',BASE).href,new URL('static/extmusic.js?v=0.3.29',BASE).href,new URL('static/anim-presets.js?v=0.3.11',BASE).href,new URL('static/icons/icon-192.png',BASE).href];
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).catch(()=>{}));
   self.skipWaiting();
@@ -17,11 +17,12 @@ self.addEventListener('fetch',event=>{
   if(request.method!=='GET'||url.origin!==BASE.origin||!url.pathname.startsWith(BASE.pathname))return;
   const path=url.pathname.slice(BASE.pathname.length);
   if(BASE.pathname==='/'&&path.startsWith('speaker/'))return; // Child scopes own their caches.
-  if(path.startsWith('api/')||path.endsWith('.stl')||path==='ca.crt')return;
-  // Под ключом оболочки храним только саму панель: навигация в галерею не должна подменять её.
+  if(path.startsWith('api/')||path==='ca.crt'||url.pathname.endsWith('/sw.js')||path==='sw.js'||path==='static/sw.js')return;
+  // Под ключом оболочки храним только саму панель: прочие страницы не должны подменять её.
   const shell=request.mode==='navigate'&&(url.pathname===BASE.pathname||url.pathname===BASE.pathname+'index.html');
   const key=shell?BASE.href:request;
-  event.respondWith(fetch(request).then(response=>{
+  const networkFetch=shell?fetch(request.url,{cache:'no-store',credentials:'same-origin'}):fetch(request);
+  event.respondWith(networkFetch.then(response=>{
     if(response.ok){const copy=response.clone();caches.open(CACHE).then(cache=>cache.put(key,copy));}
     return response;
   }).catch(()=>caches.match(key).then(response=>response||Response.error())));

@@ -24,6 +24,7 @@ class TestMaxAssistantAutostart(unittest.TestCase):
                 ticks.append(1)
                 if len(ticks) == 3:
                     (directory / "config.json").write_text("{}", encoding="utf-8")
+                    (directory / "assistant_max.py").write_text("", encoding="utf-8")
                     launcher = directory / "assistantd"
                     launcher.write_text("#!/bin/sh\n", encoding="ascii")
                     launcher.chmod(0o755)
@@ -75,6 +76,7 @@ class TestMaxAssistantAutostart(unittest.TestCase):
             directory = root / "assistant"
             directory.mkdir()
             (directory / "config.json").write_text("{}", encoding="utf-8")
+            (directory / "assistant_max.py").write_text("", encoding="utf-8")
             launcher = directory / "assistantd"
             launcher.write_text("#!/bin/sh\n", encoding="ascii")
             launcher.chmod(0o755)
@@ -111,6 +113,7 @@ class TestMaxAssistantAutostart(unittest.TestCase):
             directory = root / "assistant"
             directory.mkdir()
             (directory / "config.json").write_text("{}", encoding="utf-8")
+            (directory / "assistant_max.py").write_text("", encoding="utf-8")
             launcher = directory / "assistantd"
             launcher.write_text("#!/bin/sh\n", encoding="ascii")
             launcher.chmod(0o755)
@@ -129,7 +132,8 @@ class TestMaxAssistantAutostart(unittest.TestCase):
             self.assertEqual(pid, 23456)
             self.assertEqual(pid_path.read_text(encoding="ascii").strip(), "23456")
             args, kwargs = popen.call_args
-            self.assertEqual(args[0][:1], [str(launcher)])
+            self.assertEqual(args[0][0], sys.executable)
+            self.assertEqual(Path(args[0][1]), directory / "assistant_max.py")
             self.assertTrue(kwargs["start_new_session"])
             self.assertEqual(kwargs["stderr"], server.subprocess.STDOUT)
 
@@ -195,6 +199,10 @@ class TestMaxAssistantLocalStop(unittest.TestCase):
         data = wrapper.read_bytes()
         self.assertNotIn(b"\r\n", data)
         self.assertTrue(data.startswith(b"#!/system/bin/sh\n"))
+        text = data.decode("utf-8")
+        self.assertIn("/data/etc/ssl/cert.pem", text)
+        self.assertIn("/data/yapanel/certs/cacert.pem", text)
+        self.assertIn('YAPANEL_URL="http://127.0.0.1:8765"', text)
 
 
 if __name__ == "__main__":

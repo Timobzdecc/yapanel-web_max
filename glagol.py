@@ -6,10 +6,12 @@
 по WebSocket (wss://<ip>:1961). Только стандартная библиотека.
 """
 import base64
+import contextlib
 import hashlib
 import hmac
 import http.cookiejar
 import json
+import logging
 import os
 import re
 import shutil
@@ -27,6 +29,7 @@ from pathlib import Path
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/126.0 Safari/537.36")
+_log = logging.getLogger("yapanel.glagol")
 # OAuth-клиенты: мобильный Паспорт (сессия → x-token) и Яндекс Музыка (x-token → токен для Glagol).
 try:
     from config import get_config
@@ -432,7 +435,9 @@ class Glagol:
     def __init__(self, auth, host, device_id, platform, port=None, config=None, ca=None):
         self.config = config or (_cfg_glagol if _cfg_glagol else None)
         effective_port = port if port is not None else (self.config.port if self.config else YASTATION_GLAGOL_PORT)
-        self.auth, self.host, self.device_id, self.platform, self.port = auth, host, device_id, platform, effective_port
+        self._id_lock = threading.RLock()
+        self._host, self._device_id, self._platform = host, device_id, platform
+        self.auth, self.port = auth, effective_port
         self.ws = None
         self.token = None
         self.state = None          # последний «state» от колонки
@@ -447,7 +452,49 @@ class Glagol:
         except Exception as e:   # панель должна подняться даже при сломанном TLS-окружении
             self._tls_context, self.tls_verified = None, False
             self.tls_warning = f"Glagol: не удалось подготовить TLS: {e}"
+            _log.warning("%s", self.tls_warning)
         threading.Thread(target=self._run, daemon=True, name="glagol").start()
+
+    @property
+    def host(self):
+        lock = getattr(self, "_id_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            return getattr(self, "_host", None)
+
+    @host.setter
+    def host(self, value):
+        lock = getattr(self, "_id_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            self._host = value
+
+    @property
+    def device_id(self):
+        lock = getattr(self, "_id_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            return getattr(self, "_device_id", None)
+
+    @device_id.setter
+    def device_id(self, value):
+        lock = getattr(self, "_id_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            self._device_id = value
+
+    @property
+    def platform(self):
+        lock = getattr(self, "_id_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            return getattr(self, "_platform", None)
+
+    @platform.setter
+    def platform(self, value):
+        lock = getattr(self, "_id_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            self._platform = value
+
+    def _snapshot_identity(self):
+        lock = getattr(self, "_id_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            return getattr(self, "_host", None), getattr(self, "_device_id", None), getattr(self, "_platform", None)
 
     def info(self):
         return {"connected": self.ws is not None, "error": self.error, "state": self.state, "updated": self.updated,
@@ -455,7 +502,8 @@ class Glagol:
                 "tls_warning": getattr(self, "tls_warning", None)}
 
     def _conversation_token(self):
-        q = urllib.parse.urlencode({"device_id": self.device_id, "platform": self.platform})
+        _, device_id, platform = self._snapshot_identity()
+        q = urllib.parse.urlencode({"device_id": device_id, "platform": platform})
         cfg = getattr(self, "config", None)
         token_url = cfg.quasar_token_url if cfg else "https://quasar.yandex.net/glagol/token"
         req = urllib.request.Request(f"{token_url}?{q}",
@@ -511,7 +559,8 @@ class Glagol:
         ping_int = getattr(cfg, "ping_interval", 20.0) if cfg else 20.0
         ws_to = getattr(cfg, "ws_timeout", 10) if cfg else 10
         while True:
-            if not self.auth.music_token or not self.host or not self.device_id:
+            host, device_id, _ = self._snapshot_identity()
+            if not self.auth.music_token or not host or not device_id:
                 self.error = None
                 self.wake.wait(2)
                 self.wake.clear()
@@ -519,7 +568,8 @@ class Glagol:
             ws = None
             try:
                 self.token = self._conversation_token()
-                ws = WebSocket(self.host, self.port, timeout=ws_to,
+                host, _, _ = self._snapshot_identity()
+                ws = WebSocket(host, self.port, timeout=ws_to,
                                ssl_context=getattr(self, "_tls_context", None))
                 ws.sock.settimeout(sock_to)
                 with self.waiters_lock:
@@ -544,9 +594,13 @@ class Glagol:
             except AuthError as e:
                 self.error = str(e)
                 fails += 1
+                if fails == 1:
+                    _log.error("Glagol auth error: %s", e)
             except (OSError, ConnectionError, ValueError) as e:
                 self.error = f"нет связи с колонкой по Glagol: {e}"
                 fails += 1
+                if fails == 1:
+                    _log.warning("Glagol connection error: %s", e)
             finally:
                 with self.waiters_lock:
                     if self.ws is ws:
@@ -597,8 +651,22 @@ class YandexMusic:
         self.cache = {}
         self._uid = None
         self._likes = (0.0, set())
+        self._cache_lock = threading.RLock()
+        self._last_token = getattr(auth, "music_token", "") or ""
+
+    def _sync_token(self):
+        """Invalidate per-user caches whenever the Yandex auth token changes."""
+        lock = getattr(self, "_cache_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            token = getattr(self.auth, "music_token", "") or ""
+            if token != getattr(self, "_last_token", ""):
+                self.cache.clear()
+                self._uid = None
+                self._likes = (0.0, set())
+                self._last_token = token
 
     def _req(self, path, query=None, form=None, timeout=15):
+        self._sync_token()
         url = self.API + path + ("?" + urllib.parse.urlencode(query) if query else "")
         headers = {"Authorization": f"OAuth {self.auth.music_token}", "User-Agent": "Yandex-Music-API",
                    "X-Yandex-Music-Client": "YandexMusicAndroid/24023621"}
@@ -625,11 +693,13 @@ class YandexMusic:
                 "durationMs": t.get("durationMs"), "available": t.get("available", True)}
 
     def uid(self):
+        self._sync_token()
         if not self._uid:
             self._uid = ((self._req("/account/status") or {}).get("account") or {}).get("uid")
         return self._uid
 
     def liked(self, refresh=False):
+        self._sync_token()
         ts, ids = self._likes
         if refresh or time.time() - ts > 60:
             lib = (self._req(f"/users/{self.uid()}/likes/tracks") or {}).get("library") or {}
@@ -638,6 +708,7 @@ class YandexMusic:
         return ids
 
     def track(self, tid):
+        self._sync_token()
         tid = str(tid)
         if tid not in self.cache:
             res = self._req(f"/tracks/{tid}") or []

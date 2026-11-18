@@ -79,6 +79,8 @@ HISTORY_LIMITS = (0, 50)
 TIMEOUT_MIN_LIMITS = (1, 240)
 TTS_SPEED_LIMITS = (0.25, 4.0)
 TTS_TIMEOUT = 30
+ALICE_TTS_TIMEOUT = 20.0
+NON_ALICE_TTS_TIMEOUT = 4.0
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_AUDIO_BYTES = 32 * 1024 * 1024
 TTS_FILE = "/data/local/tmp/assistant_tts.wav"
@@ -559,6 +561,7 @@ class GlagolClient:
     def __init__(self, host: str = "127.0.0.1", port: int = 1961):
         self.host = host
         self.port = port
+        self._lock = threading.RLock()
         self.sock = None
         self.token = ""
         self._load_token()
@@ -575,79 +578,165 @@ class GlagolClient:
         for p in auth_paths:
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
-                self.token = data.get("music_token") or data.get("token") or ""
-                if self.token:
+                tok = data.get("music_token") or data.get("token") or ""
+                if tok:
+                    with self._lock:
+                        self.token = tok
                     break
             except Exception:
                 continue
 
-    def connect(self, timeout: float = 2.0) -> bool:
-        if self.sock:
+    def close(self):
+        """Закрыть сокет Glagol под блокировкой."""
+        with self._lock:
+            sock = self.sock
+            self.sock = None
+        if sock is not None:
             try:
-                self.sock.close()
+                sock.close()
             except Exception:
                 pass
-            self.sock = None
+
+    def _drain_locked(self, raise_on_eof: bool = True):
+        sock = self.sock
+        if sock is None:
+            return
         try:
-            self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
-            # HTTP WebSocket upgrade
-            req = (
-                f"GET / HTTP/1.1\r\n"
-                f"Host: {self.host}:{self.port}\r\n"
-                f"Upgrade: websocket\r\n"
-                f"Connection: Upgrade\r\n"
-                f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-                f"Sec-WebSocket-Version: 13\r\n\r\n"
-            )
-            self.sock.sendall(req.encode("ascii"))
-            resp = self.sock.recv(1024)
-            if b" 101 " not in resp:
-                self.sock.close()
+            fd = sock.fileno()
+        except Exception:
+            return
+        if not isinstance(fd, int) or fd < 0:
+            return
+        orig_timeout = None
+        restore_timeout = False
+        try:
+            orig_timeout = sock.gettimeout()
+            sock.settimeout(0.0)
+            restore_timeout = True
+        except Exception:
+            restore_timeout = False
+        try:
+            for _ in range(256):
+                try:
+                    readable, _, _ = select.select([sock], [], [], 0)
+                except (TypeError, ValueError):
+                    return
+                except OSError:
+                    self.close()
+                    if raise_on_eof:
+                        raise ConnectionError("Glagol socket closed")
+                    return
+                if not readable:
+                    return
+                try:
+                    chunk = sock.recv(4096)
+                except (BlockingIOError, InterruptedError, socket.timeout, TimeoutError):
+                    return
+                except OSError:
+                    self.close()
+                    if raise_on_eof:
+                        raise ConnectionError("Glagol socket closed")
+                    return
+                if not chunk:
+                    self.close()
+                    if raise_on_eof:
+                        raise ConnectionError("Glagol socket closed")
+                    return
+        finally:
+            if restore_timeout:
+                try:
+                    sock.settimeout(orig_timeout)
+                except OSError:
+                    pass
+
+    def connect(self, timeout: float = 2.0) -> bool:
+        with self._lock:
+            self.close()
+            self._load_token()
+            sock = None
+            try:
+                sock = socket.create_connection((self.host, self.port), timeout=timeout)
+                # HTTP WebSocket upgrade
+                req = (
+                    f"GET / HTTP/1.1\r\n"
+                    f"Host: {self.host}:{self.port}\r\n"
+                    f"Upgrade: websocket\r\n"
+                    f"Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                    f"Sec-WebSocket-Version: 13\r\n\r\n"
+                )
+                sock.sendall(req.encode("ascii"))
+                buf = b""
+                while b"\r\n\r\n" not in buf and len(buf) < 65536:
+                    chunk = sock.recv(1024)
+                    if not chunk:
+                        break
+                    buf += chunk
+                if b"\r\n\r\n" not in buf:
+                    sock.close()
+                    return False
+                hdr = buf.split(b"\r\n\r\n", 1)[0]
+                status_line = hdr.split(b"\r\n", 1)[0]
+                parts = status_line.split(None, 2)
+                if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or parts[1] != b"101":
+                    sock.close()
+                    return False
+                self.sock = sock
+                return True
+            except Exception:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
                 self.sock = None
                 return False
-            return True
-        except Exception:
-            self.sock = None
-            return False
 
     def send_frame(self, data: bytes):
-        if not self.sock and not self.connect():
-            raise ConnectionError("Glagol socket disconnected")
-        length = len(data)
-        frame = bytearray([0x81])  # text opcode, FIN
-        # Client frames to server must be masked
-        mask_key = b"\x12\x34\x56\x78"
-        if length <= 125:
-            frame.append(0x80 | length)
-        elif length <= 65535:
-            frame.append(0x80 | 126)
-            frame.extend(length.to_bytes(2, "big"))
-        else:
-            frame.append(0x80 | 127)
-            frame.extend(length.to_bytes(8, "big"))
-        frame.extend(mask_key)
-        masked = bytearray(b ^ mask_key[i % 4] for i, b in enumerate(data))
-        frame.extend(masked)
-        self.sock.sendall(frame)
+        with self._lock:
+            if not self.sock and not self.connect():
+                raise ConnectionError("Glagol socket disconnected")
+            self._drain_locked(raise_on_eof=True)
+            length = len(data)
+            frame = bytearray([0x81])  # text opcode, FIN
+            # Client frames to server must be masked
+            mask_key = os.urandom(4)
+            if length <= 125:
+                frame.append(0x80 | length)
+            elif length <= 65535:
+                frame.append(0x80 | 126)
+                frame.extend(length.to_bytes(2, "big"))
+            else:
+                frame.append(0x80 | 127)
+                frame.extend(length.to_bytes(8, "big"))
+            frame.extend(mask_key)
+            masked = bytearray(b ^ mask_key[i % 4] for i, b in enumerate(data))
+            frame.extend(masked)
+            try:
+                self.sock.sendall(frame)
+            except Exception:
+                self.close()
+                raise
+            self._drain_locked(raise_on_eof=False)
 
     def send_command(self, payload: dict) -> bool:
-        try:
-            envelope = {
-                "conversationToken": self.token,
-                "payload": payload,
-                "id": str(int(time.time() * 1000))
-            }
-            data = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
-            self.send_frame(data)
-            return True
-        except Exception:
-            try:
-                if self.connect():
+        with self._lock:
+            for attempt in range(2):
+                try:
+                    if not self.sock and not self.connect():
+                        return False
+                    envelope = {
+                        "conversationToken": self.token,
+                        "payload": payload,
+                        "id": str(int(time.time() * 1000)),
+                    }
                     data = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
                     self.send_frame(data)
                     return True
-            except Exception:
-                pass
+                except Exception:
+                    self.close()
+                    if attempt == 0:
+                        continue
             return False
 
     def stop(self) -> bool:
@@ -706,9 +795,15 @@ class AssistantDaemon:
         self.route = False
         self.ours = False
         self.say_at = 0
+        self.say_until = 0.0
+        self._say_seq = 0
         self.last_phrase = ""
         self.last_phrase_at = 0.0
+        self._ext_at = 0.0
+        self._ext_cache = None
         self.lock = threading.Lock()
+        self._proc_lock = threading.Lock()
+        self._logcat_proc = None
         self.running = True
 
         self.glagol = GlagolClient()
@@ -808,6 +903,8 @@ class AssistantDaemon:
         with self.lock:
             self.state = "idle"
             self.error = ""
+            self.ours = False
+            self.say_until = 0.0
         self.glagol.stop()
         # Android media key stop fallback
         try:
@@ -972,30 +1069,57 @@ class AssistantDaemon:
         except Exception:
             return False
 
-    def speak(self, text: str):
+    def _should_suppress_phrase(self, now: float = None) -> bool:
+        if now is None:
+            now = time.time()
         with self.lock:
+            if not self.ours:
+                return False
+            deadline = self.say_until if self.say_until > 0 else (self.say_at + ALICE_TTS_TIMEOUT)
+            if now < deadline:
+                return True
+            self.ours = False
+            self.say_until = 0.0
+            return False
+
+    def speak(self, text: str):
+        used_alice = False
+        with self.lock:
+            now = time.time()
+            self._say_seq += 1
+            seq = self._say_seq
             self.state = "speaking"
-            self.say_at = time.time()
-            self.ours = True
+            self.say_at = now
             tts = dict(self.cfg.get("tts") or {}) if isinstance(self.cfg.get("tts"), dict) else {}
             provider = _as_str(tts.get("provider"), "alice", "tts.provider").lower() or "alice"
+            self.say_until = now + (ALICE_TTS_TIMEOUT if provider == "alice" else NON_ALICE_TTS_TIMEOUT)
+            self.ours = True
         self.write_status()
 
         success = False
-        if provider == "alice":
-            success = self.glagol.say(text)
-        elif tts.get("base_url"):
-            try:
-                success = self.speak_custom(text, tts)
-            except Exception:
-                success = False
+        try:
+            if provider == "alice":
+                success = self.glagol.say(text)
+                used_alice = bool(success)
+            elif tts.get("base_url"):
+                try:
+                    success = self.speak_custom(text, tts)
+                except Exception:
+                    success = False
 
-        if not success:
-            success = self.speak_google(text)
-
-        with self.lock:
-            self.state = "idle"
-        self.write_status()
+            if not success:
+                with self.lock:
+                    if self._say_seq == seq:
+                        self.say_until = min(self.say_until, time.time() + NON_ALICE_TTS_TIMEOUT)
+                success = self.speak_google(text)
+        finally:
+            with self.lock:
+                if self._say_seq == seq:
+                    self.state = "idle"
+                    if not used_alice:
+                        self.ours = False
+                        self.say_until = 0.0
+            self.write_status()
 
     def ask(self, question: str, source: str = "voice"):
         with self.lock:
@@ -1038,7 +1162,262 @@ class AssistantDaemon:
             spoken_err = voice_error(err_msg)
             self.speak(spoken_err)
 
+    # ---------- YouTube Music / VK Music голосом ----------
+    # Панель живёт на этой же станции; обращаемся к её локальному API.
+    EXTMUSIC_BASE = os.environ.get("YAPANEL_URL", "http://127.0.0.1:8765")
+    YT_PREFIXES = (
+        "включи музыку на ютубе", "включи на ютубе", "включи в ютубе", "включи с ютуба",
+        "включи на youtube", "включи youtube", "включи ютуб",
+        "ютуб музыка", "youtube music", "ютуб", "youtube",
+    )
+    _YT_LEAD_WORDS = frozenset({"пожалуйста", "плиз", "давай"})
+    _YT_VERBS = frozenset({"включи", "включай", "поставь", "запусти", "проиграй", "сыграй"})
+    _YT_FILLERS = frozenset({
+        "пожалуйста", "плиз", "давай", "нам", "мне",
+        "музыку", "музыка", "песню", "песни", "трек", "треки",
+        "на", "в", "с", "из", "через",
+    })
+    _YT_SINGLE_RE = re.compile(r"^(?:youtube|ютуб\w*|ютьюб\w*|ютюб\w*)$")
+    _YT_TWO_SECOND_RE = re.compile(r"^(?:tube|туб\w*)$")
+    _YT_MUSIC_TAILS = frozenset({"music", "мьюзик", "музыка", "музыку"})
+    _YT_NON_MUSIC_NEXT = frozenset({
+        "что", "кто", "где", "когда", "почему", "зачем", "как", "сколько",
+        "какой", "какая", "какие", "это", "не", "у", "про", "ли",
+    })
+
+    def _ext_call(self, path, method="GET", body=None, timeout=30):
+        data = None
+        headers = {}
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(self.EXTMUSIC_BASE + path, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(4 << 20).decode("utf-8", "replace")
+        return json.loads(raw or "{}")
+
+    def _ext_status(self):
+        now = time.time()
+        if now - self._ext_at < 1.0:
+            return self._ext_cache
+        self._ext_at = now
+        try:
+            self._ext_cache = self._ext_call("/api/extmusic/status", timeout=1.5)
+        except Exception:
+            self._ext_cache = None
+        return self._ext_cache
+
+    def _alice_cancel(self):
+        try:
+            self.glagol.stop()
+        except Exception:
+            pass
+        try:
+            subprocess.run(["input", "keyevent", "86"], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _strip_words(phrase, prefix):
+        norm_prefix = normalize(prefix)
+        norm_phrase = normalize(phrase)
+        if not norm_prefix or not (norm_phrase == norm_prefix or norm_phrase.startswith(norm_prefix + " ")):
+            return None
+        rest = " ".join((phrase or "").split()[len(norm_prefix.split()):])
+        return rest.strip(" ,.:;!?—-")
+
+    @classmethod
+    def _extract_youtube_query(cls, phrase):
+        """Распознать голосовую команду запуска/поиска YouTube Music с учётом вариаций ASR."""
+        raw_words = (phrase or "").split()
+        items = []
+        for raw_idx, raw_word in enumerate(raw_words):
+            for tok in re.findall(r"[\w]+", raw_word.lower().replace("ё", "е")):
+                items.append((raw_idx, tok))
+        if not items:
+            return None
+
+        idx = 0
+        for _ in range(2):
+            if idx < len(items) and items[idx][1] in cls._YT_LEAD_WORDS:
+                idx += 1
+            else:
+                break
+
+        has_verb = idx < len(items) and items[idx][1] in cls._YT_VERBS
+        if has_verb:
+            idx += 1
+            for _ in range(4):
+                if idx < len(items) and items[idx][1] in cls._YT_FILLERS:
+                    idx += 1
+                else:
+                    break
+
+        plat_end = None
+        if (
+            idx + 1 < len(items)
+            and items[idx][1] in ("you", "ю")
+            and cls._YT_TWO_SECOND_RE.fullmatch(items[idx + 1][1])
+        ):
+            plat_end = idx + 2
+        elif idx < len(items) and cls._YT_SINGLE_RE.fullmatch(items[idx][1]):
+            plat_end = idx + 1
+        if plat_end is None:
+            return None
+
+        if plat_end < len(items) and items[plat_end][1] in cls._YT_MUSIC_TAILS:
+            tail_idx = plat_end + 1
+        elif not has_verb and plat_end < len(items) and items[plat_end][1] in cls._YT_NON_MUSIC_NEXT:
+            return None
+        else:
+            tail_idx = plat_end
+
+        if tail_idx >= len(items):
+            return ""
+        return " ".join(raw_words[items[tail_idx][0]:]).strip(" ,.:;!?—-")
+
+    def _say_async(self, text):
+        threading.Thread(target=self.speak, args=(text,), daemon=True).start()
+
+    def _ext_quick(self, action):
+        paths = {
+            "pause": "/api/extmusic/pause", "resume": "/api/extmusic/resume",
+            "next": "/api/extmusic/next", "prev": "/api/extmusic/prev",
+            "stop": "/api/extmusic/stop",
+        }
+        try:
+            self._ext_call(paths[action], "POST", {})
+        except Exception as error:
+            print(f"внешняя музыка: {action}: {error}", flush=True)
+
+    def _ext_play_youtube(self, query):
+        try:
+            found = self._ext_call(
+                "/api/extmusic/search?source=yt&q=" + urllib.parse.quote(query) + "&count=5",
+                timeout=30,
+            )
+            tracks = found.get("tracks") or []
+            if not tracks:
+                self.speak("Ничего не нашлось на YouTube.")
+                return
+            self._ext_call("/api/extmusic/play", "POST", {"track": tracks[0], "queue": tracks}, timeout=120)
+        except Exception as error:
+            self.speak("Не удалось включить YouTube: " + str(error)[:120])
+
+    def _ext_play_youtube_default(self):
+        """«Включи YouTube Music» без запроса: понравившаяся музыка, затем главная."""
+        try:
+            tracks = []
+            fallback_paths = (
+                "/api/extmusic/yt/account/liked?count=50",
+                "/api/extmusic/yt/account/home?count=10",
+                "/api/extmusic/yt/home?count=10",
+            )
+            for idx, path in enumerate(fallback_paths):
+                try:
+                    data = self._ext_call(path, timeout=90)
+                except urllib.error.HTTPError as error:
+                    if idx < len(fallback_paths) - 1 and error.code in (400, 401, 403, 404):
+                        continue
+                    raise
+                if isinstance(data, dict):
+                    tracks = data.get("tracks") or data.get("quick_picks") or []
+                if tracks:
+                    break
+            if not tracks:
+                self.speak("В YouTube Music нет понравившейся музыки.")
+                return
+            self._ext_call("/api/extmusic/play", "POST", {"track": tracks[0], "queue": tracks}, timeout=120)
+        except Exception as error:
+            self.speak("Не удалось включить YouTube Music: " + str(error)[:120])
+
+    def handle_extmusic(self, phrase):
+        """Голосовые команды внешней музыки. True — фраза наша, Алисе её не отдаём."""
+        norm = normalize(phrase)
+        if not norm:
+            return False
+        # «Алиса, ...» в распознанной фразе иногда остаётся.
+        for wake in ("алиса", "окей алиса", "ей алиса"):
+            rest = self._strip_words(phrase, wake)
+            if rest is not None and normalize(rest):
+                phrase, norm = rest, normalize(rest)
+                break
+        query = self._extract_youtube_query(phrase)
+        if query is not None:
+            print("YouTube голосом: поиск и запуск", flush=True)
+            if not query or normalize(query) in (
+                "музыку", "музыка", "music", "мьюзик", "что нибудь", "что-то", "что то",
+            ):
+                status = self._ext_status()
+                cur = status.get("current") if isinstance(status, dict) else None
+                if cur and (cur.get("source") or "yt") == "yt":
+                    self._alice_cancel()
+                    threading.Thread(target=self._ext_quick, args=("resume",), daemon=True).start()
+                else:
+                    self._alice_cancel()
+                    self._say_async("Включаю YouTube Music.")
+                    threading.Thread(target=self._ext_play_youtube_default, daemon=True).start()
+                return True
+            self._alice_cancel()
+            self._say_async("Ищу на YouTube.")
+            threading.Thread(target=self._ext_play_youtube, args=(query,), daemon=True).start()
+            return True
+
+        if not re.search(
+            r"\b(пауз\w*|продолж\w*|возобнов\w*|играй|дальше|след\w*|предыдущ\w*|переключ\w*|пропуст\w*|верни\w*|впер[её]д|назад|стоп|останов\w*|выключ\w*|хватит|заткнись|что играет|что сейчас играет|какая песня|какой трек|что за песня|next|prev|previous|skip|pause|resume|play|stop)\b",
+            norm,
+        ):
+            return False
+        status = self._ext_status()
+        if not status or not status.get("current"):
+            return False
+        action = None
+        # Next track patterns: дальше, следующий, следующую, переключи, пропусти, вперед...
+        if (
+            re.search(r"\b(дальше|след\w*|переключ\w*|пропуст\w*|впер[её]д|next|skip)\b", norm)
+            or norm in ("дальше", "давай дальше", "включи дальше", "переключи дальше", "следующий", "следующая", "следующую", "следующий трек", "следующую песню", "переключи", "переключи трек", "переключи песню", "пропусти", "пропусти трек", "пропусти песню", "next", "skip")
+        ):
+            action = "next"
+        # Previous track patterns: назад, предыдущий, предыдущую, верни назад...
+        elif (
+            re.search(r"\b(назад|предыдущ\w*|верни\w*|previous|prev)\b", norm)
+            or norm in ("назад", "давай назад", "верни назад", "переключи назад", "предыдущий", "предыдущая", "предыдущую", "предыдущий трек", "предыдущая песня", "предыдущую песню", "previous", "prev")
+        ):
+            action = "prev"
+        # Pause patterns: пауза, поставь на паузу, приостанови...
+        elif (
+            re.search(r"\b(пауз\w*|приостанов\w*|pause)\b", norm)
+            or norm in ("пауза", "поставь на паузу", "на паузу", "приостанови", "приостанови музыку", "pause")
+        ):
+            action = "pause"
+        # Stop patterns: стоп, останови, выключи, хватит...
+        elif (
+            re.search(r"\b(стоп|останов\w*|выключ\w*|хватит|заткнись|stop)\b", norm)
+            or norm in ("стоп", "останови", "останови музыку", "выключи", "выключи музыку", "хватит", "заткнись", "отключи музыку", "stop")
+        ):
+            action = "stop"
+        # Resume patterns: продолжи, возобнови, играй...
+        elif (
+            re.search(r"\b(продолж\w*|возобнов\w*|играй|сними с паузы|resume|play)\b", norm)
+            or norm in ("продолжи", "продолжай", "играй", "возобнови", "включи музыку", "сними с паузы", "resume", "play")
+        ):
+            action = "resume"
+        elif any(q in norm for q in ("что играет", "что сейчас играет", "какая песня", "какой трек", "что за песня")):
+            current = status.get("current") or {}
+            self._alice_cancel()
+            self._say_async(f"Сейчас играет {current.get('title') or 'без названия'} — {current.get('artist') or 'неизвестный исполнитель'}.")
+            return True
+        if action:
+            print(f"внешняя музыка голосом: {action}", flush=True)
+            self._alice_cancel()
+            threading.Thread(target=self._ext_quick, args=(action,), daemon=True).start()
+            return True
+        return False
+
     def handle_phrase(self, phrase: str):
+        if self.handle_extmusic(phrase):
+            return
         self.reload_config_if_changed()
         with self.lock:
             if not self.cfg.get("enabled", True):
@@ -1097,13 +1476,55 @@ class AssistantDaemon:
 
         threading.Thread(target=self.ask, args=(question, "voice"), daemon=True).start()
 
+    def _stop_logcat_proc(self, proc=None):
+        with self._proc_lock:
+            target = proc or self._logcat_proc
+            if target is self._logcat_proc:
+                self._logcat_proc = None
+        if target is None:
+            return
+        try:
+            if target.poll() is None:
+                target.terminate()
+                try:
+                    target.wait(timeout=1.0)
+                except Exception:
+                    target.kill()
+                    try:
+                        target.wait(timeout=1.0)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            stdout = getattr(target, "stdout", None)
+            if stdout is not None:
+                try:
+                    stdout.close()
+                except Exception:
+                    pass
+
+    def stop(self):
+        """Остановить цикл демона, процесс logcat и закрыть сокет Glagol."""
+        self.running = False
+        self._stop_logcat_proc()
+        try:
+            self.glagol.close()
+        except Exception:
+            pass
+
     def run_logcat_listener(self):
         """Чтение событий распознавания речи из Android logcat в реальном времени."""
         # -T 1: только новые события, -s quark-native:I: фильтр по C++ ядру Яндекса
         cmd = ["logcat", "-v", "brief", "-T", "1", "-s", "quark-native:I"]
         while self.running:
+            proc = None
             try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                with self._proc_lock:
+                    if not self.running:
+                        break
+                    self._logcat_proc = proc
                 for line in proc.stdout:
                     if not self.running:
                         break
@@ -1112,24 +1533,28 @@ class AssistantDaemon:
                         continue
                     phrase = phrase_from_log_line(line)
                     if phrase:
-                        with self.lock:
-                            ours = self.ours
-                        if ours:
-                            if time.time() - self.say_at < 20:
-                                continue
-                            with self.lock:
-                                self.ours = False
+                        if self._should_suppress_phrase():
+                            continue
                         now = time.time()
                         # одно и то же событие может прийти из двух состояний SDK
                         if phrase == self.last_phrase and now - self.last_phrase_at < 2.0:
                             continue
                         self.last_phrase, self.last_phrase_at = phrase, now
-                        self.handle_phrase(phrase)
+                        try:
+                            self.handle_phrase(phrase)
+                        except Exception as error:
+                            print(f"handle_phrase: {type(error).__name__}: {error}", flush=True)
                     elif "onAliceStateChanged: IDLE" in line:
                         with self.lock:
                             self.ours = False
+                            self.say_until = 0.0
+                if self.running:
+                    time.sleep(1.0)
             except Exception:
-                time.sleep(2)
+                if self.running:
+                    time.sleep(2.0)
+            finally:
+                self._stop_logcat_proc(proc)
 
     def run(self):
         claimed, lock_fd = _acquire_assistant_lock(
@@ -1164,7 +1589,7 @@ class AssistantDaemon:
                         self.write_status()
                     time.sleep(0.3)
             finally:
-                self.running = False
+                self.stop()
                 self.sd_path.unlink(missing_ok=True)
                 self.status_path.unlink(missing_ok=True)
 
