@@ -2218,7 +2218,12 @@ class ExtMusicService:
                         return
                     duration = int(player.get("duration") or 0)
                     position = int(player.get("position") or 0)
-                    if state == "ended" or (state != "paused" and duration > 0 and position >= duration - 1200):
+                    if state == "ended" or (
+                        state != "paused"
+                        and not player.get("buffering")
+                        and duration > 0
+                        and position >= duration - 600
+                    ):
                         if self._gen != last_eos_gen:
                             eos_gen = self._gen
                             last_eos_gen = eos_gen
