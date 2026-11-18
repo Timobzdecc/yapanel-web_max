@@ -24,16 +24,16 @@
 > [!NOTE]
 > Проект находится в стадии **beta**: функции и установка могут меняться, возможны ошибки. Если что-то не работает — [откройте issue](https://github.com/Timobzdecc/yapanel-web_max/issues), приложив версию, модель станции и лог.
 
-## 🎉 Что нового в 0.4.0
+## 🎉 Что нового в 0.4.1
 
-**Полноценный YouTube Music, голосовой запуск и чистая сборка только для Макс.**
+**Исправление перемотки и стабильности YouTube Music (на базе крупного обновления 0.4.0).**
 
-- **YouTube Music в панели:** «Главная» (быстрый выбор, миксы, лента), «Навигатор» (чарты, новинки, настроения), поиск с фильтрами и «Библиотека» с синхронизацией лайков.
-- **Общий плеер и очередь:** управление очередью, перемешивание, повтор, похожие треки, тексты песен и кнопка «Стоп» без конфликтов с Алисой.
-- **Голосовое управление:** можно попросить «Алиса, включи Ютуб музыку …», а установщик сам обновляет помощника на колонке.
+- **Исправлена перемотка в YouTube Music:** теперь стабильно работает перемотка вперёд, назад, в начало трека, прямо с паузы и на длинных часовых миксах; ползунок и кнопка паузы больше не залипают, а треки не обрываются при старте.
+- **YouTube Music в панели (из 0.4.0):** «Главная» (быстрый выбор, миксы, лента), «Навигатор» (чарты, новинки, настроения), поиск с фильтрами и «Библиотека» с синхронизацией лайков.
+- **Общий плеер и голосовое управление:** управление очередью, тексты песен, автоостановка без конфликтов с Алисой и команды «Алиса, включи Ютуб музыку …».
 - **Только Станция Макс и надёжные логи:** убран лишний код от других колонок, обновлён кэш, добавлена проверка модели/root в установщике и полный «Отчёт для Issue» во вкладке «Логи».
 
-**[Скачать 0.4.0](https://github.com/Timobzdecc/yapanel-web_max/releases/tag/v0.4.0)** · **[Полный чейнжлог](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.4.0.md)** · [Что было в 0.3.11](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.3.11.md)
+**[Скачать 0.4.1](https://github.com/Timobzdecc/yapanel-web_max/releases/tag/v0.4.1)** · **[Чейнжлог 0.4.1](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.4.1.md)** · [Что было в 0.4.0](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.4.0.md)
 
 ## 📸 Скриншоты
 
@@ -87,8 +87,8 @@
 
 Python на компьютер ставить не нужно.
 
-[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Timobzdecc/yapanel-web_max/releases/download/v0.4.0/yapanel-web-0.4.0-windows-x64.zip)
-[![Windows arm64](https://img.shields.io/badge/Windows-arm64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Timobzdecc/yapanel-web_max/releases/download/v0.4.0/yapanel-web-0.4.0-windows-arm64.zip)
+[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Timobzdecc/yapanel-web_max/releases/download/v0.4.1/yapanel-web-0.4.1-windows-x64.zip)
+[![Windows arm64](https://img.shields.io/badge/Windows-arm64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Timobzdecc/yapanel-web_max/releases/download/v0.4.1/yapanel-web-0.4.1-windows-arm64.zip)
 
 1. Скачайте архив и распакуйте его.
 2. Запустите **`install_to_max.bat`**.
