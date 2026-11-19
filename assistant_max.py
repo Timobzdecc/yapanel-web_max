@@ -85,6 +85,8 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_AUDIO_BYTES = 32 * 1024 * 1024
 TTS_FILE = "/data/local/tmp/assistant_tts.wav"
 GOOGLE_TTS_FILE = "/data/local/tmp/assistant_say.mp3"
+ALICE_CANCEL_FILE = "/data/data/com.yandex.io.sdk/files/alice_cancel.txt"
+OVERRIDE_URL_FILE = "/data/data/com.yandex.io.sdk/files/override_url.txt"
 
 # Служебные адреса облачных метаданных и link-local: по ним нельзя ходить из настроек.
 _BLOCKED_METADATA_HOSTS = {
@@ -739,14 +741,40 @@ class GlagolClient:
                         continue
             return False
 
+    def _panel_post(self, path: str, body: dict, timeout: float = 2.5) -> bool:
+        base = os.environ.get("YAPANEL_URL", "http://127.0.0.1:8765").rstrip("/")
+        if not base:
+            return False
+        try:
+            payload = json.dumps(body or {}, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                base + path,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read(65536).decode("utf-8", "replace") or "{}")
+            return bool(isinstance(data, dict) and data.get("ok") and data.get("spoken", True))
+        except Exception:
+            return False
+
     def stop(self) -> bool:
         """Остановить речь или воспроизведение Алисы."""
-        return self.send_command({"command": "stop"})
+        if self.send_command({"command": "stop"}):
+            return True
+        if self.port == 1961:
+            return self._panel_post("/api/extmusic/alice_cancel", {"tts_sec": 4.5, "music_sec": 12.0}, timeout=2.0)
+        return False
 
     def say(self, text: str) -> bool:
         """Озвучить текст голосом Алисы."""
         speech = for_speech(text)
-        return self.send_command({"command": "sendText", "text": f"Повтори за мной {speech}"})
+        if self.send_command({"command": "sendText", "text": f"Повтори за мной {speech}"}):
+            return True
+        if self.port == 1961:
+            return self._panel_post("/api/extmusic/alice_say", {"text": speech}, timeout=3.0)
+        return False
 
 
 def _acquire_assistant_lock(path: Path):
@@ -801,6 +829,11 @@ class AssistantDaemon:
         self.last_phrase_at = 0.0
         self._ext_at = 0.0
         self._ext_cache = None
+        self._cancel_seq = 0
+        self._last_cancel_at = 0.0
+        self._last_say_text = ""
+        self._last_intercepted_phrase = ""
+        self._last_intercepted_at = 0.0
         self.lock = threading.Lock()
         self._proc_lock = threading.Lock()
         self._logcat_proc = None
@@ -1084,10 +1117,12 @@ class AssistantDaemon:
 
     def speak(self, text: str):
         used_alice = False
+        spoken_text = for_speech(text)
         with self.lock:
             now = time.time()
             self._say_seq += 1
             seq = self._say_seq
+            self._last_say_text = spoken_text
             self.state = "speaking"
             self.say_at = now
             tts = dict(self.cfg.get("tts") or {}) if isinstance(self.cfg.get("tts"), dict) else {}
@@ -1099,6 +1134,11 @@ class AssistantDaemon:
         success = False
         try:
             if provider == "alice":
+                if os.name == "posix" and Path(ALICE_CANCEL_FILE).is_file():
+                    elapsed_cancel = time.time() - float(getattr(self, "_last_cancel_at", 0.0) or 0.0)
+                    if 0.0 < elapsed_cancel < 0.22:
+                        time.sleep(0.22 - elapsed_cancel)
+                    self._write_local_alice_cancel(tts_sec=0.0, music_sec=10.0)
                 success = self.glagol.say(text)
                 used_alice = bool(success)
             elif tts.get("base_url"):
@@ -1235,16 +1275,47 @@ class AssistantDaemon:
             self._ext_cache = None
         return self._ext_cache
 
+    def _write_local_alice_cancel(self, tts_sec: float = 4.5, music_sec: float = 12.0) -> None:
+        if os.name != "posix":
+            return
+        cancel_path = Path(ALICE_CANCEL_FILE)
+        try:
+            if not cancel_path.parent.is_dir():
+                return
+            now_ms = int(time.time() * 1000)
+            seq = max(now_ms, int(getattr(self, "_cancel_seq", 0) or 0) + 1)
+            self._cancel_seq = seq
+            tts_until = now_ms + int(max(0.0, float(tts_sec)) * 1000) if float(tts_sec or 0.0) > 0 else 0
+            music_until = now_ms + int(max(0.0, float(music_sec)) * 1000) if float(music_sec or 0.0) > 0 else 0
+            cancel_path.write_text(f"{seq}|{tts_until}|{music_until}", encoding="utf-8")
+            try:
+                os.chmod(cancel_path, 0o666)
+            except OSError:
+                pass
+        except Exception:
+            pass
+
+    @staticmethod
+    def _send_media_stop_key() -> None:
+        try:
+            subprocess.run(
+                ["input", "keyevent", "86"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+            )
+        except Exception:
+            pass
+
     def _alice_cancel(self):
+        self._last_cancel_at = time.time()
+        self._write_local_alice_cancel(tts_sec=4.5, music_sec=12.0)
         try:
             self.glagol.stop()
         except Exception:
             pass
-        try:
-            subprocess.run(["input", "keyevent", "86"], check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        threading.Thread(target=self._send_media_stop_key, daemon=True).start()
 
     @staticmethod
     def _strip_words(phrase, prefix):
@@ -1489,9 +1560,25 @@ class AssistantDaemon:
         except Exception as error:
             print(f"внешняя музыка: {action}: {error}", flush=True)
 
+    _FAST_VOICE_RE = re.compile(
+        r"(?:\b("
+        r"лайк\w*|дизлайк\w*|нравится|не нравится|избран\w*|понравив\w*|разонравил\w*|"
+        r"шаффл\w*|перемеш\w*|вперемешку|по порядку|повтор\w*|зацикл\w*|"
+        r"сначала|заново|перемотай\w*|отмотай\w*|мотай\w*|"
+        r"пауз\w*|продолж\w*|возобнов\w*|играй|дальше|след\w*|предыдущ\w*|переключ\w*|"
+        r"пропуст\w*|верни\w*|впер[её]д|назад|стоп|останов\w*|хватит|заткнись|"
+        r"next|prev|previous|skip|pause|resume|play|stop"
+        r")\b|"
+        r"что играет|что сейчас играет|какая песня|какой трек|что за песня|"
+        r"выключи музыку|отключи музыку|выключи песню|больше не включай)"
+    )
+
     def _ext_play_youtube_mix(self, body):
         try:
-            self._ext_call("/api/extmusic/yt/mix", "POST", dict(body or {}), timeout=120)
+            res = self._ext_call("/api/extmusic/yt/mix", "POST", dict(body or {}), timeout=120)
+            if isinstance(res, dict) and res.get("current"):
+                self._ext_cache = res
+                self._ext_at = time.time()
         except Exception as error:
             self.speak("Не удалось включить микс на YouTube: " + str(error)[:120])
 
@@ -1506,9 +1593,12 @@ class AssistantDaemon:
                 if not tracks:
                     self.speak("Не удалось найти песню на YouTube для радио.")
                     return
-                self._ext_call("/api/extmusic/radio", "POST", {"track": tracks[0]}, timeout=120)
-                return
-            self._ext_call("/api/extmusic/radio", "POST", {}, timeout=120)
+                res = self._ext_call("/api/extmusic/radio", "POST", {"track": tracks[0]}, timeout=120)
+            else:
+                res = self._ext_call("/api/extmusic/radio", "POST", {}, timeout=120)
+            if isinstance(res, dict) and res.get("current"):
+                self._ext_cache = res
+                self._ext_at = time.time()
         except Exception as error:
             self.speak("Не удалось включить радио на YouTube: " + str(error)[:120])
 
@@ -1522,7 +1612,10 @@ class AssistantDaemon:
             if not tracks:
                 self.speak("Ничего не нашлось на YouTube.")
                 return
-            self._ext_call("/api/extmusic/play", "POST", {"track": tracks[0], "queue": tracks}, timeout=120)
+            res = self._ext_call("/api/extmusic/play", "POST", {"track": tracks[0], "queue": tracks}, timeout=120)
+            if isinstance(res, dict) and res.get("current"):
+                self._ext_cache = res
+                self._ext_at = time.time()
         except Exception as error:
             self.speak("Не удалось включить YouTube: " + str(error)[:120])
 
@@ -1550,7 +1643,10 @@ class AssistantDaemon:
                 self.speak("В YouTube Music нет понравившейся музыки.")
                 return
             tracks = list(tracks)[:self._YT_QUEUE_LIMIT]
-            self._ext_call("/api/extmusic/play", "POST", {"track": tracks[0], "queue": tracks}, timeout=120)
+            res = self._ext_call("/api/extmusic/play", "POST", {"track": tracks[0], "queue": tracks}, timeout=120)
+            if isinstance(res, dict) and res.get("current"):
+                self._ext_cache = res
+                self._ext_at = time.time()
         except Exception as error:
             self.speak("Не удалось включить YouTube Music: " + str(error)[:120])
 
@@ -1611,63 +1707,149 @@ class AssistantDaemon:
             threading.Thread(target=self._ext_play_youtube, args=(query,), daemon=True).start()
             return True
 
-        if not re.search(
-            r"\b(пауз\w*|продолж\w*|возобнов\w*|играй|дальше|след\w*|предыдущ\w*|переключ\w*|пропуст\w*|верни\w*|впер[её]д|назад|стоп|останов\w*|выключ\w*|хватит|заткнись|что играет|что сейчас играет|какая песня|какой трек|что за песня|next|prev|previous|skip|pause|resume|play|stop)\b",
-            norm,
-        ):
+        if not self._FAST_VOICE_RE.search(norm):
             return False
-        status = self._ext_status()
-        if not status or not status.get("current"):
-            return False
-        action = None
-        # Next track patterns: дальше, следующий, следующую, переключи, пропусти, вперед...
-        if (
-            re.search(r"\b(дальше|след\w*|переключ\w*|пропуст\w*|впер[её]д|next|skip)\b", norm)
-            or norm in ("дальше", "давай дальше", "включи дальше", "переключи дальше", "следующий", "следующая", "следующую", "следующий трек", "следующую песню", "переключи", "переключи трек", "переключи песню", "пропусти", "пропусти трек", "пропусти песню", "next", "skip")
-        ):
-            action = "next"
-        # Previous track patterns: назад, предыдущий, предыдущую, верни назад...
-        elif (
-            re.search(r"\b(назад|предыдущ\w*|верни\w*|previous|prev)\b", norm)
-            or norm in ("назад", "давай назад", "верни назад", "переключи назад", "предыдущий", "предыдущая", "предыдущую", "предыдущий трек", "предыдущая песня", "предыдущую песню", "previous", "prev")
-        ):
-            action = "prev"
-        # Pause patterns: пауза, поставь на паузу, приостанови...
-        elif (
-            re.search(r"\b(пауз\w*|приостанов\w*|pause)\b", norm)
-            or norm in ("пауза", "поставь на паузу", "на паузу", "приостанови", "приостанови музыку", "pause")
-        ):
-            action = "pause"
-        # Stop patterns: стоп, останови, выключи, хватит...
-        elif (
-            re.search(r"\b(стоп|останов\w*|выключ\w*|хватит|заткнись|stop)\b", norm)
-            or norm in ("стоп", "останови", "останови музыку", "выключи", "выключи музыку", "хватит", "заткнись", "отключи музыку", "stop")
-        ):
-            action = "stop"
-        # Resume patterns: продолжи, возобнови, играй...
-        elif (
-            re.search(r"\b(продолж\w*|возобнов\w*|играй|сними с паузы|resume|play)\b", norm)
-            or norm in ("продолжи", "продолжай", "играй", "возобнови", "включи музыку", "сними с паузы", "resume", "play")
-        ):
-            action = "resume"
-        elif any(q in norm for q in ("что играет", "что сейчас играет", "какая песня", "какой трек", "что за песня")):
-            current = status.get("current") or {}
+
+        is_seek_phrase = bool(
+            re.search(r"\b(перемотай\w*|отмотай\w*|мотай\w*)\b", norm)
+            or re.search(r"\b(вперед|назад)\s+(?:на\s+)?(?:\d+|минут|секунд|полмин)", norm)
+        )
+        legacy_action = None
+        if not is_seek_phrase:
+            if (
+                re.search(r"\b(дальше|след\w*|переключ\w*|пропуст\w*|вперед|next|skip)\b", norm)
+                or norm in ("дальше", "давай дальше", "включи дальше", "переключи дальше", "следующий", "следующая", "следующую", "следующий трек", "следующую песню", "переключи", "переключи трек", "переключи песню", "пропусти", "пропусти трек", "пропусти песню", "next", "skip")
+            ):
+                legacy_action = "next"
+            elif (
+                re.search(r"\b(назад|предыдущ\w*|верни\w*|previous|prev)\b", norm)
+                or norm in ("назад", "давай назад", "верни назад", "переключи назад", "предыдущий", "предыдущая", "предыдущую", "предыдущий трек", "предыдущая песня", "предыдущую песню", "previous", "prev")
+            ):
+                legacy_action = "prev"
+            elif (
+                re.search(r"\b(пауз\w*|приостанов\w*|pause)\b", norm)
+                or norm in ("пауза", "поставь на паузу", "на паузу", "приостанови", "приостанови музыку", "pause")
+            ):
+                legacy_action = "pause"
+            elif (
+                re.search(r"\b(стоп|останов\w*|хватит|заткнись|stop)\b", norm)
+                or norm in ("стоп", "останови", "останови музыку", "выключи", "выключи музыку", "хватит", "заткнись", "отключи музыку", "stop")
+            ):
+                legacy_action = "stop"
+            elif (
+                re.search(r"\b(продолж\w*|возобнов\w*|играй|сними с паузы|resume|play)\b", norm)
+                or norm in ("продолжи", "продолжай", "играй", "возобнови", "включи музыку", "сними с паузы", "resume", "play")
+            ):
+                legacy_action = "resume"
+            elif any(q in norm for q in ("что играет", "что сейчас играет", "какая песня", "какой трек", "что за песня")):
+                legacy_action = "what_playing"
+
+        now = time.time()
+        cache_fresh = isinstance(self._ext_cache, dict) and (now - self._ext_at) < 1.0
+        if cache_fresh and legacy_action:
+            cur = self._ext_cache.get("current")
+            if not cur:
+                return False
             self._alice_cancel()
+            if legacy_action == "what_playing":
+                self._say_async(f"Сейчас играет {cur.get('title') or 'без названия'} — {cur.get('artist') or 'неизвестный исполнитель'}.")
+            else:
+                print(f"внешняя музыка голосом: {legacy_action}", flush=True)
+                if legacy_action == "stop":
+                    self._ext_cache = None
+                threading.Thread(target=self._ext_quick, args=(legacy_action,), daemon=True).start()
+            return True
+
+        # Быстрый локальный путь (< 50 мс): один вызов /api/extmusic/voice.
+        try:
+            vres = self._ext_call("/api/extmusic/voice", "POST", {"phrase": phrase}, timeout=1.5)
+            if isinstance(vres, dict) and vres.get("handled"):
+                self._alice_cancel()
+                act_name = vres.get("action") or "voice"
+                print(f"внешняя музыка голосом ({act_name}, {vres.get('elapsed_ms', 0)}мс)", flush=True)
+                if act_name == "stop":
+                    self._ext_cache = None
+                self._ext_at = time.time()
+                say_text = str(vres.get("say") or "").strip()
+                if say_text:
+                    self._say_async(say_text)
+                return True
+            if isinstance(vres, dict) and vres.get("ok"):
+                return False
+        except urllib.error.HTTPError as err:
+            if err.code != 404:
+                print(f"внешняя музыка voice: {err}", flush=True)
+        except Exception as error:
+            print(f"внешняя музыка voice: {error}", flush=True)
+
+        # Fallback для совместимости со старой версией server.py (если /api/extmusic/voice вернул 404)
+        status = self._ext_status()
+        if not status or not status.get("current") or not legacy_action:
+            return False
+        self._alice_cancel()
+        if legacy_action == "what_playing":
+            current = status.get("current") or {}
             self._say_async(f"Сейчас играет {current.get('title') or 'без названия'} — {current.get('artist') or 'неизвестный исполнитель'}.")
             return True
-        if action:
-            print(f"внешняя музыка голосом: {action}", flush=True)
+        print(f"внешняя музыка голосом: {legacy_action}", flush=True)
+        threading.Thread(target=self._ext_quick, args=(legacy_action,), daemon=True).start()
+        return True
+
+    @staticmethod
+    def _strip_wake_norm(text: str) -> str:
+        norm = normalize(text)
+        for wake in ("окей алиса", "ей алиса", "алиса"):
+            if norm == wake:
+                return ""
+            if norm.startswith(wake + " "):
+                return norm[len(wake) + 1:].strip()
+        return norm
+
+    def _check_unwanted_alice_speaking(self, line: str) -> bool:
+        """Обрывает запоздалый облачный ответ Алисы на уже перехваченную команду."""
+        last_at = float(getattr(self, "_last_intercepted_at", 0.0) or 0.0)
+        last_phrase = str(getattr(self, "_last_intercepted_phrase", "") or "").strip()
+        if not last_phrase or (time.time() - last_at) >= 8.0:
+            return False
+
+        m_rec = re.search(r"recognizedPhrase='([^']*)'", line)
+        m_out = re.search(r"outputSpeech='([^']*)'", line)
+        rec_phrase = m_rec.group(1).strip() if m_rec else ""
+        out_speech = m_out.group(1).strip() if m_out else ""
+
+        norm_rec = self._strip_wake_norm(rec_phrase)
+        if "повтори за мной" in norm_rec:
+            return False
+
+        last_say = normalize(getattr(self, "_last_say_text", "") or "")
+        norm_out = normalize(out_speech)
+        if last_say and norm_out and (last_say in norm_out or norm_out in last_say):
+            return False
+
+        norm_last = self._strip_wake_norm(last_phrase)
+        same_phrase = bool(
+            norm_rec
+            and norm_last
+            and (norm_rec == norm_last or (len(norm_last) >= 4 and (norm_last in norm_rec or norm_rec in norm_last)))
+        )
+        recent_unmatched = not norm_rec and (time.time() - last_at) < 4.5
+        if same_phrase or recent_unmatched:
+            print(f"обрываю штатный ответ Алисы: {rec_phrase or out_speech}", flush=True)
+            self._last_intercepted_at = 0.0
             self._alice_cancel()
-            threading.Thread(target=self._ext_quick, args=(action,), daemon=True).start()
             return True
         return False
 
     def handle_phrase(self, phrase: str):
         if self.handle_extmusic(phrase):
+            self._last_intercepted_phrase = normalize(phrase)
+            self._last_intercepted_at = time.time()
             return
         self.reload_config_if_changed()
         with self.lock:
             if not self.cfg.get("enabled", True):
+                self._last_intercepted_phrase = ""
+                self._last_intercepted_at = 0.0
                 return
             mode = self.mode
             triggers = self.cfg.get("triggers")
@@ -1680,6 +1862,8 @@ class AssistantDaemon:
         # Проверка включения/выключения постоянного режима
         _, enter_matched = match_trigger(phrase, enter_phrases)
         if enter_matched:
+            self._last_intercepted_phrase = normalize(phrase)
+            self._last_intercepted_at = time.time()
             self.glagol.stop()
             with self.lock:
                 self.mode = True
@@ -1690,6 +1874,8 @@ class AssistantDaemon:
 
         _, exit_matched = match_trigger(phrase, exit_phrases)
         if exit_matched:
+            self._last_intercepted_phrase = normalize(phrase)
+            self._last_intercepted_at = time.time()
             self.glagol.stop()
             with self.lock:
                 self.mode = False
@@ -1699,8 +1885,12 @@ class AssistantDaemon:
 
         question, matched = match_trigger(phrase, triggers)
         if not matched and not mode:
+            self._last_intercepted_phrase = ""
+            self._last_intercepted_at = 0.0
             return
 
+        self._last_intercepted_phrase = normalize(phrase)
+        self._last_intercepted_at = time.time()
         if not matched and mode:
             question = phrase
 
@@ -1791,6 +1981,8 @@ class AssistantDaemon:
                             self.handle_phrase(phrase)
                         except Exception as error:
                             print(f"handle_phrase: {type(error).__name__}: {error}", flush=True)
+                    elif "onAliceStateChanged: SPEAKING" in line:
+                        self._check_unwanted_alice_speaking(line)
                     elif "onAliceStateChanged: IDLE" in line:
                         with self.lock:
                             self.ours = False

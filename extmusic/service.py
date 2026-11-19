@@ -8,14 +8,17 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 import random
 import re
 import threading
 import time
+import urllib.parse
+import urllib.request
 from collections import OrderedDict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from . import fast_yt, ytdlp, ytmusic
+from . import fast_yt, ipv4_urlopen, ytdlp, ytmusic
 from .fast_yt import FastYTError
 from .gstbridge import FALLBACK_TRACK_ID, GstBridge, GstBridgeError
 from .google_oauth import GoogleOAuth, GoogleOAuthError
@@ -78,6 +81,258 @@ class ExtMusicService:
         self._native_force_loading_until = 0.0
         self._native_stopped_since = 0.0
         self._native_warm = False
+        self._hw_lock = threading.Lock()
+        self._dlna = None
+        self._multiroom = None
+
+    # ---------- Station Max hardware integration (BLE remote + LED matrix OSD + DLNA + Multiroom) ----------
+    def _get_dlna(self):
+        dlna = getattr(self.panel, "_extmusic_dlna", None)
+        if dlna is not None:
+            return dlna
+        with self._hw_lock:
+            dlna = getattr(self.panel, "_extmusic_dlna", None)
+            if dlna is None:
+                from extmusic.dlna import MaxDlnaRenderer
+
+                dlna = MaxDlnaRenderer(self.panel)
+                self._dlna = dlna
+                try:
+                    self.panel._extmusic_dlna = dlna
+                except Exception:  # noqa: BLE001
+                    pass
+            return dlna
+
+    def _get_multiroom(self):
+        mr = getattr(self.panel, "_extmusic_multiroom", None)
+        if mr is not None:
+            return mr
+        with self._hw_lock:
+            mr = getattr(self.panel, "_extmusic_multiroom", None)
+            if mr is None:
+                from extmusic.multiroom import MaxMultiroomCoordinator
+
+                mr = MaxMultiroomCoordinator(self.panel)
+                self._multiroom = mr
+                try:
+                    self.panel._extmusic_multiroom = mr
+                except Exception:  # noqa: BLE001
+                    pass
+            return mr
+
+    def master_relay_url(self, seek_sec: float = 0.0) -> Optional[str]:
+        if not self._is_gst_current():
+            return None
+        try:
+            from extmusic.dlna import detect_lan_ip
+
+            lan_ip = detect_lan_ip()
+            if not lan_ip or lan_ip == "127.0.0.1":
+                return None
+            return self.gst.lan_proxy_url(lan_ip, seek_sec=seek_sec)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def dlna_status(self) -> Dict[str, Any]:
+        return self._get_dlna().status()
+
+    def dlna_action(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return self._get_dlna().configure(data)
+        except ValueError as err:
+            raise ExtMusicError(str(err)) from err
+
+    def multiroom_status(self) -> Dict[str, Any]:
+        return self._get_multiroom().status()
+
+    def multiroom_action(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return self._get_multiroom().configure(data)
+        except ValueError as err:
+            raise ExtMusicError(str(err)) from err
+
+    def _emit_multiroom_play(self, track: Dict[str, Any]) -> None:
+        if not isinstance(track, dict) or track.get("multiroom_follower"):
+            return
+        try:
+            mr = self._get_multiroom()
+            if mr.enabled:
+                relay = self.master_relay_url(0.0)
+                mr.on_master_play(track, relay_url=relay)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _emit_multiroom_event(self, event: str, *args: Any, suppress: bool = False) -> None:
+        if suppress:
+            return
+        try:
+            mr = getattr(self.panel, "_extmusic_multiroom", None) or self._multiroom
+            if mr is None or not mr.enabled:
+                return
+            fn = getattr(mr, f"on_master_{event}", None)
+            if callable(fn):
+                fn(*args)
+        except Exception:  # noqa: BLE001
+            pass
+    def _get_osd(self):
+        osd = getattr(self.panel, "_extmusic_osd", None)
+        if osd is not None:
+            return osd
+        with self._hw_lock:
+            osd = getattr(self.panel, "_extmusic_osd", None)
+            if osd is None:
+                from extmusic.led_osd import MaxLedOSD
+
+                osd = MaxLedOSD(self.panel)
+                try:
+                    self.panel._extmusic_osd = osd
+                except Exception:  # noqa: BLE001
+                    pass
+            return osd
+
+    def _get_remote(self):
+        remote = getattr(self.panel, "_extmusic_remote", None)
+        if remote is not None:
+            return remote
+        with self._hw_lock:
+            remote = getattr(self.panel, "_extmusic_remote", None)
+            if remote is None:
+                from extmusic.remote import MaxBleRemote
+
+                remote = MaxBleRemote(self.panel)
+                try:
+                    self.panel._extmusic_remote = remote
+                except Exception:  # noqa: BLE001
+                    pass
+            return remote
+
+    def _preinject_gst(self) -> None:
+        try:
+            self.gst.ensure_injected()
+        except Exception:  # noqa: BLE001 - best-effort warm injection at startup
+            pass
+
+    def ensure_hw_started(self) -> Dict[str, Any]:
+        """Start Station Max BLE remote listener, LED OSD, and optional DLNA renderer."""
+        osd = self._get_osd()
+        remote = self._get_remote()
+        if remote.is_supported():
+            remote.start()
+        dlna = self._get_dlna()
+        if dlna.enabled:
+            dlna.start()
+        self._get_multiroom()
+        is_max_hw = bool(osd.is_supported() or remote.is_supported() or os.environ.get("PANEL_LOCAL") == "1")
+        if is_max_hw and (os.environ.get("PANEL_LOCAL") == "1" or hasattr(self.panel, "adb")):
+            threading.Thread(target=self._preinject_gst, daemon=True, name="gst-preinject").start()
+        return {"osd": osd.status(), "remote": remote.status(), "dlna": dlna.status()}
+
+    def stop_hw(self) -> None:
+        osd = getattr(self.panel, "_extmusic_osd", None)
+        if osd is not None:
+            try:
+                osd.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        remote = getattr(self.panel, "_extmusic_remote", None)
+        if remote is not None:
+            try:
+                remote.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        dlna = getattr(self.panel, "_extmusic_dlna", None) or self._dlna
+        if dlna is not None:
+            try:
+                dlna.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _emit_osd_track(self, track: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(track, dict):
+            return
+        try:
+            osd = self._get_osd()
+            if osd.is_supported() and osd.enabled:
+                osd.show_track(str(track.get("title") or ""), str(track.get("artist") or ""))
+        except Exception:  # noqa: BLE001 - OSD must never block playback
+            pass
+
+    def _emit_osd_like(self, liked: bool) -> None:
+        try:
+            osd = self._get_osd()
+            if osd.is_supported() and osd.enabled:
+                osd.show_like(liked=bool(liked))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _emit_osd_icon(self, kind: str) -> None:
+        try:
+            osd = self._get_osd()
+            if osd.is_supported() and osd.enabled:
+                osd.show_icon(kind)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def hw_status(self) -> Dict[str, Any]:
+        osd = self._get_osd()
+        remote = self._get_remote()
+        return {
+            "ok": True,
+            "supported": bool(osd.is_supported() or remote.is_supported()),
+            "osd": osd.status(),
+            "remote": remote.status(),
+        }
+
+    def hw_configure(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ExtMusicError("Ожидается JSON-объект настроек")
+        osd = self._get_osd()
+        remote = self._get_remote()
+        changed = False
+        if "osd_enabled" in data and data["osd_enabled"] is not None:
+            osd.set_enabled(bool(data["osd_enabled"]))
+            changed = True
+        if "remote_enabled" in data and data["remote_enabled"] is not None:
+            remote.configure(enabled=bool(data["remote_enabled"]))
+            if remote.enabled and remote.is_supported():
+                remote.start()
+            changed = True
+        if "remote_dpad_hdmi" in data and data["remote_dpad_hdmi"] is not None:
+            remote.configure(dpad_hdmi=bool(data["remote_dpad_hdmi"]))
+            changed = True
+
+        if changed:
+            payload = {
+                "osd_enabled": bool(osd.enabled),
+                "remote_enabled": bool(remote.enabled),
+                "remote_dpad_hdmi": bool(remote.dpad_hdmi),
+            }
+            try:
+                import server
+
+                updater = getattr(server, "update_settings_section", None)
+                if callable(updater):
+                    updater("extmusic_hw", payload)
+            except Exception:  # noqa: BLE001
+                pass
+
+        test_osd = str(data.get("test_osd") or "").strip().lower()
+        if test_osd:
+            if not osd.is_supported():
+                raise ExtMusicError("Экран 25×16 доступен только на Станции Макс")
+            if test_osd in ("heart", "like"):
+                osd.show_like(liked=True, force=True)
+            elif test_osd in ("track", "title"):
+                cur = self.current or {}
+                title = str(cur.get("title") or "YouTube Music")
+                artist = str(cur.get("artist") or "YapAnel")
+                osd.show_track(title, artist, force=True)
+            elif test_osd in ("play", "pause", "dislike", "mix"):
+                osd.show_icon(test_osd, force=True)
+            else:
+                raise ExtMusicError(f"Неизвестный тест экрана: {test_osd}")
+
+        return self.hw_status()
 
     # ---------- credentials ----------
     def _vk(self) -> VKClient:
@@ -871,9 +1126,11 @@ class ExtMusicService:
     def yt_like(self, video_id: str, on: bool = True) -> Dict[str, Any]:
         vid = self._strip_ext_yt(video_id)
         try:
-            return self.yt_account.like(vid, on=bool(on))
+            res = self.yt_account.like(vid, on=bool(on))
         except YTAccountError as error:
             raise ExtMusicError(str(error)) from error
+        self._emit_osd_like(bool(on))
+        return res
 
     def yt_dislike(self, video_id: str, skip: bool = True) -> Dict[str, Any]:
         vid = self._strip_ext_yt(video_id)
@@ -881,6 +1138,7 @@ class ExtMusicService:
             res = self.yt_account.dislike(vid)
         except YTAccountError as error:
             raise ExtMusicError(str(error)) from error
+        self._emit_osd_icon("dislike")
         if skip:
             matches_current = False
             with self.lock:
@@ -983,8 +1241,26 @@ class ExtMusicService:
         return {"sync": None, "text": None, "source": None}
 
     def fetch_thumb(self, url: str) -> Tuple[bytes, str]:
+        raw_url = str(url or "").strip()
+        cur = self.current if isinstance(self.current, dict) else None
+        if cur and str(cur.get("source") or "") == "dlna" and raw_url and raw_url == str(cur.get("thumb") or "").strip():
+            from .dlna import validate_stream_url
+
+            clean = validate_stream_url(raw_url, allow_lan=True)
+            req = urllib.request.Request(clean, headers={"User-Agent": "YapAnel-DLNA/1.0"})
+            try:
+                with ipv4_urlopen(req, timeout=8) as resp:
+                    ctype = str((resp.headers or {}).get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                    data = resp.read(2 * 1024 * 1024 + 1)
+            except Exception as err:  # noqa: BLE001
+                raise ExtMusicError(f"Не удалось загрузить обложку DLNA: {err}") from err
+            if len(data) > 2 * 1024 * 1024:
+                raise ExtMusicError("Обложка больше 2 МБ")
+            if not ctype.startswith("image/") or ctype.startswith("image/svg"):
+                raise ExtMusicError("Ответ не является безопасным изображением")
+            return data, ctype
         try:
-            return self.ytmusic.fetch_thumb(url)
+            return self.ytmusic.fetch_thumb(raw_url)
         except YTMusicError as error:
             raise ExtMusicError(str(error)) from error
 
@@ -1087,6 +1363,28 @@ class ExtMusicService:
         kind = str(item.get("kind") or "").strip().lower()
         if kind in ("album", "artist", "playlist", "liked"):
             return None
+        if str(item.get("source") or "") == "dlna":
+            stream_url = str(item.get("url") or "").strip()[:4000]
+            if not stream_url:
+                return None
+            try:
+                duration = max(0, int(item.get("duration") or 0))
+            except (TypeError, ValueError):
+                duration = 0
+            tid = str(item.get("id") or ("dlna_" + hashlib.sha1(stream_url.encode("utf-8")).hexdigest()[:12]))[:60]
+            track = {
+                "source": "dlna",
+                "id": tid,
+                "url": stream_url,
+                "title": str(item.get("title") or "DLNA Поток")[:300],
+                "artist": str(item.get("artist") or "DLNA / Поток")[:300],
+                "album": str(item.get("album") or "")[:300],
+                "duration": duration,
+                "thumb": str(item.get("thumb") or "")[:1000],
+            }
+            if isinstance(item.get("fallback_urls"), list):
+                track["fallback_urls"] = [str(u) for u in item["fallback_urls"] if u][:4]
+            return track
         if str(item.get("source") or "") == "yt" or item.get("video_id"):
             try:
                 duration = max(0, int(item.get("duration") or 0))
@@ -1294,9 +1592,93 @@ class ExtMusicService:
             self.queue = shuffled
             self.index = -1
 
-    def play(self, track: Dict[str, Any], queue: Any = None) -> Dict[str, Any]:
+    def play_external_stream(
+        self,
+        track: Dict[str, Any],
+        queue: Any = None,
+        next_track: Optional[Dict[str, Any]] = None,
+        multiroom_follower: bool = False,
+    ) -> Dict[str, Any]:
+        """Play a pre-resolved HTTP/LAN stream (DLNA or multiroom follower relay)."""
+        if not isinstance(track, dict) or not str(track.get("url") or "").strip():
+            raise ExtMusicError("Не указан URL аудиопотока")
+        stream_url = str(track.get("url") or "").strip()
+        fb_urls = [str(u) for u in (track.get("fallback_urls") or []) if u and str(u) != stream_url]
+        dur_sec = max(0, int(track.get("duration") or 0))
+        resolved: Dict[str, Any] = {
+            "source": str(track.get("source") or "dlna"),
+            "id": str(track.get("id") or ("dlna_" + hashlib.sha1(stream_url.encode("utf-8")).hexdigest()[:12])),
+            "title": str(track.get("title") or "Внешний поток")[:300],
+            "artist": str(track.get("artist") or "DLNA / Поток")[:300],
+            "album": str(track.get("album") or "")[:300],
+            "duration": dur_sec,
+            "thumb": str(track.get("thumb") or "")[:1000],
+            "url": stream_url,
+            "playlist_id": str(track.get("playlist_id") or "")[:200],
+        }
+        if multiroom_follower:
+            resolved["multiroom_follower"] = True
+
+        with self.lock:
+            self._gen += 1
+            gen = self._gen
+            self.error = ""
+            self.skipped = []
+            self._stop_yandex()
+            was_gst = self._is_gst_current()
+            started_gst = False
+            if self.gst.available() or self.gst.ensure_injected():
+                try:
+                    self._stop_station_player()
+                    try:
+                        self.gst.play(
+                            stream_url,
+                            resolved["title"],
+                            resolved["artist"],
+                            duration=dur_sec,
+                            fallback_urls=fb_urls,
+                        )
+                    except TypeError:
+                        self.gst.play(
+                            stream_url,
+                            resolved["title"],
+                            resolved["artist"],
+                            duration=dur_sec,
+                        )
+                    resolved["gst"] = True
+                    started_gst = True
+                    self._native_loading_until = 0.0
+                    self._native_force_loading_until = 0.0
+                except GstBridgeError as err:
+                    _log.warning("external stream gst failed: %s", err)
+            if not started_gst:
+                self._stop_gst_locked(was_gst)
+                try:
+                    self.player.play(stream_url)
+                except (PlayerError, OSError) as err:
+                    raise ExtMusicError(f"Не удалось воспроизвести поток: {err}") from err
+
+            self.current = resolved
+            self._ext_started_at = time.time()
+            q_items = list(queue) if isinstance(queue, list) and queue else [resolved]
+            if isinstance(next_track, dict) and next_track.get("url"):
+                q_items = [resolved, next_track]
+            self._remember_queue(q_items, resolved)
+            self._orig_queue = list(self.queue)
+            self._start_poll(gen)
+
+        self._emit_osd_track(resolved)
+        if not multiroom_follower:
+            self._emit_multiroom_play(resolved)
+        return self.status()
+
+    def play(self, track: Dict[str, Any], queue: Any = None, multiroom_follower: bool = False) -> Dict[str, Any]:
         if not isinstance(track, dict):
             raise ExtMusicError("Не выбран трек")
+        if multiroom_follower and str(track.get("url") or "").strip():
+            return self.play_external_stream(track, queue=queue, multiroom_follower=True)
+        if str(track.get("source") or "") == "dlna":
+            return self.play_external_stream(track, queue=queue, multiroom_follower=multiroom_follower)
         normalized = self._queue_track(track)
         if not normalized:
             raise ExtMusicError("Не выбран трек")
@@ -1417,6 +1799,9 @@ class ExtMusicService:
                 except (OSError, ValueError):
                     pass
             self._start_poll(gen)
+        self._emit_osd_track(resolved)
+        if not multiroom_follower:
+            self._emit_multiroom_play(resolved)
         return self.status()
 
     def set_shuffle(self, enabled: Optional[bool] = None) -> Dict[str, Any]:
@@ -1865,7 +2250,7 @@ class ExtMusicService:
         except Exception:  # noqa: BLE001 - Yandex may be offline; external music can still play
             pass
 
-    def pause(self) -> Dict[str, Any]:
+    def pause(self, multiroom_follower: bool = False) -> Dict[str, Any]:
         with self.lock:
             if self._is_gst_current():
                 self.gst.pause()
@@ -1874,9 +2259,10 @@ class ExtMusicService:
                 self._wait_native(lambda state: not state.get("playing"))
             else:
                 self.player.pause()
+        self._emit_multiroom_event("pause", suppress=multiroom_follower)
         return self.status()
 
-    def resume(self) -> Dict[str, Any]:
+    def resume(self, multiroom_follower: bool = False) -> Dict[str, Any]:
         with self.lock:
             if self._is_gst_current():
                 self.gst.resume()
@@ -1885,6 +2271,7 @@ class ExtMusicService:
                 self._wait_native(lambda state: bool(state.get("playing")))
             else:
                 self.player.resume()
+        self._emit_multiroom_event("resume", suppress=multiroom_follower)
         return self.status()
 
     def _wait_native(self, done, timeout: float = 1.2) -> None:
@@ -1897,7 +2284,7 @@ class ExtMusicService:
                 return
             time.sleep(0.15)
 
-    def seek(self, position_ms: int) -> Dict[str, Any]:
+    def seek(self, position_ms: int, multiroom_follower: bool = False) -> Dict[str, Any]:
         with self.lock:
             if self._is_gst_current():
                 self.gst.seek(position_ms)
@@ -1912,6 +2299,7 @@ class ExtMusicService:
                     raise ExtMusicError(str(error)) from error
             else:
                 self.player.seek(position_ms)
+        self._emit_multiroom_event("seek", int(position_ms or 0), suppress=multiroom_follower)
         return self.status()
 
     def _stop_locked(self, stop_glagol: bool = True) -> None:
@@ -1956,9 +2344,10 @@ class ExtMusicService:
             self._prefetch.clear()
             self._prefetching.clear()
 
-    def stop(self, stop_glagol: bool = True) -> Dict[str, Any]:
+    def stop(self, stop_glagol: bool = True, multiroom_follower: bool = False) -> Dict[str, Any]:
         with self.lock:
             self._stop_locked(stop_glagol=stop_glagol)
+        self._emit_multiroom_event("stop", suppress=multiroom_follower)
         return self.status()
 
     def _try_play_candidates(self, indices: Iterable[int], skipped: List[Dict[str, str]]) -> Optional[Dict[str, Any]]:
@@ -2135,6 +2524,19 @@ class ExtMusicService:
             return self.seek(0)
         return self.status()
 
+    @staticmethod
+    def _is_yandex_auto_advance(state: Dict[str, Any], pstate: Dict[str, Any]) -> bool:
+        """True when Yandex SDK auto-advanced from FALLBACK_TRACK_ID into Radio/My Wave without voice input."""
+        playlist_id = str(pstate.get("playlistId") or "").strip()
+        if playlist_id == f"track:{FALLBACK_TRACK_ID}":
+            return True
+        if playlist_id != "user:onyourwave":
+            return False
+        voice_age = state.get("timeSinceLastVoiceActivity")
+        if isinstance(voice_age, (int, float)) and voice_age <= 15:
+            return False
+        return True
+
     def maybe_auto_stop_from_glagol(self, glagol_state: Any) -> bool:
         if not isinstance(glagol_state, dict):
             return False
@@ -2157,6 +2559,8 @@ class ExtMusicService:
                 return False
             if (time.time() - self._ext_started_at) < 3.0:
                 return False
+            if self._is_gst_current() and self._is_yandex_auto_advance(state, pstate):
+                return False
         self.stop(stop_glagol=False)
         return True
 
@@ -2178,6 +2582,7 @@ class ExtMusicService:
 
     def _poll_loop(self, gen: int, stop: threading.Event) -> None:
         last_eos_gen = -1
+        last_prefetch_gen = -1
         err_count = 0
         while not stop.wait(self._poll_interval):
             gstate = None
@@ -2190,16 +2595,7 @@ class ExtMusicService:
                     raw_state = getattr(glagol, "state", None)
                     if isinstance(raw_state, dict):
                         gstate = raw_state
-            if gstate is not None:
-                try:
-                    if self.maybe_auto_stop_from_glagol(gstate):
-                        return
-                except Exception as error:  # noqa: BLE001
-                    _log.warning("poll glagol auto-stop error: %s", error)
 
-            with self.lock:
-                if stop.is_set() or not self.current:
-                    return
                 if self._is_gst_current():
                     try:
                         player = self._gst_player()
@@ -2218,11 +2614,22 @@ class ExtMusicService:
                         return
                     duration = int(player.get("duration") or 0)
                     position = int(player.get("position") or 0)
-                    if state == "ended" or (
+                    if duration > 0 and position >= max(0, duration - 20000) and self._gen != last_prefetch_gen:
+                        last_prefetch_gen = self._gen
+                        self._prefetch_after(self.queue, self.current)
+                    g_inner = gstate.get("state") if isinstance(gstate, dict) and isinstance(gstate.get("state"), dict) and "playerState" not in gstate else gstate
+                    g_pstate = (g_inner.get("playerState") or {}) if isinstance(g_inner, dict) else {}
+                    yandex_leaked = (
+                        isinstance(g_inner, dict)
+                        and bool(g_inner.get("playing"))
+                        and (time.time() - self._ext_started_at) >= 3.0
+                        and self._is_yandex_auto_advance(g_inner, g_pstate)
+                    )
+                    if state == "ended" or yandex_leaked or (
                         state != "paused"
                         and not player.get("buffering")
                         and duration > 0
-                        and position >= duration - 600
+                        and position >= duration - 1200
                     ):
                         if self._gen != last_eos_gen:
                             eos_gen = self._gen
@@ -2295,6 +2702,202 @@ class ExtMusicService:
                 except Exception as error:  # noqa: BLE001
                     with self.lock:
                         self.error = str(error)
+            elif gstate is not None:
+                try:
+                    if self.maybe_auto_stop_from_glagol(gstate):
+                        return
+                except Exception as error:  # noqa: BLE001
+                    _log.warning("poll glagol auto-stop error: %s", error)
+
+    # ---------- fast local voice command router (< 50 ms) ----------
+    @staticmethod
+    def _parse_voice_seek_ms(norm: str, default_sec: int = 30) -> int:
+        words_to_num = {
+            "одну": 1, "одна": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5,
+            "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
+            "пятнадцать": 15, "двадцать": 20, "тридцать": 30, "сорок": 40,
+            "пятьдесят": 50,
+        }
+        if "полминуты" in norm or "пол минуты" in norm:
+            return 30 * 1000
+        if "полторы" in norm and "минут" in norm:
+            return 90 * 1000
+        num = None
+        m = re.search(r"\b(\d+)\b", norm)
+        if m:
+            num = int(m.group(1))
+        else:
+            for w, val in words_to_num.items():
+                if re.search(rf"\b{w}\b", norm):
+                    num = val
+                    break
+        if num is None:
+            num = 1 if re.search(r"\bминут[уае]?\b", norm) else default_sec
+        mult = 60 if re.search(r"\bминут", norm) else 1
+        return max(1, min(3600, num * mult)) * 1000
+
+    def voice_command(self, phrase: str) -> Dict[str, Any]:
+        """Parse and execute a fast local voice control command when external music is active."""
+        t0 = time.monotonic()
+        raw = str(phrase or "").strip()
+        norm = re.sub(r"[^\w\s]", " ", raw.lower().replace("ё", "е"))
+        norm = re.sub(r"\s+", " ", norm).strip()
+        for wake in ("окей алиса", "ей алиса", "алиса"):
+            if norm == wake:
+                norm = ""
+                break
+            if norm.startswith(wake + " "):
+                norm = norm[len(wake) + 1 :].strip()
+                break
+
+        with self.lock:
+            cur = dict(self.current) if isinstance(self.current, dict) else None
+        if not norm or not cur:
+            return {
+                "ok": True,
+                "handled": False,
+                "action": "",
+                "say": "",
+                "elapsed_ms": round((time.monotonic() - t0) * 1000, 2),
+            }
+
+        action = ""
+        say = ""
+        cur_id = str(cur.get("id") or "")
+        cur_src = str(cur.get("source") or "yt")
+
+        # 1. Negative / toggle-off modifiers before positive forms
+        if any(p in norm for p in ("убери лайк", "сними лайк", "удали лайк", "удали из избран", "удали из понравив", "разонравил")):
+            action = "unlike"
+            if cur_src == "yt" and cur_id:
+                self.yt_like(cur_id, on=False)
+                say = "Убрал лайк."
+        elif re.search(r"\b(дизлайк\w*|не нравится|больше не включай|ужасн\w* песн\w*)\b", norm):
+            action = "dislike"
+            if cur_src == "yt" and cur_id:
+                self.yt_dislike(cur_id, skip=True)
+            else:
+                self.next()
+        elif re.search(r"\b(лайк\w*|мне нравится|нравится песн\w*|нравится трек\w*|добавь в избран\w*|добавь в понравив\w*|классн\w* песн\w*|супер песн\w*)\b", norm):
+            action = "like"
+            if cur_src == "yt" and cur_id:
+                self.yt_like(cur_id, on=True)
+                say = "Поставил лайк."
+        elif any(p in norm for p in ("выключи шаффл", "выключи перемеш", "отключи перемеш", "не перемешивай", "по порядку")):
+            action = "shuffle_off"
+            if not cur.get("native"):
+                self.set_shuffle(False)
+                say = "Включаю по порядку."
+        elif re.search(r"\b(перемешай\w*|вперемешку|шаффл\w*|случайн\w* поряд\w*)\b", norm):
+            action = "shuffle_on"
+            if not cur.get("native"):
+                self.set_shuffle(True)
+                say = "Перемешал очередь."
+        elif any(p in norm for p in ("выключи повтор", "отключи повтор", "без повтора", "не повторяй")):
+            action = "repeat_off"
+            if not cur.get("native"):
+                self.set_repeat("none")
+                say = "Повтор выключен."
+        elif (
+            any(p in norm for p in ("повторяй очередь", "повторяй плейлист", "повтор всего", "повтор очереди", "повтор плейлиста"))
+            or re.search(r"\b(?:повтор\w*|зацикл\w*)\b.*\b(?:очеред\w*|плейлист\w*|вс[её]|всего|альбом\w*)\b", norm)
+        ):
+            action = "repeat_all"
+            if not cur.get("native"):
+                self.set_repeat("all")
+                say = "Повторяю очередь."
+        elif re.search(r"\b(на повтор|повтор\w*|зацикл\w*)\b", norm):
+            action = "repeat_one"
+            if not cur.get("native"):
+                self.set_repeat("one")
+                say = "Повторяю трек."
+        elif re.search(r"\b(сначала|заново|с самого начала)\b", norm):
+            action = "replay"
+            self.seek(0)
+        elif re.search(r"\b(перемотай|отмотай|мотай)\b", norm) or re.search(r"\b(вперед|назад)\s+(?:на\s+)?(?:\d+|минут|секунд|полмин)", norm):
+            step_ms = self._parse_voice_seek_ms(norm)
+            st = self.status()
+            pos_ms = int((st.get("player") or {}).get("position") or 0)
+            dur_ms = int((st.get("player") or {}).get("duration") or 0)
+            if "назад" in norm or "обратно" in norm:
+                action = "seek_back"
+                target_ms = max(0, pos_ms - step_ms)
+            else:
+                action = "seek_fwd"
+                target_ms = pos_ms + step_ms
+                if dur_ms > 0:
+                    target_ms = min(max(0, dur_ms - 2000), target_ms)
+            self.seek(target_ms)
+        elif any(q in norm for q in ("что играет", "что сейчас играет", "какая песня", "какой трек", "что за песня")):
+            action = "what_playing"
+            title = cur.get("title") or "без названия"
+            artist = cur.get("artist") or "неизвестный исполнитель"
+            say = f"Сейчас играет {title} — {artist}."
+        elif re.search(r"\b(дальше|следующ\w*|переключ\w*|пропуст\w*|вперед|next|skip)\b", norm):
+            action = "next"
+            self.next()
+        elif re.search(r"\b(назад|предыдущ\w*|верни\w*|previous|prev)\b", norm):
+            action = "prev"
+            self.prev()
+        elif re.search(r"\b(пауз\w*|приостанов\w*|pause)\b", norm):
+            action = "pause"
+            self.pause()
+        elif re.search(r"\b(стоп|останов\w*|хватит|заткнись|stop)\b", norm) or norm in ("выключи", "выключи музыку", "отключи музыку", "выключи песню"):
+            action = "stop"
+            self.stop()
+        elif re.search(r"\b(продолж\w*|возобнов\w*|сними с паузы|resume)\b", norm) or norm in ("играй", "включи музыку", "play"):
+            action = "resume"
+            self.resume()
+
+        return {
+            "ok": True,
+            "handled": bool(action),
+            "action": action,
+            "say": say,
+            "elapsed_ms": round((time.monotonic() - t0) * 1000, 2),
+        }
+
+    def alice_cancel(
+        self,
+        tts_sec: float = 4.5,
+        music_sec: float = 12.0,
+        clear_override: bool = False,
+    ) -> Dict[str, Any]:
+        """Cancel active native Alice dialog and suppress cloud fallback audio windows."""
+        try:
+            if hasattr(self.gst, "suppress_alice"):
+                self.gst.suppress_alice(
+                    tts_sec=float(tts_sec or 0.0),
+                    music_sec=float(music_sec or 0.0),
+                    clear_override=bool(clear_override),
+                )
+        except Exception:  # noqa: BLE001 - best-effort native cancel
+            pass
+        self._stop_yandex()
+        return {"ok": True}
+
+    def alice_say(self, text: str) -> Dict[str, Any]:
+        """Speak short confirmation through the panel's authenticated Glagol WS connection."""
+        clean = re.sub(r"[\x00-\x1f]", " ", str(text or "")).strip()[:300]
+        if not clean:
+            return {"ok": False, "spoken": False}
+        try:
+            if hasattr(self.gst, "clear_alice_tts_suppression"):
+                self.gst.clear_alice_tts_suppression()
+        except Exception:  # noqa: BLE001
+            pass
+        glagol = getattr(self.panel, "glagol", None)
+        if glagol is not None and getattr(glagol, "ws", None) is not None:
+            try:
+                res = glagol.send({"command": "sendText", "text": f"Повтори за мной {clean}"})
+                return {
+                    "ok": True,
+                    "spoken": True,
+                    "status": (res or {}).get("status", "SUCCESS") if isinstance(res, dict) else "SUCCESS",
+                }
+            except Exception:  # noqa: BLE001
+                pass
+        return {"ok": False, "spoken": False}
 
 
 _SERVICE_LOCK = threading.Lock()

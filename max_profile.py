@@ -276,6 +276,16 @@ FONT_4X7 = {
     '%': ["1001", "1001", "0010", "0100", "1001", "1001", "0000"],
     '(': ["010", "100", "100", "100", "100", "100", "010"],
     ')': ["010", "001", "001", "001", "001", "001", "010"],
+    '&': ["0110", "1001", "0110", "1010", "1001", "1001", "0111"],
+    "'": ["1", "1", "0", "0", "0", "0", "0"],
+    '"': ["101", "101", "000", "000", "000", "000", "000"],
+    '[': ["110", "100", "100", "100", "100", "100", "110"],
+    ']': ["011", "001", "001", "001", "001", "001", "011"],
+    '#': ["01010", "11111", "01010", "01010", "11111", "01010", "00000"],
+    '♪': ["00110", "00101", "00100", "00100", "01100", "11100", "01100"],
+    '♥': ["01010", "11111", "11111", "11111", "01110", "00100", "00000"],
+    '▶': ["1000", "1100", "1110", "1111", "1110", "1100", "1000"],
+    '❚': ["11", "11", "11", "11", "11", "11", "11"],
 
     # Latin A-Z
     'A': ["0110", "1001", "1001", "1111", "1001", "1001", "1001"],
@@ -1350,6 +1360,19 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
                     pass
             # Sync to Android AudioFlinger stream 3 (STREAM_MUSIC)
             self.adb.shell(f"media volume --stream 3 --set {level} 2>/dev/null; true", check=False)
+            dsp = getattr(self, "_max_dsp", None)
+            if dsp is not None and hasattr(dsp, "update_volume"):
+                try:
+                    dsp.update_volume(level)
+                except Exception as e:
+                    _log.debug("DSP loudness update on set_volume: %s", e)
+            if not data.get("multiroom_follower"):
+                mr = getattr(self, "_extmusic_multiroom", None)
+                if mr is not None and getattr(mr, "enabled", False):
+                    try:
+                        mr.on_master_volume(level)
+                    except Exception:
+                        pass
             return {"ok": True, "level": level}
         return original_set_volume(self, data)
 
@@ -2029,6 +2052,7 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         return get_disp_mgr(self).status()
 
     P.display_status = max_display_status
+    P._get_disp_mgr = get_disp_mgr
 
     def max_stop_pattern(self, kind=None):
         """Stop custom graphics and resume Alice's clock."""
@@ -3406,6 +3430,9 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
             last_playing = bool(st.get("playing") or p.get("playing")) if isinstance(st, dict) else False
             last_ws = bool(getattr(self.glagol, "ws", None))
             last_event = last_verify = 0.0
+            pending_vol = None
+            pending_vol_since = 0.0
+            applied_vol = None
             while True:
                 time.sleep(1)
                 dsp = getattr(self, "_max_dsp", None)
@@ -3419,6 +3446,20 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
                     playing = bool(st.get("playing") or p.get("playing")) if isinstance(st, dict) else False
                     ws = bool(getattr(self.glagol, "ws", None))
                     now = time.time()
+                    raw_vol = st.get("volume") if isinstance(st, dict) else None
+                    if isinstance(raw_vol, (int, float)) and not isinstance(raw_vol, bool):
+                        vol_pct = int(round(raw_vol * 100.0)) if 0.0 <= raw_vol <= 1.0 else int(round(max(0.0, min(100.0, raw_vol))))
+                        if vol_pct != applied_vol:
+                            if vol_pct != pending_vol:
+                                pending_vol = vol_pct
+                                pending_vol_since = now
+                            elif now - pending_vol_since >= 0.8:
+                                applied_vol = vol_pct
+                                pending_vol = None
+                                if hasattr(dsp, "update_volume"):
+                                    dsp.update_volume(vol_pct)
+                        else:
+                            pending_vol = None
                     event = track != last_track or (playing and not last_playing) or (ws and not last_ws)
                     if event and now - last_event >= 2.0:
                         last_event = now
@@ -3437,6 +3478,15 @@ pidof com.yandex.io.sdk >/dev/null && echo "quasar=running" || echo "quasar=stop
         threading.Thread(target=loop, daemon=True, name="dsp-monitor").start()
 
     P._dsp_monitor = _dsp_monitor
+
+    def max_dsp_ensure_init(self):
+        if not hasattr(self, "_max_dsp"):
+            from dsp_max import MaxDSP
+            self._max_dsp = MaxDSP(self)
+        self._dsp_monitor()
+        return self._max_dsp
+
+    P._dsp_ensure_init = max_dsp_ensure_init
 
     def max_dsp_status(self):
         if not hasattr(self, "_max_dsp"):
