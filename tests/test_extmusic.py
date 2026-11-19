@@ -830,7 +830,15 @@ def test_gst_youtube_ignores_yandex_onyourwave_auto_advance_and_advances_queue(t
         svc.play(t1, [t1, t2])
         svc._ext_started_at -= 10
 
-        # Auto-advance into Yandex user:onyourwave without recent voice activity must NOT stop ExtMusic
+        # Auto-advance into Yandex track:153109827 radio or user:onyourwave without voice activity must NOT stop ExtMusic
+        leaked_radio = {
+            "playing": True,
+            "timeSinceLastVoiceActivity": 318,
+            "playerState": {"id": "41077410", "playlistId": "track:153109827", "playerType": "music_thin"},
+        }
+        assert svc.maybe_auto_stop_from_glagol(leaked_radio) is False
+        assert svc.current["id"] == "v1"
+
         leaked_state = {
             "playing": True,
             "timeSinceLastVoiceActivity": 600,
@@ -839,8 +847,8 @@ def test_gst_youtube_ignores_yandex_onyourwave_auto_advance_and_advances_queue(t
         assert svc.maybe_auto_stop_from_glagol(leaked_state) is False
         assert svc.current["id"] == "v1"
 
-        # _poll_loop sees leaked user:onyourwave during GstBridge playback and advances YouTube queue instead
-        svc.panel.glagol = type("FakeGlagol", (), {"state": leaked_state})()
+        # _poll_loop sees leaked track:153109827 during GstBridge playback and advances YouTube queue instead
+        svc.panel.glagol = type("FakeGlagol", (), {"state": leaked_radio})()
         svc._poll_interval = 0.02
         advanced = []
         orig_auto_next = svc._auto_next

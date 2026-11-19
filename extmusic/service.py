@@ -2526,8 +2526,11 @@ class ExtMusicService:
 
     @staticmethod
     def _is_yandex_auto_advance(state: Dict[str, Any], pstate: Dict[str, Any]) -> bool:
-        """True when Yandex SDK auto-advanced from FALLBACK_TRACK_ID into My Wave without voice input."""
-        if str(pstate.get("playlistId") or "").strip() != "user:onyourwave":
+        """True when Yandex SDK auto-advanced from FALLBACK_TRACK_ID into Radio/My Wave without voice input."""
+        playlist_id = str(pstate.get("playlistId") or "").strip()
+        if playlist_id == f"track:{FALLBACK_TRACK_ID}":
+            return True
+        if playlist_id != "user:onyourwave":
             return False
         voice_age = state.get("timeSinceLastVoiceActivity")
         if isinstance(voice_age, (int, float)) and voice_age <= 15:
