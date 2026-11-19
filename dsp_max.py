@@ -208,6 +208,34 @@ EQ_DEFAULT = [0.0] * len(EQ_BANDS)
 # а большой буст низов легко перегружает маленький динамик.
 EQ_MIN, EQ_MAX = -12.0, 9.0
 
+# Авто-тонкомпенсация (Dynamic Loudness): компенсация падения чувствительности слуха
+# к басу и верхним частотам на низкой громкости (ниже 55%). Шаг 0.5 дБ исключает
+# лишние записи по I2C при мелких колебаниях громкости.
+LOUDNESS_REF_VOL = 55.0
+LOUDNESS_MIN_VOL = 5.0
+LOUDNESS_MAX_BASS = 5.5
+LOUDNESS_MAX_TREBLE = 2.5
+LOUDNESS_MAX_TOTAL_BASS = 8.5
+LOUDNESS_MAX_TOTAL_TREBLE = 6.5
+
+
+def compute_loudness_boost(volume_pct: Optional[float]) -> Tuple[float, float]:
+    """Return (bass_db, treble_db) dynamic loudness compensation for 0..100 volume."""
+    if volume_pct is None or isinstance(volume_pct, bool):
+        return 0.0, 0.0
+    try:
+        vol = float(volume_pct)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0, 0.0
+    if not math.isfinite(vol) or vol >= LOUDNESS_REF_VOL:
+        return 0.0, 0.0
+    clamped = max(LOUDNESS_MIN_VOL, vol)
+    ratio = (LOUDNESS_REF_VOL - clamped) / (LOUDNESS_REF_VOL - LOUDNESS_MIN_VOL)
+    curve = max(0.0, min(1.0, ratio)) ** 1.15
+    bass_db = round((LOUDNESS_MAX_BASS * curve) * 2.0) / 2.0
+    treble_db = round((LOUDNESS_MAX_TREBLE * curve) * 2.0) / 2.0
+    return bass_db, treble_db
+
 
 def _serialized_hardware(method):
     """Run a method under the shared RLock used by every MaxDSP instance.
@@ -281,12 +309,15 @@ class MaxDSP:
         self._last_restore_ts = 0.0
         self._last_reapply_ts = 0.0
         self._expected_regs: Dict[Tuple[str, str], str] = {}
+        self._current_volume: Optional[int] = None
+        self._applied_loudness: Tuple[float, float] = (0.0, 0.0)
         self.filters = {
             "subsonic": True,
             "notch120": True,
             "phase": True,
             "treble": True,
             "drc_bypass": False,
+            "loudness": False,
         }
         self.params = {
             "bass_gain": 0.0,
@@ -589,6 +620,89 @@ class MaxDSP:
             self.active_profile, self.params = old_profile, old_params
         return res
 
+    def _read_volume_pct(self) -> Optional[int]:
+        """Non-blocking read of current station volume (0..100) from Glagol state."""
+        glagol = getattr(self.panel, "glagol", None)
+        st = getattr(glagol, "state", None) if glagol is not None else None
+        if isinstance(st, dict):
+            raw = st.get("volume")
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw):
+                if 0.0 <= raw <= 1.0:
+                    vol = int(round(raw * 100.0))
+                else:
+                    vol = int(round(max(0.0, min(100.0, raw))))
+                self._current_volume = vol
+                return vol
+        return self._current_volume
+
+    def _loudness_boost(
+        self,
+        volume_pct: Optional[float] = None,
+        profile_name: Optional[str] = None,
+    ) -> Tuple[float, float]:
+        """Compute active (bass_db, treble_db) loudness boost for current filter/profile."""
+        prof = profile_name if profile_name is not None else self.active_profile
+        if prof == "stock" or not self.filters.get("loudness"):
+            return 0.0, 0.0
+        vol = volume_pct if volume_pct is not None else self._read_volume_pct()
+        return compute_loudness_boost(vol)
+
+    def _profile_shelf_geometry(self, profile_name: Optional[str] = None) -> Tuple[float, float, float, float]:
+        """Return (bass_f0, bass_q, treble_f0, treble_q) for the active profile."""
+        prof = profile_name if profile_name is not None else self.active_profile
+        if prof == "night":
+            return 60.0, 0.85, 10000.0, 0.7
+        if prof == "bass":
+            return 65.0, 0.8, 13500.0, 0.7
+        return 60.0, 0.85, 13500.0, 0.7
+
+    def _effective_shelves(
+        self,
+        base_bass: float,
+        base_treble: float,
+        treble_enabled: bool,
+        profile_name: Optional[str] = None,
+        volume_pct: Optional[float] = None,
+    ) -> Tuple[float, float, bool, Tuple[float, float]]:
+        """Combine profile/user shelves with dynamic loudness within safe limits."""
+        lb, lt = self._loudness_boost(volume_pct=volume_pct, profile_name=profile_name)
+        eff_bass = round(max(-6.0, min(LOUDNESS_MAX_TOTAL_BASS, float(base_bass) + lb)), 1)
+        treble_base = float(base_treble) if (treble_enabled or profile_name == "night") else 0.0
+        eff_treble = round(max(-6.0, min(LOUDNESS_MAX_TOTAL_TREBLE, treble_base + lt)), 1)
+        treble_active = bool(treble_enabled or profile_name == "night" or abs(lt) > 0.1)
+        return eff_bass, eff_treble, treble_active, (lb, lt)
+
+    def _build_shelf_hex(
+        self,
+        base_bass: float,
+        base_treble: float,
+        treble_enabled: bool,
+        profile_name: Optional[str] = None,
+        volume_pct: Optional[float] = None,
+    ) -> Tuple[str, str, Tuple[float, float]]:
+        """Compile woofer 3D and tweeter 3C biquads including dynamic loudness."""
+        bass_f0, bass_q, treble_f0, treble_q = self._profile_shelf_geometry(profile_name)
+        eff_bass, eff_treble, treble_active, boost = self._effective_shelves(
+            base_bass,
+            base_treble,
+            treble_enabled,
+            profile_name=profile_name,
+            volume_pct=volume_pct,
+        )
+        if abs(eff_bass) > 0.1:
+            bass_hex = calc_low_shelf(bass_f0, bass_q, eff_bass)
+        else:
+            bass_hex = BYPASS_HEX
+
+        if treble_active and abs(eff_treble) > 0.1:
+            if treble_f0 == 13500.0 and abs(eff_treble - 3.0) < 0.1:
+                treble_hex = GOLDEN_HIFI["tweeter"]["0x3C"]
+            else:
+                treble_hex = calc_high_shelf(treble_f0, treble_q, eff_treble)
+        else:
+            treble_hex = BYPASS_HEX
+        return bass_hex, treble_hex, boost
+
     def is_supported(self) -> bool:
         """Check if Silergy SY6045S dual amp hardware is present."""
         if os.path.exists(WOOFER_SYS) and os.path.exists(TWEETER_SYS):
@@ -739,9 +853,13 @@ class MaxDSP:
         old_profile = self.active_profile
         old_filters = copy.deepcopy(self.filters)
         old_params = copy.deepcopy(self.params)
+        old_loudness = self._applied_loudness
+        cur_drc = self.filters.get("drc_bypass", False)
+        cur_loudness = self.filters.get("loudness", False)
         self.params["eq"] = list(EQ_DEFAULT)
         cmds: List[Tuple[str, str, str]] = []
         cmds.extend(self._build_mute_cmds())
+        applied_boost: Tuple[float, float] = (0.0, 0.0)
 
         if profile_name == "stock":
             # Set all registers to bypass
@@ -756,109 +874,115 @@ class MaxDSP:
 
         elif profile_name == "hifi":
             # Golden Hi-Fi calibration
-            for reg, hex_str in GOLDEN_HIFI["woofer"].items():
-                r = reg.replace("0x", "")
-                cmds.append((WOOFER_SYS, ADDR_WOOFER, f"{r} {hex_str}"))
-            for reg, hex_str in GOLDEN_HIFI["tweeter"].items():
-                r = reg.replace("0x", "")
-                cmds.append((TWEETER_SYS, ADDR_TWEETER, f"{r} {hex_str}"))
-            cur_drc = self.filters.get("drc_bypass", False)
             self.filters = {
                 "subsonic": True,
                 "notch120": True,
                 "phase": True,
                 "treble": True,
                 "drc_bypass": cur_drc,
+                "loudness": cur_loudness,
             }
             self.params["bass_gain"] = 0.0
             self.params["treble_gain"] = 3.0
             self.params["subsonic_freq"] = 48
+            bass_hex, treble_hex, applied_boost = self._build_shelf_hex(
+                0.0, 3.0, True, profile_name="hifi"
+            )
+            for reg, hex_str in GOLDEN_HIFI["woofer"].items():
+                r = reg.replace("0x", "")
+                val = bass_hex if r == "3D" else hex_str
+                cmds.append((WOOFER_SYS, ADDR_WOOFER, f"{r} {val}"))
+            for reg, hex_str in GOLDEN_HIFI["tweeter"].items():
+                r = reg.replace("0x", "")
+                val = treble_hex if r == "3C" else hex_str
+                cmds.append((TWEETER_SYS, ADDR_TWEETER, f"{r} {val}"))
 
         elif profile_name == "night":
             # Subsonic at 65 Hz + notch 120Hz + soft treble rolloff
             s1 = calc_hpf_stage(65, 0.5412)
             s2 = calc_hpf_stage(65, 1.3065)
             notch = calc_notch(120, 2.5, -5.0)
-            treble_soft = calc_high_shelf(10000, 0.7, -2.5)
             apf = calc_apf2(260, 0.7071)
-
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3A {notch}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3B {s1}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3C {s2}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3D {BYPASS_HEX}"))
-
-            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"38 {apf}"))
-            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"3C {treble_soft}"))
-
-            cur_drc = self.filters.get("drc_bypass", False)
             self.filters = {
                 "subsonic": True,
                 "notch120": True,
                 "phase": True,
                 "treble": False,
                 "drc_bypass": cur_drc,
+                "loudness": cur_loudness,
             }
             self.params["bass_gain"] = 0.0
             self.params["subsonic_freq"] = 65
             self.params["treble_gain"] = -2.5
+            bass_hex, treble_hex, applied_boost = self._build_shelf_hex(
+                0.0, -2.5, False, profile_name="night"
+            )
+
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3A {notch}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3B {s1}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3C {s2}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3D {bass_hex}"))
+
+            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"38 {apf}"))
+            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"3C {treble_hex}"))
 
         elif profile_name == "bass":
             # Subsonic at 45 Hz + notch 120Hz + Low Shelf 65Hz (+3.5dB) + Air 13.5kHz (+2dB)
             s1 = calc_hpf_stage(45, 0.5412)
             s2 = calc_hpf_stage(45, 1.3065)
             notch = calc_notch(120, 2.5, -4.5)
-            bass_boost = calc_low_shelf(65, 0.8, 3.5)
             apf = calc_apf2(260, 0.7071)
-            treble = calc_high_shelf(13500, 0.7, 2.0)
-
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3A {notch}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3B {s1}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3C {s2}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3D {bass_boost}"))
-
-            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"38 {apf}"))
-            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"3C {treble}"))
-
-            cur_drc = self.filters.get("drc_bypass", False)
             self.filters = {
                 "subsonic": True,
                 "notch120": True,
                 "phase": True,
                 "treble": True,
                 "drc_bypass": cur_drc,
+                "loudness": cur_loudness,
             }
             self.params["bass_gain"] = 3.5
             self.params["treble_gain"] = 2.0
             self.params["subsonic_freq"] = 45
+            bass_hex, treble_hex, applied_boost = self._build_shelf_hex(
+                3.5, 2.0, True, profile_name="bass"
+            )
+
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3A {notch}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3B {s1}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3C {s2}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3D {bass_hex}"))
+
+            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"38 {apf}"))
+            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"3C {treble_hex}"))
 
         elif profile_name == "club":
             # Subsonic at 40 Hz + notch 120Hz + Low Shelf 60Hz (+6.5dB) + Air 13.5kHz (+2.5dB)
             s1 = calc_hpf_stage(40, 0.5412)
             s2 = calc_hpf_stage(40, 1.3065)
             notch = calc_notch(120, 2.5, -4.5)
-            bass_boost = calc_low_shelf(60, 0.85, 6.5)
             apf = calc_apf2(260, 0.7071)
-            treble = calc_high_shelf(13500, 0.7, 2.5)
-
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3A {notch}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3B {s1}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3C {s2}"))
-            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3D {bass_boost}"))
-
-            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"38 {apf}"))
-            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"3C {treble}"))
-
-            cur_drc = self.filters.get("drc_bypass", False)
             self.filters = {
                 "subsonic": True,
                 "notch120": True,
                 "phase": True,
                 "treble": True,
                 "drc_bypass": cur_drc,
+                "loudness": cur_loudness,
             }
             self.params["bass_gain"] = 6.5
             self.params["treble_gain"] = 2.5
             self.params["subsonic_freq"] = 40
+            bass_hex, treble_hex, applied_boost = self._build_shelf_hex(
+                6.5, 2.5, True, profile_name="club"
+            )
+
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3A {notch}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3B {s1}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3C {s2}"))
+            cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3D {bass_hex}"))
+
+            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"38 {apf}"))
+            cmds.append((TWEETER_SYS, ADDR_TWEETER, f"3C {treble_hex}"))
 
         # Любой пресет сбрасывает пользовательский эквалайзер: свободные слоты — bypass.
         for band in EQ_BANDS:
@@ -877,6 +1001,7 @@ class MaxDSP:
         ok = self._write_i2c_batch(cmds)
         if ok:
             self.active_profile = profile_name
+            self._applied_loudness = applied_boost
             self._remember_expected(cmds)
             self._restored = True
             self._restore_attempts = 0
@@ -886,6 +1011,7 @@ class MaxDSP:
             return {"ok": True, "profile": profile_name}
         # Не оставляем в памяти профиль, которого нет в железе и настройках.
         self.active_profile, self.filters, self.params = old_profile, old_filters, old_params
+        self._applied_loudness = old_loudness
         return {"ok": False, "error": "Ошибка записи в I2C драйвер SY6045S"}
 
     @_serialized_hardware
@@ -908,11 +1034,78 @@ class MaxDSP:
         old_profile = self.active_profile
         old_filters = copy.deepcopy(self.filters)
         self.filters[filter_id] = enabled_bool
-        self.active_profile = "custom"
-        res = self._apply_custom_state(save=save)
+        if filter_id == "loudness" and old_profile in ("hifi", "night", "bass", "club"):
+            res = self.apply_profile(old_profile, save=save)
+        else:
+            self.active_profile = "custom"
+            res = self._apply_custom_state(save=save)
         if not res.get("ok"):
             self.active_profile, self.filters = old_profile, old_filters
         return res
+
+    @_serialized_hardware
+    def update_volume(self, volume_pct: Any, force: bool = False) -> Dict[str, Any]:
+        """Dynamically adjust SY6045S loudness shelves for the current 0..100 volume."""
+        if isinstance(volume_pct, bool):
+            return {"ok": False, "error": "Некорректное значение громкости"}
+        try:
+            vol = float(volume_pct)
+        except (TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "Некорректное значение громкости"}
+        if not math.isfinite(vol):
+            return {"ok": False, "error": "Некорректное значение громкости"}
+        vol_int = int(round(max(0.0, min(100.0, vol))))
+        self._current_volume = vol_int
+
+        if not self.filters.get("loudness") or self.active_profile == "stock":
+            return {"ok": True, "changed": False, "volume": vol_int, "bass_db": 0.0, "treble_db": 0.0}
+
+        new_boost = self._loudness_boost(volume_pct=vol_int)
+        if not force and new_boost == self._applied_loudness:
+            return {
+                "ok": True,
+                "changed": False,
+                "volume": vol_int,
+                "bass_db": new_boost[0],
+                "treble_db": new_boost[1],
+            }
+
+        if not self.is_supported():
+            return {"ok": False, "error": "Hardware not supported"}
+
+        bass_hex, treble_hex, applied_boost = self._build_shelf_hex(
+            float(self.params.get("bass_gain", 0.0)),
+            float(self.params.get("treble_gain", 3.0)),
+            bool(self.filters.get("treble", True)),
+            profile_name=self.active_profile,
+            volume_pct=vol_int,
+        )
+        cmds: List[Tuple[str, str, str]] = []
+        cmds.extend(self._build_mute_cmds())
+        cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3D {bass_hex}"))
+        cmds.append((TWEETER_SYS, ADDR_TWEETER, f"3C {treble_hex}"))
+        cmds.extend(self._build_unmute_cmds())
+
+        if not self._write_i2c_batch(cmds):
+            return {"ok": False, "error": "Ошибка обновления тонкомпенсации DSP"}
+
+        self._applied_loudness = applied_boost
+        if self._expected_regs:
+            self._expected_regs[(WOOFER_SYS, "3D")] = f"3D {bass_hex}".upper()
+            self._expected_regs[(TWEETER_SYS, "3C")] = f"3C {treble_hex}".upper()
+        logger.info(
+            "[DSP] Dynamic loudness updated: vol=%d%% -> bass=+%.1fdB, treble=+%.1fdB",
+            vol_int,
+            applied_boost[0],
+            applied_boost[1],
+        )
+        return {
+            "ok": True,
+            "changed": True,
+            "volume": vol_int,
+            "bass_db": applied_boost[0],
+            "treble_db": applied_boost[1],
+        }
 
     @_serialized_hardware
     def set_params(self, params: Dict[str, Any], save: bool = True) -> Dict[str, Any]:
@@ -992,12 +1185,13 @@ class MaxDSP:
         cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3B {s1}"))
         cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3C {s2}"))
 
-        # 3. Bass boost / shelf
-        bgain = self.params.get("bass_gain", 0.0)
-        if abs(bgain) > 0.1:
-            bass_biquad = calc_low_shelf(60, 0.85, bgain)
-        else:
-            bass_biquad = BYPASS_HEX
+        # 3. Bass boost / shelf + dynamic loudness
+        bass_biquad, treble_biquad, applied_boost = self._build_shelf_hex(
+            float(self.params.get("bass_gain", 0.0)),
+            float(self.params.get("treble_gain", 3.0)),
+            bool(self.filters.get("treble", True)),
+            profile_name=self.active_profile,
+        )
         cmds.append((WOOFER_SYS, ADDR_WOOFER, f"3D {bass_biquad}"))
 
         # 3b. 10-полосный эквалайзер в свободных слотах усилителей.
@@ -1015,15 +1209,7 @@ class MaxDSP:
             apf = BYPASS_HEX
         cmds.append((TWEETER_SYS, ADDR_TWEETER, f"38 {apf}"))
 
-        # 5. Tweeter Treble High-Shelf
-        if self.filters.get("treble"):
-            tgain = self.params.get("treble_gain", 3.0)
-            if abs(tgain - 3.0) < 0.1:
-                treble_biquad = GOLDEN_HIFI["tweeter"]["0x3C"]
-            else:
-                treble_biquad = calc_high_shelf(13500, 0.7, tgain)
-        else:
-            treble_biquad = BYPASS_HEX
+        # 5. Tweeter Treble High-Shelf (+ dynamic loudness)
         cmds.append((TWEETER_SYS, ADDR_TWEETER, f"3C {treble_biquad}"))
 
         # 6. Hardware DRC Compressor (Register 0x60: 00 00 08 00 = Bypass, 00 00 08 01 = Stock protection)
@@ -1035,6 +1221,7 @@ class MaxDSP:
 
         ok = self._write_i2c_batch(cmds)
         if ok:
+            self._applied_loudness = applied_boost
             self._remember_expected(cmds)
             self._restored = True
             self._restore_attempts = 0
@@ -1085,10 +1272,14 @@ class MaxDSP:
         subsonic_on = self.filters.get("subsonic", True)
         sub_f0 = self.params.get("subsonic_freq", 48)
         notch_on = self.filters.get("notch120", True)
-        bass_gain = float(self.params.get("bass_gain", 0.0))
+        base_bass = float(self.params.get("bass_gain", 0.0))
 
         treble_on = self.filters.get("treble", True)
-        treble_gain = self.params.get("treble_gain", 3.0) if treble_on else 0.0
+        base_treble = float(self.params.get("treble_gain", 3.0))
+        bass_f0, bass_q, treble_f0, treble_q = self._profile_shelf_geometry(self.active_profile)
+        bass_gain, treble_gain, treble_active, _boost = self._effective_shelves(
+            base_bass, base_treble, treble_on, profile_name=self.active_profile
+        )
 
         # Precalculate biquads for curve evaluation
         w_filters = []
@@ -1112,8 +1303,8 @@ class MaxDSP:
 
         if abs(bass_gain) > 0.1:
             A = 10.0 ** (bass_gain / 40.0)
-            w0 = 2.0 * math.pi * 60.0 / FS
-            alpha = math.sin(w0) / (2.0 * 0.85)
+            w0 = 2.0 * math.pi * bass_f0 / FS
+            alpha = math.sin(w0) / (2.0 * bass_q)
             beta = 2.0 * math.sqrt(A) * alpha
             cos_w0 = math.cos(w0)
             w_filters.append((
@@ -1126,10 +1317,10 @@ class MaxDSP:
             ))
 
         t_filters = []
-        if treble_on and abs(treble_gain) > 0.2:
+        if treble_active and abs(treble_gain) > 0.2:
             A = 10.0 ** (treble_gain / 40.0)
-            w0 = 2.0 * math.pi * 13500.0 / FS
-            alpha = math.sin(w0) / (2.0 * 0.7)
+            w0 = 2.0 * math.pi * treble_f0 / FS
+            alpha = math.sin(w0) / (2.0 * treble_q)
             beta = 2.0 * math.sqrt(A) * alpha
             cos_w0 = math.cos(w0)
             t_filters.append((
@@ -1186,6 +1377,8 @@ class MaxDSP:
     def status(self) -> Dict[str, Any]:
         """Return full DSP status payload for YapAnel UI."""
         supported = self.is_supported()
+        vol = self._read_volume_pct()
+        lb, lt = self._loudness_boost(volume_pct=vol)
         return {
             "ok": True,
             "supported": supported,
@@ -1196,6 +1389,13 @@ class MaxDSP:
             "params": self.params,
             "eq": self._eq_values(),
             "eq_bands": EQ_BANDS,
+            "loudness": {
+                "enabled": bool(self.filters.get("loudness", False)),
+                "volume": vol,
+                "bass_db": lb,
+                "treble_db": lt,
+                "ref_volume": int(LOUDNESS_REF_VOL),
+            },
             "response": self.calculate_response() if supported else None,
         }
 
@@ -1220,6 +1420,8 @@ class MaxDSP:
 
         if act == "set_filter":
             res = self.set_filter(d.get("filter"), d.get("enabled", True))
+        elif act == "update_volume":
+            res = self.update_volume(d.get("volume"), force=bool(d.get("force", False)))
         elif act == "set_eq":
             res = self.set_eq(d.get("bands", d.get("eq")))
         elif act == "set_params":

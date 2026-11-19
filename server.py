@@ -4767,16 +4767,19 @@ pidof com.yandex.io.sdk >/dev/null && echo quasar=running || echo quasar=stopped
             repeat = str(ext.get("repeat") or "none").strip().lower()
             repeat_mode = {"one": "One", "all": "All"}.get(repeat, "None")
             autoplay_radio = bool(ext.get("autoplay_radio"))
+            cover_raw = str(cur.get("thumb") or "")
+            if source == "dlna" and cover_raw.startswith("http://"):
+                cover_raw = "/api/extmusic/thumb?url=" + urllib.parse.quote(cover_raw, safe="")
             ext_p = {
                 "id": self._ext_track_id(cur),
                 "title": cur.get("title") or "Без названия",
-                "subtitle": cur.get("artist") or ("YouTube Music" if source == "yt" else "VK Music"),
+                "subtitle": cur.get("artist") or ("DLNA / Поток" if source == "dlna" else ("YouTube Music" if source == "yt" else "VK Music")),
                 "duration": round(float(duration) / 1000, 3) if duration else 0,
                 "progress": round(float(progress) / 1000, 3),
                 "playerType": "external",
                 "extSource": source,
                 "playlistType": "Track",
-                "playlistDescription": "YouTube Music" if source == "yt" else "VK Music",
+                "playlistDescription": "DLNA / Поток" if source == "dlna" else ("YouTube Music" if source == "yt" else "VK Music"),
                 "native": is_native,
                 "buffering": bool(player.get("buffering")),
                 "autoplayRadio": autoplay_radio,
@@ -4792,7 +4795,7 @@ pidof com.yandex.io.sdk >/dev/null && echo quasar=running || echo quasar=stopped
                     or (repeat == "all" and len(queue) > 0)
                     or (autoplay_radio and source == "yt" and repeat == "none")
                 ),
-                "extra": {"coverURI": cur.get("thumb") or "", "album": cur.get("album") or ""},
+                "extra": {"coverURI": cover_raw, "album": cur.get("album") or ""},
             }
             state = {**(g.get("state") or {}), "playing": bool(player.get("playing")), "playerState": ext_p}
             g = {**g, "state": state, "updated": time.time(), "progress_at": time.time()}
@@ -7220,6 +7223,17 @@ def main():
         panel.version()
     except Exception:
         pass
+    if model == "max" and adb.is_local is True:
+        try:
+            ensure_dsp = getattr(panel, "_dsp_ensure_init", None)
+            if callable(ensure_dsp):
+                ensure_dsp()
+        except Exception:
+            pass
+        try:
+            panel._ext_svc().ensure_hw_started()
+        except Exception:
+            pass
     panel.wakeword_router_start()
     panel.ymusic = glagol.YandexMusic(panel.auth)
     panel.agent_attach()
@@ -7296,6 +7310,12 @@ def main():
     finally:
         # При остановке самого процесса не перетираем последнее явное
         # состояние: после обычного рестарта панель восстановит его.
+        ext_svc = getattr(panel, "_extmusic_service", None)
+        if ext_svc is not None and hasattr(ext_svc, "stop_hw"):
+            try:
+                ext_svc.stop_hw()
+            except Exception:
+                pass
         _close_extmusic_gst(panel)
         panel.stop_party(persist=False)
         panel.metrics._save()

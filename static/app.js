@@ -425,7 +425,10 @@ for (const [id, key] of [['#vol-master', 'level'], ['#vol-bt', 'bt']]) {
     if (key === 'level') { showLevel(+el.value); unmuteUi(+el.value); }
     else $('#vol-bt-v').textContent = pct(el.value);
     clearTimeout(volTimer);
-    volTimer = setTimeout(() => act(null, () => api('/api/volume', { [key]: +el.value })), 150);
+    volTimer = setTimeout(() => act(null, async () => {
+      await api('/api/volume', { [key]: +el.value });
+      if (key === 'level' && dspState?.filters?.loudness) setTimeout(loadDSP, 250);
+    }), 150);
   });
   el.addEventListener('change', () => setTimeout(() => volDragging = false, 1500));
 }
@@ -433,6 +436,7 @@ $$('[data-level]').forEach(b => b.onclick = () => act(b, async () => {
   await api('/api/volume', { level: +b.dataset.level });
   showLevel(+b.dataset.level);
   unmuteUi(+b.dataset.level);
+  if (dspState?.filters?.loudness) setTimeout(loadDSP, 250);
 }));
 
 // ---------- звуки ----------
@@ -1958,6 +1962,21 @@ function renderDSP() {
     if ($('#dsp-filter-phase')) $('#dsp-filter-phase').checked = !!dspState.filters.phase;
     if ($('#dsp-filter-treble')) $('#dsp-filter-treble').checked = !!dspState.filters.treble;
     if ($('#dsp-filter-drc_bypass')) $('#dsp-filter-drc_bypass').checked = !!dspState.filters.drc_bypass;
+    if ($('#dsp-filter-loudness')) $('#dsp-filter-loudness').checked = !!dspState.filters.loudness;
+  }
+  const lm = $('#dsp-loudness-meta');
+  if (lm) {
+    const ld = dspState.loudness;
+    if (ld && ld.enabled) {
+      const bDb = Number(ld.bass_db || 0);
+      const tDb = Number(ld.treble_db || 0);
+      const vTxt = ld.volume !== null && ld.volume !== undefined ? ` при ${ld.volume}%` : '';
+      lm.textContent = (bDb > 0 || tDb > 0)
+        ? `(+${bDb.toFixed(1)} НЧ / +${tDb.toFixed(1)} ВЧ${vTxt})`
+        : `(0 дБ${vTxt})`;
+    } else {
+      lm.textContent = '';
+    }
   }
 
   // Описание
@@ -2506,7 +2525,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Привязка чекбоксов фильтров
-  ['subsonic', 'notch120', 'phase', 'treble', 'drc_bypass'].forEach(id => {
+  ['subsonic', 'notch120', 'phase', 'treble', 'drc_bypass', 'loudness'].forEach(id => {
     const chk = $('#dsp-filter-' + id);
     if (chk) {
       chk.onchange = async () => {

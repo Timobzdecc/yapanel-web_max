@@ -1476,6 +1476,10 @@
               <span>🔓 Полный динамический диапазон</span>
               <input type="checkbox" id="dsp-filter-drc_bypass">
             </label>
+            <label class="toggle" style="cursor:pointer" title="На тихой громкости (ниже 55%) автоматически добавляет бас и воздух ВЧ, а при повышении громкости плавно выравнивает АЧХ">
+              <span>🔊 Авто-тонкомпенсация <small id="dsp-loudness-meta" class="meta" style="font-weight:500"></small></span>
+              <input type="checkbox" id="dsp-filter-loudness">
+            </label>
           </div>
 
           <p class="hint" id="dsp-desc">Ровный, чистый звук: без дрожи мебели, гула корпуса и отставания баса.</p>
@@ -1909,6 +1913,79 @@
         <div class="row" style="gap:8px;flex-wrap:wrap">
           <button class="btn danger-soft" type="button" id="yt-account-logout" hidden>Выйти из аккаунта</button>
           <button class="btn danger-soft" type="button" id="yt-cookies-clear-btn" hidden>Удалить cookies</button>
+        </div>
+      </section>
+
+      <section class="card" id="yt-hw-card" hidden>
+        <div class="card-head">
+          <h2>Станция Макс: пульт и экран 25×16</h2>
+          <span class="badge" id="yt-hw-badge">Макс</span>
+        </div>
+        <div class="col" style="gap:8px">
+          <label class="toggle" style="cursor:pointer" title="Перехватывать кнопки BLE-пульта Yandex Remote 2, пока играет YouTube Music. Громкость, питание и кнопка Алисы продолжают работать штатно.">
+            <span>🎛️ Пульт ДУ для YouTube Music</span>
+            <input type="checkbox" id="yt-hw-remote" checked>
+          </label>
+          <div class="meta" id="yt-hw-remote-meta" style="margin-top:-4px">Поиск пульта…</div>
+          <label class="toggle" style="cursor:pointer" title="Разрешить перехват крестовины пульта (OK / ◀ / ▶ / ▲ / ▼), даже если к колонке подключён ТВ по HDMI">
+            <span>📺 Крестовина пульта при подключённом HDMI</span>
+            <input type="checkbox" id="yt-hw-dpad-hdmi">
+          </label>
+          <p class="hint" style="margin:0">OK — пауза · 2×OK — лайк ♥ · удержание OK — следующий микс · ◀/▶ — трек (удержание ±15с) · ▲ — лайк · ▼ — название на экране (удержание — дизлайк).</p>
+          <label class="toggle" style="cursor:pointer" title="Показывать на LED-матрице 25×16 бегущую строку трека при переключении и анимацию сердечка при лайке">
+            <span>📟 Бегущая строка и ♥ на экране 25×16</span>
+            <input type="checkbox" id="yt-hw-osd" checked>
+          </label>
+          <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn sm" type="button" id="yt-hw-test-heart">Тест ♥</button>
+            <button class="btn sm" type="button" id="yt-hw-test-title">Тест строки</button>
+            <span class="meta" id="yt-hw-osd-meta"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="yt-dlna-card">
+        <div class="card-head">
+          <h2>Приёмник DLNA / UPnP и прямой аудиопоток</h2>
+          <span class="badge" id="yt-dlna-badge">DLNA</span>
+        </div>
+        <div class="col" style="gap:8px">
+          <label class="toggle" style="cursor:pointer" title="Принимать аудиопотоки из BubbleUPnP, mconnect, Symfonium, Plex, Jellyfin и с NAS прямо в Hi-Fi DSP колонки">
+            <span>📡 Включить DLNA MediaRenderer в локальной сети</span>
+            <input type="checkbox" id="yt-dlna-enabled" checked>
+          </label>
+          <div class="meta" id="yt-dlna-meta" style="margin-top:-4px">Проверка DLNA…</div>
+          <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+            <input class="field" id="yt-cast-url" type="url" placeholder="http:// или https:// ссылка на MP3 / FLAC / радиопоток" style="flex:2 1 220px">
+            <input class="field" id="yt-cast-title" type="text" placeholder="Название (опц.)" style="flex:1 1 130px">
+            <button class="btn sm primary" type="button" id="yt-cast-play-btn">Включить поток</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="yt-multiroom-card">
+        <div class="card-head">
+          <h2>Синхронный Мультирум (YouTube Music / Потоки)</h2>
+          <span class="badge" id="yt-mr-badge">Выкл</span>
+        </div>
+        <div class="col" style="gap:8px">
+          <label class="toggle" style="cursor:pointer" title="Синхронно передавать активный поток YouTube Music / DLNA на другие колонки с ЯПанелью в домашней сети">
+            <span>🔗 Раздавать поток синхронно на другие колонки</span>
+            <input type="checkbox" id="yt-mr-enabled">
+          </label>
+          <label class="toggle" style="cursor:pointer" title="Передавать изменения громкости ведущей колонки на ведомые">
+            <span>🔊 Синхронизировать громкость с ведомыми</span>
+            <input type="checkbox" id="yt-mr-sync-vol">
+          </label>
+          <div id="yt-mr-list" class="col" style="gap:6px"></div>
+          <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+            <input class="field" id="yt-mr-add-url" type="text" placeholder="IP колонки (напр. 192.168.1.145 или ip:8765)" style="flex:2 1 190px">
+            <input class="field" id="yt-mr-add-name" type="text" placeholder="Имя (напр. Кухня)" style="flex:1 1 110px">
+            <input class="field" id="yt-mr-add-offset" type="number" placeholder="Сдвиг мс" value="0" min="-2000" max="5000" style="width:92px">
+            <button class="btn sm" type="button" id="yt-mr-add-btn">+ Добавить</button>
+            <button class="btn sm" type="button" id="yt-mr-sync-btn">Синхронизировать сейчас</button>
+          </div>
+          <p class="hint" style="margin:0">На ведомых колонках должна быть установлена ЯПанель (порт 8765). Повторная ретрансляция по кругу заблокирована.</p>
         </div>
       </section>
 
@@ -3007,8 +3084,8 @@
 
 <script src="static/vendor/qrcode.js"></script>
 <script src="static/anim-presets.js?v=0.3.11"></script>
-<script src="static/app.js?v=0.4.5"></script>
-<script src="static/extmusic.js?v=0.4.5"></script>
+<script src="static/app.js?v=0.6.0"></script>
+<script src="static/extmusic.js?v=0.6.0"></script>
 <script type="module">
 import { bindVoiceInput } from './static/voice-input.js';
 import { startAsciiBackground } from './static/ascii-background.js';
