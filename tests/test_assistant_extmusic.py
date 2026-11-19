@@ -272,3 +272,170 @@ def test_extmusic_voice_youtube_requests_25_track_queue():
     daemon._ext_play_youtube_default()
     play_bodies = [b for m, p, b in calls if p == "/api/extmusic/play"]
     assert len(play_bodies[-1]["queue"]) == 25
+
+
+def test_glagol_client_panel_bridge_fallback_on_port_1961(monkeypatch):
+    client = assistant_max.GlagolClient(host="127.0.0.1", port=1961)
+    monkeypatch.setattr(client, "send_command", lambda _payload: False)
+    posted = []
+
+    def fake_panel_post(path, body, timeout=2.5):
+        posted.append((path, body, timeout))
+        return True
+
+    monkeypatch.setattr(client, "_panel_post", fake_panel_post)
+    assert client.stop() is True
+    assert client.say("Включаю мой супермикс на YouTube.") is True
+    assert posted[0][0] == "/api/extmusic/alice_cancel"
+    assert posted[1][0] == "/api/extmusic/alice_say"
+    assert "Включаю мой супермикс на YouTube." in posted[1][1]["text"]
+
+    # Non-1961 ephemeral test ports must not call the live panel HTTP fallback
+    other = assistant_max.GlagolClient(host="127.0.0.1", port=45678)
+    monkeypatch.setattr(other, "send_command", lambda _payload: False)
+    monkeypatch.setattr(other, "_panel_post", fake_panel_post)
+    posted.clear()
+    assert other.stop() is False
+    assert other.say("Привет") is False
+    assert posted == []
+
+
+def test_unwanted_alice_speaking_is_cancelled_but_own_tts_is_preserved():
+    daemon = _bare_daemon()
+    daemon._last_say_text = "Включаю мой супермикс на YouTube."
+    daemon._last_intercepted_phrase = "алиса запусти мой супер микс"
+    daemon._last_intercepted_at = time.time()
+
+    # Own "Повтори за мной" output must NOT be cancelled
+    own_line_1 = (
+        "onAliceStateChanged: SPEAKING, recognizedPhrase='Повтори за мной Включаю мой супермикс на YouTube.', "
+        "outputSpeech='Включаю мой супермикс на YouTube.'"
+    )
+    assert daemon._check_unwanted_alice_speaking(own_line_1) is False
+    daemon._alice_cancel.assert_not_called()
+
+    # Unwanted native Love Radio / TV prompt response for the intercepted phrase MUST be cancelled
+    unwanted_mix = (
+        "onAliceStateChanged: SPEAKING, recognizedPhrase='Запусти мой супер микс', "
+        "outputSpeech='Запускаю микс Love Radio'"
+    )
+    assert daemon._check_unwanted_alice_speaking(unwanted_mix) is True
+    daemon._alice_cancel.assert_called_once()
+
+    # Same check for "запусти Ютуб" -> "подключите к телевизору"
+    daemon = _bare_daemon()
+    daemon._last_say_text = "Включаю YouTube Music."
+    daemon._last_intercepted_phrase = "алиса запусти ютуб"
+    daemon._last_intercepted_at = time.time()
+    unwanted_tv = (
+        "onAliceStateChanged: SPEAKING, recognizedPhrase='Запусти ютуб', "
+        "outputSpeech='Чтобы смотреть видео, сначала подключите колонку к телевизору.'"
+    )
+    assert daemon._check_unwanted_alice_speaking(unwanted_tv) is True
+    daemon._alice_cancel.assert_called_once()
+
+    # Subsequent unrelated phrase handled by native Alice clears tracking
+    daemon = _bare_daemon()
+    daemon.cfg = {"enabled": True, "triggers": ["спроси gpt"], "mode": {}}
+    daemon.lock = assistant_max.threading.Lock()
+    daemon.mode = False
+    daemon.reload_config_if_changed = Mock()
+    daemon._last_intercepted_phrase = "запусти ютуб"
+    daemon._last_intercepted_at = time.time()
+    daemon.handle_phrase("Сколько сейчас времени?")
+    assert daemon._last_intercepted_phrase == ""
+    unrelated = "onAliceStateChanged: SPEAKING, recognizedPhrase='Сколько сейчас времени?', outputSpeech='Девять часов.'"
+    assert daemon._check_unwanted_alice_speaking(unrelated) is False
+    daemon._alice_cancel.assert_not_called()
+
+
+def test_extmusic_service_and_router_alice_cancel_and_say(tmp_path):
+    from api.router import ApiRequest, Router
+    from api.extmusic import register
+    from extmusic.service import ExtMusicService
+
+    sent = []
+
+    class FakeGlagol:
+        ws = object()
+        state = {}
+
+        def send(self, payload, timeout=None):
+            sent.append(payload)
+            return {"status": "SUCCESS"}
+
+    class FakePanel:
+        data_dir = str(tmp_path)
+        adb = None
+        glagol = FakeGlagol()
+        device = "max"
+        model = "max"
+
+        def __init__(self):
+            self.music_cmds = []
+
+        def music_cmd(self, payload):
+            self.music_cmds.append(payload)
+            return {"status": "SUCCESS"}
+
+    panel = FakePanel()
+    svc = ExtMusicService(panel)
+    panel._extmusic_service = svc
+    if getattr(svc, "gst", None) is not None and hasattr(svc.gst, "close"):
+        svc.gst.close()
+
+    suppressed = []
+    cleared = []
+    svc.gst = Mock()
+    svc.gst.suppress_alice = lambda tts_sec=4.5, music_sec=12.0, clear_override=False: suppressed.append(
+        (tts_sec, music_sec, clear_override)
+    )
+    svc.gst.clear_alice_tts_suppression = lambda: cleared.append(True)
+
+    router = Router()
+    register(router)
+
+    cancel_fn = router.match("POST", "/api/extmusic/alice_cancel")
+    assert cancel_fn is not None
+    resp_cancel = cancel_fn(ApiRequest(panel=panel, data={"tts_sec": 3.5, "music_sec": 9.0}))
+    assert resp_cancel["ok"] is True
+    assert suppressed == [(3.5, 9.0, False)]
+    assert {"command": "stop"} in panel.music_cmds
+
+    say_fn = router.match("POST", "/api/extmusic/alice_say")
+    assert say_fn is not None
+    resp_say = say_fn(ApiRequest(panel=panel, data={"text": "Включаю YouTube Music."}))
+    assert resp_say["ok"] is True
+    assert resp_say["spoken"] is True
+    assert cleared == [True]
+    assert sent == [{"command": "sendText", "text": "Повтори за мной Включаю YouTube Music."}]
+
+
+def test_ensure_hw_started_triggers_gst_preinject_when_panel_local(tmp_path, monkeypatch):
+    import threading
+    from extmusic.service import ExtMusicService
+
+    injected_evt = threading.Event()
+
+    class FakePanel:
+        data_dir = str(tmp_path)
+        adb = None
+        glagol = None
+        device = "max"
+        model = "max"
+
+    monkeypatch.setenv("PANEL_LOCAL", "1")
+    panel = FakePanel()
+    svc = ExtMusicService(panel)
+    if getattr(svc, "gst", None) is not None and hasattr(svc.gst, "close"):
+        svc.gst.close()
+    svc.gst = Mock()
+    svc.gst.ensure_injected = lambda: injected_evt.set() or True
+
+    try:
+        res = svc.ensure_hw_started()
+        assert isinstance(res, dict)
+        assert "osd" in res and "remote" in res and "dlna" in res
+        assert injected_evt.wait(2.0), "Expected ensure_hw_started() to pre-inject GstBridge"
+    finally:
+        svc.stop_hw()

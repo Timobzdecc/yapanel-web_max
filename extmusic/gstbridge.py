@@ -14,16 +14,19 @@ from __future__ import annotations
 import base64
 import http.client
 import http.server
+import ipaddress
 import logging
 import os
 import re
 import shlex
+import socket
 import socketserver
 import struct
 import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,10 +39,40 @@ _log = logging.getLogger("yapanel.gst")
 OVERRIDE_PATH = "/data/data/com.yandex.io.sdk/files/override_url.txt"
 PID_TRACK_PATH = "/data/data/com.yandex.io.sdk/files/injected_pid.txt"
 USER_SEEK_FLAG = "/data/data/com.yandex.io.sdk/files/user_seek.txt"
+ALICE_CANCEL_PATH = "/data/data/com.yandex.io.sdk/files/alice_cancel.txt"
 HOOK_SCRIPT = "/data/local/tmp/hook_location.js"
 FALLBACK_TRACK_ID = "153109827"
 PROXY_PORT = 8788
 _NON_RETRYABLE_HTTP = (400, 401, 404, 410, 416)
+_NON_MP4_EXTS = (".mp3", ".flac", ".ogg", ".opus", ".wav", ".aac", ".m3u8", ".pls")
+
+
+def _is_allowed_client_ip(host: str) -> bool:
+    """Allow loopback and RFC1918 LAN clients to read the GstBridge multiroom relay."""
+    raw = str(host or "").strip().strip("[]")
+    if "%" in raw:
+        raw = raw.split("%", 1)[0]
+    if not raw:
+        return True
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return bool(ip.is_loopback or ip.is_private)
+
+
+def _should_parse_mp4_sidx(url: str) -> bool:
+    """True when URL may be fragmented MP4/M4A with a DASH sidx box (skip obvious MP3/FLAC/OGG/HLS)."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+        path = (parsed.path or "").lower()
+    except ValueError:
+        return True
+    if any(path.endswith(ext) for ext in _NON_MP4_EXTS):
+        return False
+    return True
 
 
 class GstBridgeError(ValueError):
@@ -314,6 +347,14 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             total = start + cl
         return total, cl
 
+    @staticmethod
+    def _parse_upstream_ctype(resp: Any) -> Optional[str]:
+        hdrs = getattr(resp, "headers", None) or {}
+        raw = str(hdrs.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if raw.startswith("audio/") or raw == "application/ogg":
+            return raw
+        return None
+
     def _stream_upstream(self, upstream: Any, bytes_left: Optional[int], base_decode_time: int) -> int:
         if base_decode_time <= 0:
             while bytes_left is None or bytes_left > 0:
@@ -363,6 +404,11 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         self._handle(head_only=False)
 
     def _handle(self, head_only: bool = False) -> None:
+        client_ip = self.client_address[0] if getattr(self, "client_address", None) else "127.0.0.1"
+        if not _is_allowed_client_ip(client_ip):
+            self.send_response(403)
+            self.end_headers()
+            return
         bridge = self.bridge
         if not bridge:
             self.send_response(404)
@@ -372,6 +418,7 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             upstream_url = bridge._last_url
             streamer = bridge.streamer
             default_seek_sec = getattr(bridge, "_seek_offset_sec", 0.0)
+            content_type = getattr(bridge, "_content_type", "audio/mp4") or "audio/mp4"
         if not upstream_url:
             self.send_response(404)
             self.end_headers()
@@ -508,6 +555,12 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
                     if byte_off == 0:
                         upstream_bytes_left = content_length
 
+            detected_ctype = self._parse_upstream_ctype(upstream)
+            if detected_ctype:
+                content_type = detected_ctype
+                with bridge._lock:
+                    bridge._content_type = detected_ctype
+
         try:
             if range_header and r_end is not None:
                 self.send_response(206)
@@ -516,7 +569,7 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_response(200)
 
-            self.send_header("Content-Type", "audio/mp4")
+            self.send_header("Content-Type", content_type)
             self.send_header("Accept-Ranges", "bytes")
             if content_length is not None:
                 self.send_header("Content-Length", str(content_length))
@@ -580,6 +633,10 @@ class GstBridge:
         self._stream_started: bool = False
         self._paused_pos: float = 0.0
         self._track_duration: float = 0.0
+        self._content_type: str = "audio/mp4"
+        self._cancel_seq: int = 0
+        self._tts_mute_until_ms: int = 0
+        self._music_mute_until_ms: int = 0
         self.streamer: Optional[MP4Streamer] = None
         self._streamer_done: threading.Event = threading.Event()
         self._streamer_done.set()
@@ -587,26 +644,46 @@ class GstBridge:
         self._ensure_server()
 
     def _ensure_server(self) -> None:
-        """Start the local HTTP streaming proxy, falling back to an ephemeral port if PROXY_PORT is busy."""
+        """Start the local HTTP streaming proxy on 0.0.0.0 (fallback 127.0.0.1 / ephemeral port)."""
         with self._lock:
             if self._server is not None:
                 return
             handler_cls = type("_BoundStreamHandler", (_StreamRequestHandler,), {"bridge": self})
             ports = (PROXY_PORT, 0) if PROXY_PORT else (0,)
             for idx, candidate in enumerate(ports):
-                try:
-                    self._server = _ReusableTCPServer(("127.0.0.1", candidate), handler_cls)
-                    t = threading.Thread(target=self._server.serve_forever, daemon=True, name="gst-proxy-server")
-                    t.start()
-                    if candidate == 0 and PROXY_PORT:
-                        bound = int(self._server.server_address[1] or 0)
-                        _log.warning("[GST_PROXY] Bound fallback ephemeral port %d instead of busy %d", bound, PROXY_PORT)
-                    return
-                except Exception as error:  # noqa: BLE001
-                    if idx == 0 and len(ports) > 1:
-                        _log.warning("[GST_PROXY] Port %d unavailable (%s), retrying on ephemeral port", candidate, error)
-                    else:
-                        _log.warning("[GST_PROXY] Failed to start local proxy server: %s", error)
+                if candidate:
+                    # On Windows, SO_REUSEADDR lets 0.0.0.0 bind over a 127.0.0.1 listener; probe first.
+                    busy = False
+                    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    try:
+                        probe.settimeout(0.05)
+                        busy = probe.connect_ex(("127.0.0.1", candidate)) == 0
+                    except OSError:
+                        busy = False
+                    finally:
+                        try:
+                            probe.close()
+                        except OSError:
+                            pass
+                    if busy:
+                        if idx == 0 and len(ports) > 1:
+                            _log.warning("[GST_PROXY] Port %d busy, retrying on ephemeral port", candidate)
+                        continue
+                for host in ("0.0.0.0", "127.0.0.1"):
+                    try:
+                        self._server = _ReusableTCPServer((host, candidate), handler_cls)
+                        t = threading.Thread(target=self._server.serve_forever, daemon=True, name="gst-proxy-server")
+                        t.start()
+                        if candidate == 0 and PROXY_PORT:
+                            bound = int(self._server.server_address[1] or 0)
+                            _log.warning("[GST_PROXY] Bound fallback ephemeral port %d instead of busy %d", bound, PROXY_PORT)
+                        return
+                    except Exception as error:  # noqa: BLE001
+                        if host == "127.0.0.1":
+                            if idx == 0 and len(ports) > 1:
+                                _log.warning("[GST_PROXY] Port %d unavailable (%s), retrying on ephemeral port", candidate, error)
+                            else:
+                                _log.warning("[GST_PROXY] Failed to start local proxy server: %s", error)
 
     def close(self) -> None:
         """Stop the local streaming proxy TCP server and release its listening socket."""
@@ -671,27 +748,31 @@ class GstBridge:
         pid = self._get_sdk_pid()
         if not pid:
             return False
-        with self._lock:
-            if self._last_injected_pid == pid:
-                return True
 
-        # Fast check if frida-agent is currently mapped into SDK memory
-        in_mem = self._exec(f"grep -q frida-agent /proc/{pid}/maps && echo 1 || echo 0")
-        if in_mem.strip() == "1":
-            with self._lock:
-                self._last_injected_pid = pid
-            return True
-
-        # Ensure hook script is present and up-to-date on the device
+        # Ensure hook script is present and up-to-date on the device BEFORE deciding whether
+        # an already-mapped frida-agent can be reused (updated hook_location.js must hot-reload).
         q_hook = shlex.quote(HOOK_SCRIPT)
         src_hook = "/data/yapanel/device/extmusic/hook_location.js"
-        _, _, hook_rc = self._exec_result(
+        sync_out, _, hook_rc = self._exec_result(
             f"if [ -f {src_hook} ] && {{ [ ! -f {q_hook} ] || ! cmp -s {src_hook} {q_hook}; }}; "
-            f"then cp {src_hook} {q_hook} && chmod 666 {q_hook}; fi; "
+            f"then cp {src_hook} {q_hook} && chmod 666 {q_hook} && echo UPDATED; fi; "
             f"[ -f {q_hook} ]"
         )
         if hook_rc != 0:
             return False
+        need_reload = "UPDATED" in (sync_out or "")
+
+        with self._lock:
+            if not need_reload and self._last_injected_pid == pid:
+                return True
+
+        # Fast check if frida-agent is currently mapped into SDK memory
+        if not need_reload:
+            in_mem = self._exec(f"grep -q frida-agent /proc/{pid}/maps && echo 1 || echo 0")
+            if in_mem.strip() == "1":
+                with self._lock:
+                    self._last_injected_pid = pid
+                return True
 
         # Find frida-inject on the target device and verify it is executable
         frida_out, _, frida_rc = self._exec_result(
@@ -746,6 +827,39 @@ class GstBridge:
     def _write_override(self, url: str) -> None:
         self._write_device_file(OVERRIDE_PATH, url)
 
+    def suppress_alice(
+        self,
+        tts_sec: float = 4.5,
+        music_sec: float = 12.0,
+        clear_override: bool = False,
+    ) -> None:
+        """Signal hook_location.js in com.yandex.io.sdk to cancel Alice dialog & mute unwanted streams."""
+        now_ms = int(time.time() * 1000)
+        tts_ms = now_ms + int(max(0.0, float(tts_sec)) * 1000) if float(tts_sec or 0.0) > 0 else 0
+        music_ms = now_ms + int(max(0.0, float(music_sec)) * 1000) if float(music_sec or 0.0) > 0 else 0
+        with self._lock:
+            self._cancel_seq = max(now_ms, self._cancel_seq + 1)
+            self._tts_mute_until_ms = tts_ms
+            self._music_mute_until_ms = music_ms
+            payload = f"{self._cancel_seq}|{self._tts_mute_until_ms}|{self._music_mute_until_ms}"
+        if clear_override:
+            self._write_override("")
+        self._write_device_file(ALICE_CANCEL_PATH, payload)
+
+    def clear_alice_tts_suppression(self) -> None:
+        """Allow panel's own 'Повтори за мной' speech while keeping unwanted music muted."""
+        with self._lock:
+            self._tts_mute_until_ms = 0
+            payload = f"{self._cancel_seq}|0|{self._music_mute_until_ms}"
+        self._write_device_file(ALICE_CANCEL_PATH, payload)
+
+    def clear_alice_music_suppression(self) -> None:
+        """Allow new external music stream while preserving any remaining TTS suppression window."""
+        with self._lock:
+            self._music_mute_until_ms = 0
+            payload = f"{self._cancel_seq}|{self._tts_mute_until_ms}|0"
+        self._write_device_file(ALICE_CANCEL_PATH, payload)
+
     def _init_streamer(self, url: str) -> None:
         with self._lock:
             gen = self._stream_gen
@@ -793,6 +907,23 @@ class GstBridge:
             return None
         return f"http://127.0.0.1:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}"
 
+    def lan_proxy_url(self, lan_ip: str, seek_sec: float = 0.0) -> Optional[str]:
+        """Return LAN-reachable relay URL for multiroom follower speakers."""
+        host = str(lan_ip or "").strip()
+        if not host:
+            return None
+        with self._lock:
+            srv = self._server
+        if srv is None or not getattr(srv, "server_address", None):
+            return None
+        bind_host = str(srv.server_address[0] or "")
+        if bind_host == "127.0.0.1" and host != "127.0.0.1":
+            return None
+        port = int(srv.server_address[1] or 0)
+        if port <= 0:
+            return None
+        return f"http://{host}:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}"
+
     def _restart_glagol_playback(self, context: str) -> None:
         try:
             self._send_glagol({"command": "stop"})
@@ -820,6 +951,7 @@ class GstBridge:
             raise GstBridgeError("Не удалось подключить аудио-хук (frida-inject)")
         backups = [str(u) for u in (fallback_urls or []) if u and str(u) != url][:4]
         proxy_url = self._proxy_url(0.0)
+        parse_sidx = _should_parse_mp4_sidx(url)
         with self._lock:
             self._stream_gen += 1
             self._last_url = url
@@ -827,19 +959,24 @@ class GstBridge:
             self._last_title = title
             self._last_artist = artist
             self._track_duration = float(duration or 0)
+            self._content_type = "audio/mp4"
             self._seek_offset_sec = 0.0
             self._paused_pos = 0.0
             self._seek_start_time = time.time()
             self._stream_started = proxy_url is None
             self.streamer = None
             self._streamer_done = threading.Event()
+            if not parse_sidx:
+                self._streamer_done.set()
             self._is_active = True
             self._is_paused = False
 
-        # Parse sidx in background thread for instant seek readiness
-        threading.Thread(target=self._init_streamer, args=(url,), daemon=True).start()
+        # Parse sidx in background thread for instant seek readiness (MP4/YouTube streams)
+        if parse_sidx:
+            threading.Thread(target=self._init_streamer, args=(url,), daemon=True).start()
 
-        # 1. Route initial playback through local retry proxy when bound (avoids 403 / libsoup stalls)
+        # 1. Allow new external stream cleanly, then route initial playback through local retry proxy
+        self.clear_alice_music_suppression()
         self._write_override(proxy_url or url)
 
         # 2. Trigger native playback via Glagol

@@ -172,7 +172,7 @@
       if (next === 'home' && !homeLoaded) loadHome();
       else if (next === 'explore' && !exploreLoaded) loadExplore();
       else if (next === 'library' && !libraryLoaded) loadLibrary();
-      else if (next === 'account') loadStatus();
+      else if (next === 'account') { loadStatus(); loadHwStatus(); loadDlnaStatus(); loadMultiroomStatus(); }
     }
   }
 
@@ -291,7 +291,7 @@
       const cur = status?.current;
       const p = status?.player || {};
       if (cur) {
-        const srcName = cur.source === 'vk' ? 'VK Music' : 'YouTube Music';
+        const srcName = cur.source === 'vk' ? 'VK Music' : (cur.source === 'dlna' ? 'DLNA / Поток' : 'YouTube Music');
         const stName = p.playing ? 'играет' : p.state === 'paused' ? 'пауза' : p.state || 'активен';
         const qLen = Array.isArray(status?.queue) ? status.queue.length : 0;
         const extras = [];
@@ -304,6 +304,179 @@
       } else {
         diagPlay.textContent = 'Ожидание';
       }
+    }
+  }
+
+  let hwState = null;
+
+  function renderHwStatus(hw) {
+    hwState = hw || null;
+    const card = $('yt-hw-card');
+    if (!card) return;
+    if (!hw || !hw.supported) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    const r = hw.remote || {};
+    const o = hw.osd || {};
+    const badge = $('yt-hw-badge');
+    if (badge) {
+      badge.textContent = r.grabbed ? 'пульт активен' : (r.connected ? 'пульт подключён' : 'Макс');
+      badge.className = 'badge ' + (r.grabbed ? 'ok' : (r.connected ? 'ok' : ''));
+    }
+    const rChk = $('yt-hw-remote');
+    if (rChk) rChk.checked = !!r.enabled;
+    const dChk = $('yt-hw-dpad-hdmi');
+    if (dChk) dChk.checked = !!r.dpad_hdmi;
+    const oChk = $('yt-hw-osd');
+    if (oChk) oChk.checked = !!o.enabled;
+
+    const rMeta = $('yt-hw-remote-meta');
+    if (rMeta) {
+      if (!r.supported) {
+        rMeta.textContent = 'Локальный ввод недоступен на этом хосте';
+      } else if (r.connected) {
+        const dev = r.device_name ? `${r.device_name} (${r.device_path || 'evdev'})` : (r.device_path || 'BLE-пульт');
+        const stateTxt = !r.enabled
+          ? 'выключено'
+          : r.grabbed
+            ? 'активен для YouTube Music'
+            : 'ожидает запуск YouTube Music';
+        rMeta.textContent = `${dev} · ${stateTxt}`;
+      } else {
+        rMeta.textContent = r.enabled ? 'BLE-пульт не найден (ожидание подключения)' : 'Выключено';
+      }
+    }
+
+    const oMeta = $('yt-hw-osd-meta');
+    if (oMeta) {
+      if (!o.supported) oMeta.textContent = 'Матрица 25×16 недоступна';
+      else if (o.active) oMeta.textContent = 'Идёт показ на экране…';
+      else oMeta.textContent = o.enabled ? 'Включено (не мешает таймеру и эквалайзеру)' : 'Выключено';
+    }
+  }
+
+  async function loadHwStatus() {
+    if (!$('yt-hw-card')) return;
+    try {
+      const hw = await request('/api/extmusic/hw');
+      renderHwStatus(hw);
+    } catch (_) {
+      // Optional Station Max capability
+    }
+  }
+
+  async function updateHw(patch, msg) {
+    try {
+      const hw = await request('/api/extmusic/hw', patch);
+      renderHwStatus(hw);
+      if (msg) notify(msg);
+    } catch (err) {
+      notify(err.message || 'Не удалось обновить настройки железа', true);
+      loadHwStatus();
+    }
+  }
+
+  function renderDlnaStatus(st) {
+    const card = $('yt-dlna-card');
+    if (!card || !st) return;
+    const badge = $('yt-dlna-badge');
+    if (badge) {
+      badge.textContent = st.running ? `порт ${st.port}` : (st.enabled ? 'ожидание' : 'выкл');
+      badge.className = 'badge ' + (st.running ? 'ok' : '');
+    }
+    const chk = $('yt-dlna-enabled');
+    if (chk) chk.checked = !!st.enabled;
+    const meta = $('yt-dlna-meta');
+    if (meta) {
+      if (st.running && st.device_url) {
+        meta.textContent = `${st.friendly_name || 'Яндекс Станция Макс'} · ${st.device_url}`;
+      } else {
+        meta.textContent = st.enabled ? 'Запускается DLNA MediaRenderer…' : 'DLNA выключен (прямой запуск потоков доступен)';
+      }
+    }
+  }
+
+  async function loadDlnaStatus() {
+    if (!$('yt-dlna-card')) return;
+    try {
+      renderDlnaStatus(await request('/api/extmusic/dlna'));
+    } catch (_) {}
+  }
+
+  async function updateDlna(patch, msg) {
+    try {
+      const res = await request('/api/extmusic/dlna', patch);
+      renderDlnaStatus(res);
+      if (res?.playback) {
+        status = res.playback;
+        renderStatus();
+      }
+      if (msg) notify(msg);
+    } catch (err) {
+      notify(err.message || 'Ошибка DLNA / потока', true);
+      loadDlnaStatus();
+    }
+  }
+
+  function renderMultiroomStatus(mr) {
+    const card = $('yt-multiroom-card');
+    if (!card || !mr) return;
+    const followers = Array.isArray(mr.followers) ? mr.followers : [];
+    const activeCount = followers.filter(f => f.enabled).length;
+    const badge = $('yt-mr-badge');
+    if (badge) {
+      badge.textContent = mr.enabled ? `активен (${activeCount})` : (followers.length ? `ведомых: ${followers.length}` : 'Выкл');
+      badge.className = 'badge ' + (mr.enabled ? 'ok' : '');
+    }
+    const chk = $('yt-mr-enabled');
+    if (chk) chk.checked = !!mr.enabled;
+    const volChk = $('yt-mr-sync-vol');
+    if (volChk) volChk.checked = !!mr.sync_volume;
+
+    const listEl = $('yt-mr-list');
+    if (listEl) {
+      if (!followers.length) {
+        const sugs = Array.isArray(mr.suggestions) ? mr.suggestions : [];
+        if (sugs.length) {
+          listEl.innerHTML = `<div class="meta">Найдено в speakers.json: ${sugs.map(s => `<button type="button" class="btn sm" data-mr-suggest-url="${esc(s.url)}" data-mr-suggest-name="${esc(s.name)}">+ ${esc(s.name)}</button>`).join(' ')}</div>`;
+        } else {
+          listEl.innerHTML = '<div class="meta">Ведомые колонки пока не добавлены.</div>';
+        }
+      } else {
+        listEl.innerHTML = followers.map(f => {
+          const stTxt = f.last_status
+            ? (f.last_status === 'ok' ? `OK (${f.latency_ms || 0}мс)` : esc(f.last_status))
+            : 'готова';
+          return `<div class="row" style="gap:8px;align-items:center;justify-content:space-between;padding:6px 10px;background:var(--field,#151515);border-radius:10px">`
+            + `<label class="row" style="gap:8px;align-items:center;cursor:pointer;min-width:0">`
+            + `<input type="checkbox" data-mr-toggle="${esc(f.id)}" ${f.enabled ? 'checked' : ''}>`
+            + `<span><b>${esc(f.name)}</b> <span class="mono meta">${esc(f.url)}</span>`
+            + `${f.offset_ms ? ` <span class="meta">(${f.offset_ms > 0 ? '+' : ''}${f.offset_ms}мс)</span>` : ''} · <span class="meta">${stTxt}</span></span>`
+            + `</label>`
+            + `<button type="button" class="btn sm danger-soft" data-mr-remove="${esc(f.id)}" aria-label="Удалить колонку">✕</button>`
+            + `</div>`;
+        }).join('');
+      }
+    }
+  }
+
+  async function loadMultiroomStatus() {
+    if (!$('yt-multiroom-card')) return;
+    try {
+      renderMultiroomStatus(await request('/api/extmusic/multiroom'));
+    } catch (_) {}
+  }
+
+  async function updateMultiroom(patch, msg) {
+    try {
+      const res = await request('/api/extmusic/multiroom', patch);
+      renderMultiroomStatus(res);
+      if (msg) notify(msg);
+    } catch (err) {
+      notify(err.message || 'Ошибка настройки мультирума', true);
+      loadMultiroomStatus();
     }
   }
 
@@ -1790,6 +1963,67 @@
     $('yt-oauth-start-btn')?.addEventListener('click', startYtOauth);
     $('yt-oauth-cancel-btn')?.addEventListener('click', cancelYtOauth);
     $('yt-account-logout')?.addEventListener('click', logoutYtAccount);
+
+    // Station Max hardware integration (BLE remote + LED matrix OSD)
+    $('yt-hw-remote')?.addEventListener('change', e => {
+      updateHw({ remote_enabled: !!e.target.checked }, e.target.checked ? 'Пульт ДУ для YouTube Music включён' : 'Пульт ДУ для YouTube Music выключен');
+    });
+    $('yt-hw-dpad-hdmi')?.addEventListener('change', e => {
+      updateHw({ remote_dpad_hdmi: !!e.target.checked });
+    });
+    $('yt-hw-osd')?.addEventListener('change', e => {
+      updateHw({ osd_enabled: !!e.target.checked }, e.target.checked ? 'OSD на экране 25×16 включён' : 'OSD на экране 25×16 выключен');
+    });
+    $('yt-hw-test-heart')?.addEventListener('click', () => updateHw({ test_osd: 'heart' }, 'Показ ♥ на экране 25×16'));
+    $('yt-hw-test-title')?.addEventListener('click', () => updateHw({ test_osd: 'track' }, 'Показ бегущей строки на экране 25×16'));
+
+    // DLNA / Cast controls
+    $('yt-dlna-enabled')?.addEventListener('change', e => {
+      updateDlna({ enabled: !!e.target.checked }, e.target.checked ? 'DLNA MediaRenderer включён' : 'DLNA MediaRenderer выключен');
+    });
+    $('yt-cast-play-btn')?.addEventListener('click', () => {
+      const url = ($('yt-cast-url')?.value || '').trim();
+      const title = ($('yt-cast-title')?.value || '').trim();
+      if (!url) { notify('Введите http:// или https:// ссылку на аудиопоток', true); return; }
+      updateDlna({ action: 'cast', url, title }, 'Запуск аудиопотока…');
+    });
+
+    // Multiroom controls
+    $('yt-mr-enabled')?.addEventListener('change', e => {
+      updateMultiroom({ enabled: !!e.target.checked }, e.target.checked ? 'Мультирум включён' : 'Мультирум выключен');
+    });
+    $('yt-mr-sync-vol')?.addEventListener('change', e => {
+      updateMultiroom({ sync_volume: !!e.target.checked });
+    });
+    $('yt-mr-add-btn')?.addEventListener('click', () => {
+      const url = ($('yt-mr-add-url')?.value || '').trim();
+      const name = ($('yt-mr-add-name')?.value || '').trim();
+      const offset_ms = Number($('yt-mr-add-offset')?.value || 0) || 0;
+      if (!url) { notify('Укажите IP-адрес ведомой колонки', true); return; }
+      updateMultiroom({ action: 'add', url, name, offset_ms }, 'Колонка добавлена в мультирум');
+      if ($('yt-mr-add-url')) $('yt-mr-add-url').value = '';
+      if ($('yt-mr-add-name')) $('yt-mr-add-name').value = '';
+    });
+    $('yt-mr-sync-btn')?.addEventListener('click', () => {
+      updateMultiroom({ action: 'sync' }, 'Синхронизация отправлена на ведомые колонки');
+    });
+    $('yt-mr-list')?.addEventListener('click', e => {
+      const rm = e.target.closest('[data-mr-remove]');
+      if (rm) {
+        updateMultiroom({ action: 'remove', id: rm.dataset.mrRemove }, 'Колонка удалена');
+        return;
+      }
+      const sug = e.target.closest('[data-mr-suggest-url]');
+      if (sug) {
+        updateMultiroom({ action: 'add', url: sug.dataset.mrSuggestUrl, name: sug.dataset.mrSuggestName || '' }, 'Колонка добавлена');
+      }
+    });
+    $('yt-mr-list')?.addEventListener('change', e => {
+      const tog = e.target.closest('[data-mr-toggle]');
+      if (tog) {
+        updateMultiroom({ action: 'update', id: tog.dataset.mrToggle, enabled_follower: !!tog.checked });
+      }
+    });
 
     // Navigation integration with app.js
     window.addEventListener('panel:tab', e => {

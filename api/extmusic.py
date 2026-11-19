@@ -145,6 +145,19 @@ def register(router: Router):
 
     router.get("/api/extmusic/status", lambda r: service(r).status())
     router.get("/api/extmusic/state", lambda r: service(r).status())
+    router.get("/api/extmusic/hw", lambda r: service(r).hw_status())
+    router.post("/api/extmusic/hw", lambda r: service(r).hw_configure(r.data))
+    router.get("/api/extmusic/dlna", lambda r: service(r).dlna_status())
+    router.post("/api/extmusic/dlna", lambda r: service(r).dlna_action(r.data))
+    router.get("/api/extmusic/multiroom", lambda r: service(r).multiroom_status())
+    router.post("/api/extmusic/multiroom", lambda r: service(r).multiroom_action(r.data))
+    router.post("/api/extmusic/voice", lambda r: service(r).voice_command(str(r.data.get("phrase") or "")))
+    router.post("/api/extmusic/alice_cancel", lambda r: service(r).alice_cancel(
+        tts_sec=4.5 if r.data.get("tts_sec") is None else r.data.get("tts_sec"),
+        music_sec=12.0 if r.data.get("music_sec") is None else r.data.get("music_sec"),
+        clear_override=bool(r.data.get("clear_override", False)),
+    ))
+    router.post("/api/extmusic/alice_say", lambda r: service(r).alice_say(str(r.data.get("text") or "")))
     router.post("/api/extmusic/source", lambda r: service(r).set_source(str(r.data.get("source") or "")))
     router.post("/api/extmusic/vk/auth", lambda r: service(r).auth(r.data))
     router.post("/api/extmusic/vk/logout", lambda r: service(r).logout())
@@ -212,11 +225,24 @@ def register(router: Router):
     router.post("/api/extmusic/screen/text", lambda r: service(r).screen_text(r.data))
     router.post("/api/extmusic/screen/key", lambda r: service(r).screen_key(r.data))
     router.post("/api/extmusic/screen/clear", lambda r: service(r).screen_clear())
-    router.post("/api/extmusic/play", lambda r: service(r).play(r.data.get("track"), r.data.get("queue")))
-    router.post("/api/extmusic/pause", lambda r: service(r).pause())
-    router.post("/api/extmusic/resume", lambda r: service(r).resume())
-    router.post("/api/extmusic/seek", lambda r: service(r).seek(int(r.data.get("position", 0) or 0)))
-    router.post("/api/extmusic/stop", lambda r: service(r).stop())
+    router.post("/api/extmusic/play", lambda r: service(r).play(
+        r.data.get("track"),
+        r.data.get("queue"),
+        multiroom_follower=bool(r.data.get("multiroom_follower")),
+    ))
+    router.post("/api/extmusic/pause", lambda r: service(r).pause(
+        multiroom_follower=bool(r.data.get("multiroom_follower")),
+    ))
+    router.post("/api/extmusic/resume", lambda r: service(r).resume(
+        multiroom_follower=bool(r.data.get("multiroom_follower")),
+    ))
+    router.post("/api/extmusic/seek", lambda r: service(r).seek(
+        int(r.data.get("position", 0) or 0),
+        multiroom_follower=bool(r.data.get("multiroom_follower")),
+    ))
+    router.post("/api/extmusic/stop", lambda r: service(r).stop(
+        multiroom_follower=bool(r.data.get("multiroom_follower")),
+    ))
     router.post("/api/extmusic/next", lambda r: service(r).next())
     router.post("/api/extmusic/prev", lambda r: service(r).prev())
     router.post("/api/extmusic/shuffle", lambda r: _shuffle(r, service(r)))

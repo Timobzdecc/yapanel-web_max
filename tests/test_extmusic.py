@@ -822,6 +822,61 @@ def test_glagol_auto_stop_ignores_fallback_track_and_stops_on_new_track(tmp_path
         svc.stop()
 
 
+def test_gst_youtube_ignores_yandex_onyourwave_auto_advance_and_advances_queue(tmp_path, monkeypatch):
+    svc = _make_gst_test_service(tmp_path, monkeypatch)
+    t1 = {"source": "yt", "id": "v1", "title": "One", "artist": "A", "duration": 200}
+    t2 = {"source": "yt", "id": "v2", "title": "Two", "artist": "B", "duration": 210}
+    try:
+        svc.play(t1, [t1, t2])
+        svc._ext_started_at -= 10
+
+        # Auto-advance into Yandex track:153109827 radio or user:onyourwave without voice activity must NOT stop ExtMusic
+        leaked_radio = {
+            "playing": True,
+            "timeSinceLastVoiceActivity": 318,
+            "playerState": {"id": "41077410", "playlistId": "track:153109827", "playerType": "music_thin"},
+        }
+        assert svc.maybe_auto_stop_from_glagol(leaked_radio) is False
+        assert svc.current["id"] == "v1"
+
+        leaked_state = {
+            "playing": True,
+            "timeSinceLastVoiceActivity": 600,
+            "playerState": {"id": "19698553", "playlistId": "user:onyourwave", "playerType": "music_thin"},
+        }
+        assert svc.maybe_auto_stop_from_glagol(leaked_state) is False
+        assert svc.current["id"] == "v1"
+
+        # _poll_loop sees leaked track:153109827 during GstBridge playback and advances YouTube queue instead
+        svc.panel.glagol = type("FakeGlagol", (), {"state": leaked_radio})()
+        svc._poll_interval = 0.02
+        advanced = []
+        orig_auto_next = svc._auto_next
+
+        def spy_auto_next(eos_gen):
+            advanced.append(eos_gen)
+            orig_auto_next(eos_gen)
+            svc._poll_stop.set()
+
+        monkeypatch.setattr(svc, "_auto_next", spy_auto_next)
+        stop_evt = svc._poll_stop
+        svc._poll_loop(svc._gen, stop_evt)
+        assert len(advanced) == 1
+        assert svc.current["id"] == "v2"
+
+        # Explicit voice-triggered user:onyourwave (timeSinceLastVoiceActivity <= 15) MUST hand over to Yandex
+        svc._ext_started_at -= 10
+        voiced_wave = {
+            "playing": True,
+            "timeSinceLastVoiceActivity": 3,
+            "playerState": {"id": "19698553", "playlistId": "user:onyourwave", "playerType": "music_thin"},
+        }
+        assert svc.maybe_auto_stop_from_glagol(voiced_wave) is True
+        assert svc.current is None
+    finally:
+        svc.stop()
+
+
 def test_queue_edge_cases_radio_browse_and_catalog_facades(tmp_path, monkeypatch):
     from extmusic import ytmusic
     from extmusic.service import _KNOWN_TRACKS_LIMIT
