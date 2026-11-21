@@ -24,16 +24,18 @@
 > [!NOTE]
 > Проект находится в стадии **beta**: функции и установка могут меняться, возможны ошибки. Если что-то не работает — [откройте issue](https://github.com/Timobzdecc/yapanel-web_max/issues), приложив версию, модель станции и лог.
 
-## 🎉 Что нового в 0.4.3
+## 🎉 Что нового в 0.6.0
 
-**Персональные «Миксы для вас» из вашего аккаунта YouTube Music, радио по песне и очереди по 25 треков (на базе 0.4.0–0.4.2).**
+**Глубокая интеграция с железом Станции Макс (пульт BLE, LED OSD, Dynamic Loudness в DSP), стриминг DLNA/UPnP, синхронный мультирум и быстрый голос.**
 
-- **Настоящие личные миксы YouTube Music:** на главной вкладке сверху появилась сетка «Миксы для вас» — `Мой супермикс`, `Понравившаяся музыка`, `Мой микс 1–5`, `Риплей Микс`, `Архивный микс` и тематические супермиксы прямо из вашего авторизованного аккаунта (с обложками, исполнителями и корректной загрузкой через OAuth).
-- **Радио по любой песне (`📻`) и очереди по 25 треков:** запускается с кнопки у каждого трека или голосом и сразу формирует очередь из `25` похожих треков (как и личные миксы, автоподбор и голосовой запуск YouTube).
-- **Голосовое управление миксами и радио:** `«Алиса, включи мой супермикс»`, `«включи мой микс 2»`, `«включи радио по песне ...»`, `«включи радио под эту песню»` — без перехвата обычного FM-радио и «Моей волны» Яндекса.
-- **Стабильный эквалайзер и перемотка (из 0.4.0–0.4.2):** живой эквалайзер после любой перемотки, устойчивый прокси без конфликта портов при перезапуске, поиск, «Библиотека» с лайками и отчёт для Issue.
+- **Управление с Пульта Яндекс 2 (BLE):** перехват кнопок воспроизведения (Play/Pause, следующий/предыдущий трек, перемотка, громкость) с `/dev/input/event4` для YouTube Music с пробросом через `uinput` и автопереключением на HDMI.
+- **Индикация на LED-матрице 25×16 (OSD):** бегущая строка с названием и исполнителем трека при переключении, иконки состояния и сердце (❤️) при лайке прямо на экране колонки.
+- **Динамическая тонкомпенсация (Dynamic Loudness) в DSP:** адаптивный эквалайзер с автоматическим подъемом баса и верхов на низкой громкости для сохранения плотности звука и линейной Hi-Fi кривой на высокой громкости.
+- **Встроенный DLNA / UPnP MediaRenderer (порт 8789):** стриминг аудио без потерь и сжатия Bluetooth со смартфонов, ПК и плееров (BubbleUPnP, mConnect, Audirvana, Foobar2000, VLC).
+- **Синхронный мультирум для внешней музыки:** объединение нескольких Станций в общую сеть с единой очередью.
+- **Быстрый локальный голос (< 200 мс) и стабильность Алисы:** локальная обработка команд («следующий», «назад», «пауза», «продолжай», «лайк», «что играет»), устранение наложения облачных фраз («подключите к ТВ») и защита от срыва миксов YouTube в Яндекс Музыку.
 
-**[Скачать 0.4.3](https://github.com/Timobzdecc/yapanel-web_max/releases/tag/v0.4.3)** · **[Чейнжлог 0.4.3](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.4.3.md)** · [Чейнжлог 0.4.2](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.4.2.md) · [Чейнжлог 0.4.1](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.4.1.md) · [Что было в 0.4.0](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.4.0.md)
+**[Скачать 0.6.0](https://github.com/Timobzdecc/yapanel-web_max/releases/tag/v0.6.0)** · **[Чейнжлог 0.6.0](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.6.0.md)** · [Что было в 0.4.3](https://github.com/Timobzdecc/yapanel-web_max/blob/main/docs/release-notes/v0.4.3.md) · [Архив релизов](https://github.com/Timobzdecc/yapanel-web_max/releases)
 
 ## 📸 Скриншоты
 
@@ -305,7 +307,7 @@ systemctl --user restart yapanel-web-max
 
 ### Docker — Linux-сервер или NAS
 
-Готовый образ проекта: `ghcr.io/timobzdecc/yapanel-web_max`. Есть теги `latest` и версии, например `0.3.11`. Поддерживаются `linux/amd64`, `linux/arm64` и `linux/arm/v7` (Raspberry Pi).
+Готовый образ проекта: `ghcr.io/timobzdecc/yapanel-web_max`. Есть теги `latest` и версии, например `0.6.0`. Поддерживаются `linux/amd64`, `linux/arm64` и `linux/arm/v7` (Raspberry Pi).
 
 Внутри контейнера уже есть Python, `adb`, `ffmpeg` и `openssl`. На хосте нужен только Docker с Compose.
 
@@ -328,7 +330,7 @@ chmod 700 data
 ```yaml
 services:
   panel:
-    image: ghcr.io/timobzdecc/yapanel-web_max:0.3.11
+    image: ghcr.io/timobzdecc/yapanel-web_max:0.6.0
     container_name: yapanel-web-max
     network_mode: host
     environment:
@@ -366,7 +368,7 @@ docker run -d \
   -e PANEL_PORT=8765 \
   -e PANEL_HTTPS_PORT=8766 \
   -v "$HOME/yapanel-web_max/data:/data" \
-  ghcr.io/timobzdecc/yapanel-web_max:0.3.11
+  ghcr.io/timobzdecc/yapanel-web_max:0.6.0
 ```
 
 Проверка:
@@ -397,7 +399,7 @@ docker exec -it yapanel-web-max adb -s 192.168.1.50:5555 shell 'id; su -c id; /o
 
 #### 5. Обновление
 
-Если в `compose.yaml` закреплена версия, замените `0.3.11` на новую. Если используется `:latest`, версия подтянется сама. Затем:
+Если в `compose.yaml` закреплена версия, замените `0.6.0` на новую. Если используется `:latest`, версия подтянется сама. Затем:
 
 ```bash
 docker compose pull
