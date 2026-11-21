@@ -439,3 +439,99 @@ def test_ensure_hw_started_triggers_gst_preinject_when_panel_local(tmp_path, mon
         assert injected_evt.wait(2.0), "Expected ensure_hw_started() to pre-inject GstBridge"
     finally:
         svc.stop_hw()
+
+
+def test_alice_cancel_preserves_media_playback_for_next_and_resume():
+    """Non-stop voice transport actions (next, resume) must not send glagol.stop() or MEDIA_STOP."""
+    import threading
+
+    daemon = _bare_daemon()
+    del daemon._alice_cancel  # use the real AssistantDaemon._alice_cancel method
+    daemon._ext_cache = None
+    daemon._ext_at = 0.0
+    daemon._ext_cancel_at = 0.0
+    daemon._next_cancel_stop_media = True
+    daemon.speak = lambda *_a, **_k: None
+
+    local_cancels = []
+    glagol_stops = []
+    media_stop_keys = []
+    media_stop_evt = threading.Event()
+
+    daemon._write_local_alice_cancel = lambda tts_sec=4.5, music_sec=12.0: local_cancels.append((tts_sec, music_sec))
+    daemon.glagol = type("G", (), {"stop": lambda _self: glagol_stops.append(1)})()
+
+    def fake_media_stop():
+        media_stop_keys.append(1)
+        media_stop_evt.set()
+
+    daemon._send_media_stop_key = fake_media_stop
+
+    responses = {
+        "следующий": {"handled": True, "action": "next", "title": "Next Track"},
+        "продолжай": {"handled": True, "action": "resume", "title": "Next Track"},
+        "пауза": {"handled": True, "action": "pause", "title": ""},
+        "стоп": {"handled": True, "action": "stop", "title": ""},
+    }
+
+    def fake_ext_call(path, method="GET", payload=None, timeout=1.5):
+        if path == "/api/extmusic/status":
+            return {"current": {"id": "1", "source": "yt"}}
+        if path == "/api/extmusic/voice":
+            return dict(responses[(payload or {}).get("phrase", "")])
+        return {}
+
+    daemon._ext_call = fake_ext_call
+
+    assert daemon.handle_extmusic("следующий") is True
+    assert local_cancels[-1] == (4.5, 0.0)
+    assert glagol_stops == []
+    assert media_stop_keys == []
+
+    assert daemon.handle_extmusic("продолжай") is True
+    assert local_cancels[-1] == (4.5, 0.0)
+    assert glagol_stops == []
+    assert media_stop_keys == []
+
+    media_stop_evt.clear()
+    assert daemon.handle_extmusic("пауза") is True
+    assert local_cancels[-1] == (4.5, 12.0)
+    assert len(glagol_stops) == 1
+    assert media_stop_evt.wait(1.0)
+    assert len(media_stop_keys) == 1
+
+    media_stop_evt.clear()
+    assert daemon.handle_extmusic("стоп") is True
+    assert local_cancels[-1] == (4.5, 12.0)
+    assert len(glagol_stops) == 2
+    assert media_stop_evt.wait(1.0)
+    assert len(media_stop_keys) == 2
+
+
+def test_alice_cancel_runs_before_voice_play_when_extmusic_active():
+    """Dialog cancel must happen BEFORE /api/extmusic/voice sends playMusic on next/resume."""
+    daemon = _bare_daemon()
+    del daemon._alice_cancel
+    daemon._ext_cache = None
+    daemon._ext_at = 0.0
+    daemon._ext_cancel_at = 0.0
+    daemon._next_cancel_stop_media = True
+    daemon.speak = lambda *_a, **_k: None
+    daemon.glagol = type("G", (), {"stop": lambda _self: None})()
+    daemon._send_media_stop_key = lambda: None
+
+    events = []
+    daemon._write_local_alice_cancel = lambda tts_sec=4.5, music_sec=12.0: events.append(("cancel", music_sec))
+
+    def fake_ext_call(path, method="GET", payload=None, timeout=1.5):
+        if path == "/api/extmusic/status":
+            return {"current": {"id": "abc", "source": "yt"}}
+        if path == "/api/extmusic/voice":
+            events.append(("voice", (payload or {}).get("phrase", "")))
+            return {"handled": True, "action": "next", "title": "Next"}
+        return {}
+
+    daemon._ext_call = fake_ext_call
+
+    assert daemon.handle_extmusic("следующий") is True
+    assert events == [("cancel", 0.0), ("voice", "следующий")]
