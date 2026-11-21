@@ -16,6 +16,7 @@ import http.client
 import http.server
 import ipaddress
 import logging
+import math
 import os
 import re
 import shlex
@@ -43,6 +44,22 @@ ALICE_CANCEL_PATH = "/data/data/com.yandex.io.sdk/files/alice_cancel.txt"
 HOOK_SCRIPT = "/data/local/tmp/hook_location.js"
 FALLBACK_TRACK_ID = "153109827"
 PROXY_PORT = 8788
+NORM_MIN_DB = -16.0
+NORM_MAX_DB = 4.0
+
+
+def compute_norm_gain(loudness_db: Optional[float]) -> Optional[float]:
+    """Convert YouTube loudnessDb (dB relative to -14 LUFS) into linear GStreamer volume."""
+    if loudness_db is None or isinstance(loudness_db, bool):
+        return None
+    try:
+        val = float(loudness_db)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val):
+        return None
+    gain_db = max(NORM_MIN_DB, min(NORM_MAX_DB, -val))
+    return round(10.0 ** (gain_db / 20.0), 4)
 _NON_RETRYABLE_HTTP = (400, 401, 404, 410, 416)
 _NON_MP4_EXTS = (".mp3", ".flac", ".ogg", ".opus", ".wav", ".aac", ".m3u8", ".pls")
 
@@ -637,6 +654,9 @@ class GstBridge:
         self._cancel_seq: int = 0
         self._tts_mute_until_ms: int = 0
         self._music_mute_until_ms: int = 0
+        self._normalize_enabled: bool = True
+        self._last_loudness_db: Optional[float] = None
+        self._norm_gain: Optional[float] = None
         self.streamer: Optional[MP4Streamer] = None
         self._streamer_done: threading.Event = threading.Event()
         self._streamer_done.set()
@@ -897,15 +917,40 @@ class GstBridge:
         finally:
             done_evt.set()
 
-    def _proxy_url(self, seek_sec: float = 0.0) -> Optional[str]:
+    def set_normalize(self, enabled: bool) -> None:
+        with self._lock:
+            self._normalize_enabled = bool(enabled)
+            self._norm_gain = (
+                compute_norm_gain(self._last_loudness_db)
+                if self._normalize_enabled
+                else None
+            )
+
+    def norm_status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "enabled": self._normalize_enabled,
+                "loudness_db": self._last_loudness_db,
+                "gain": self._norm_gain,
+            }
+
+    def _proxy_url(self, seek_sec: float = 0.0, norm_gain: Optional[float] = None) -> Optional[str]:
         with self._lock:
             srv = self._server
+            active_gain = (
+                norm_gain
+                if norm_gain is not None
+                else (self._norm_gain if self._normalize_enabled else None)
+            )
         if srv is None or not getattr(srv, "server_address", None):
             return None
         port = int(srv.server_address[1] or 0)
         if port <= 0:
             return None
-        return f"http://127.0.0.1:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}"
+        url = f"http://127.0.0.1:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}"
+        if active_gain is not None:
+            url += f"&norm={active_gain:.4f}"
+        return url
 
     def lan_proxy_url(self, lan_ip: str, seek_sec: float = 0.0) -> Optional[str]:
         """Return LAN-reachable relay URL for multiroom follower speakers."""
@@ -942,6 +987,7 @@ class GstBridge:
         artist: str = "",
         duration: int = 0,
         fallback_urls: Optional[List[str]] = None,
+        loudness_db: Optional[float] = None,
     ) -> int:
         if not url:
             raise GstBridgeError("Пустой адрес потока")
@@ -950,9 +996,12 @@ class GstBridge:
             self.release()
             raise GstBridgeError("Не удалось подключить аудио-хук (frida-inject)")
         backups = [str(u) for u in (fallback_urls or []) if u and str(u) != url][:4]
-        proxy_url = self._proxy_url(0.0)
         parse_sidx = _should_parse_mp4_sidx(url)
         with self._lock:
+            norm_gain = compute_norm_gain(loudness_db) if self._normalize_enabled else None
+            self._last_loudness_db = loudness_db
+            self._norm_gain = norm_gain
+            proxy_url = self._proxy_url(0.0, norm_gain=norm_gain)
             self._stream_gen += 1
             self._last_url = url
             self._fallback_urls = backups
@@ -1028,6 +1077,8 @@ class GstBridge:
             self._paused_pos = 0.0
             self._seek_start_time = 0.0
             self._stream_started = False
+            self._last_loudness_db = None
+            self._norm_gain = None
             self.streamer = None
             self._streamer_done.set()
         self._clear_override()
