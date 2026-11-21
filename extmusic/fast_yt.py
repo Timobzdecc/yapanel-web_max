@@ -8,6 +8,7 @@ HTTPS audio streams (Opus 160kbps / AAC 128kbps) from googlevideo.com in ~0.5s.
 from __future__ import annotations
 
 import json
+import math
 import time
 import urllib.request
 from typing import Any, Dict, Optional
@@ -35,6 +36,36 @@ VISIONOS_USER_AGENT = (
 
 class FastYTError(ValueError):
     """Raised when YouTube stream resolution fails."""
+
+
+def _extract_loudness_db(best: Dict[str, Any], data: Dict[str, Any]) -> Optional[float]:
+    """Extract track relative loudness in dB above target (-14 LUFS) if available."""
+    raw: Any = best.get("loudnessDb") if isinstance(best, dict) else None
+    if raw is None and isinstance(data, dict):
+        audio_cfg = (data.get("playerConfig") or {}).get("audioConfig") or {}
+        if isinstance(audio_cfg, dict):
+            if audio_cfg.get("loudnessDb") is not None:
+                raw = audio_cfg.get("loudnessDb")
+            else:
+                abs_lkfs = audio_cfg.get("trackAbsoluteLoudnessLkfs")
+                if abs_lkfs is None:
+                    abs_lkfs = audio_cfg.get("perceptualLoudnessDb")
+                if abs_lkfs is not None:
+                    target = audio_cfg.get("loudnessTargetLkfs")
+                    target_val = -14.0 if target is None else float(target)
+                    try:
+                        raw = float(abs_lkfs) - target_val
+                    except (TypeError, ValueError):
+                        raw = None
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val) or not (-40.0 <= val <= 25.0):
+        return None
+    return round(val, 2)
 
 
 def fast_resolve(
@@ -152,6 +183,7 @@ def fast_resolve(
         "ext": ext,
         "acodec": acodec,
         "abr": int((best.get("bitrate") or 0) // 1000),
+        "loudness_db": _extract_loudness_db(best, data),
         "resolve_time": elapsed,
     }
 

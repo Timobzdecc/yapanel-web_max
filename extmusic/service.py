@@ -50,6 +50,7 @@ class ExtMusicService:
         self.player = PlayerClient(panel)
         self.native = NativeYT(panel)
         self.gst = GstBridge(panel)
+        self.gst.set_normalize(self.store.normalize())
         self.screen = StationScreen(panel)
         self.ytmusic = ytmusic
         self.yt_account = YTAccount(store=self.store, panel=panel)
@@ -276,11 +277,18 @@ class ExtMusicService:
     def hw_status(self) -> Dict[str, Any]:
         osd = self._get_osd()
         remote = self._get_remote()
+        norm_fn = getattr(self.gst, "norm_status", None)
+        norm = norm_fn() if callable(norm_fn) else {
+            "enabled": self.store.normalize(),
+            "loudness_db": None,
+            "gain": None,
+        }
         return {
             "ok": True,
             "supported": bool(osd.is_supported() or remote.is_supported()),
             "osd": osd.status(),
             "remote": remote.status(),
+            "normalize": norm,
         }
 
     def hw_configure(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -300,6 +308,12 @@ class ExtMusicService:
         if "remote_dpad_hdmi" in data and data["remote_dpad_hdmi"] is not None:
             remote.configure(dpad_hdmi=bool(data["remote_dpad_hdmi"]))
             changed = True
+        if "normalize_enabled" in data and data["normalize_enabled"] is not None:
+            norm_on = bool(data["normalize_enabled"])
+            self.store.save_normalize(norm_on)
+            set_norm = getattr(self.gst, "set_normalize", None)
+            if callable(set_norm):
+                set_norm(norm_on)
 
         if changed:
             payload = {
@@ -542,7 +556,11 @@ class ExtMusicService:
         url = str(info.get("url") or "")
         if not url:
             raise ExtMusicError("Не удалось получить аудиопоток YouTube")
-        clean_info = {k: v for k, v in info.items() if v or k not in track}
+        clean_info = {
+            k: v
+            for k, v in info.items()
+            if (v is not None and v != "") or k not in track
+        }
         return {**track, **clean_info, "url": url, "gst": True}
 
     def _native_player(self, current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1722,6 +1740,7 @@ class ExtMusicService:
                                 str(normalized.get("artist") or ""),
                                 duration=dur_sec,
                                 fallback_urls=fb_urls,
+                                loudness_db=resolved.get("loudness_db"),
                             )
                         except TypeError:
                             self.gst.play(

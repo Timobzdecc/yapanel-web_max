@@ -7,6 +7,7 @@ public tracks; account cookies are used for the library endpoint.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -211,6 +212,15 @@ def resolve(video_id: str, timeout: int = 90, cookies: str = "", fast: bool = Fa
     stream = str(payload.get("url") or "").strip()
     if not (stream.startswith("http://") or stream.startswith("https://")):
         raise YTDLPError("yt-dlp не отдал прямой аудиопоток")
+    raw_loud = payload.get("loudness_db")
+    loudness_db = None
+    if raw_loud is not None:
+        try:
+            val = float(raw_loud)
+            if math.isfinite(val) and -40.0 <= val <= 25.0:
+                loudness_db = round(val, 2)
+        except (TypeError, ValueError):
+            pass
     return {
         "url": stream,
         "ext": str(payload.get("ext") or "")[:20],
@@ -219,4 +229,5 @@ def resolve(video_id: str, timeout: int = 90, cookies: str = "", fast: bool = Fa
         "duration": payload.get("duration") or 0,
         "title": str(payload.get("title") or "")[:200],
         "uploader": str(payload.get("uploader") or payload.get("channel") or "")[:200],
+        "loudness_db": loudness_db,
     }

@@ -355,12 +355,28 @@
       else if (o.active) oMeta.textContent = 'Идёт показ на экране…';
       else oMeta.textContent = o.enabled ? 'Включено (не мешает таймеру и эквалайзеру)' : 'Выключено';
     }
+
+    const norm = hw.normalize || {};
+    const normOn = norm.enabled !== undefined ? !!norm.enabled : true;
+    const nChk = $('yt-hw-normalize');
+    if (nChk) nChk.checked = normOn;
+    const nMeta = $('yt-hw-norm-meta');
+    if (nMeta) {
+      if (!normOn) {
+        nMeta.textContent = 'Выключено (исходная громкость треков)';
+      } else if (typeof norm.loudness_db === 'number' && typeof norm.gain === 'number') {
+        const sign = norm.loudness_db >= 0 ? '+' : '';
+        nMeta.textContent = `Включено · трек ${sign}${norm.loudness_db.toFixed(1)} dB → ×${norm.gain.toFixed(2)}`;
+      } else {
+        nMeta.textContent = 'Включено (−14 LUFS, применится со следующего трека)';
+      }
+    }
   }
 
   async function loadHwStatus() {
     if (!$('yt-hw-card')) return;
     try {
-      const hw = await request('/api/extmusic/hw');
+      const hw = await call('/api/extmusic/hw');
       renderHwStatus(hw);
     } catch (_) {
       // Optional Station Max capability
@@ -369,7 +385,7 @@
 
   async function updateHw(patch, msg) {
     try {
-      const hw = await request('/api/extmusic/hw', patch);
+      const hw = await call('/api/extmusic/hw', patch);
       renderHwStatus(hw);
       if (msg) notify(msg);
     } catch (err) {
@@ -401,13 +417,13 @@
   async function loadDlnaStatus() {
     if (!$('yt-dlna-card')) return;
     try {
-      renderDlnaStatus(await request('/api/extmusic/dlna'));
+      renderDlnaStatus(await call('/api/extmusic/dlna'));
     } catch (_) {}
   }
 
   async function updateDlna(patch, msg) {
     try {
-      const res = await request('/api/extmusic/dlna', patch);
+      const res = await call('/api/extmusic/dlna', patch);
       renderDlnaStatus(res);
       if (res?.playback) {
         status = res.playback;
@@ -465,13 +481,13 @@
   async function loadMultiroomStatus() {
     if (!$('yt-multiroom-card')) return;
     try {
-      renderMultiroomStatus(await request('/api/extmusic/multiroom'));
+      renderMultiroomStatus(await call('/api/extmusic/multiroom'));
     } catch (_) {}
   }
 
   async function updateMultiroom(patch, msg) {
     try {
-      const res = await request('/api/extmusic/multiroom', patch);
+      const res = await call('/api/extmusic/multiroom', patch);
       renderMultiroomStatus(res);
       if (msg) notify(msg);
     } catch (err) {
@@ -1976,6 +1992,9 @@
     });
     $('yt-hw-test-heart')?.addEventListener('click', () => updateHw({ test_osd: 'heart' }, 'Показ ♥ на экране 25×16'));
     $('yt-hw-test-title')?.addEventListener('click', () => updateHw({ test_osd: 'track' }, 'Показ бегущей строки на экране 25×16'));
+    $('yt-hw-normalize')?.addEventListener('change', e => {
+      updateHw({ normalize_enabled: !!e.target.checked }, e.target.checked ? 'Нормализация громкости включена' : 'Нормализация громкости выключена');
+    });
 
     // DLNA / Cast controls
     $('yt-dlna-enabled')?.addEventListener('change', e => {

@@ -179,6 +179,16 @@ class ExtMusicStore:
             data.pop("vk", None)
             self._save(data)
 
+    def normalize(self) -> bool:
+        val = self.load().get("normalize")
+        return True if val is None else bool(val)
+
+    def save_normalize(self, enabled: bool) -> None:
+        with self._lock:
+            data = self.load()
+            data["normalize"] = bool(enabled)
+            self._save(data)
+
     # ---------- YouTube cookies ----------
     def cookies_path(self) -> Path:
         return self.path.parent / ".extmusic.cookies.txt"
