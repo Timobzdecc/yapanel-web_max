@@ -34,8 +34,7 @@
 
 <div align="center">
 
-[![Открыть 3D-эмулятор](https://img.shields.io/badge/▶%20Открыть%203D--эмулятор-Live%20Demo-ff6a00?style=for-the-badge)](https://timobzdecc.github.io/yapanel-web_max/)
-[![Обзор и 3D](https://img.shields.io/badge/3D%20%2B%20DSP-Обзор-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#overview)
+[![Обзор и 3D](https://img.shields.io/badge/3D%20%2B%20DSP-Обзор-ff6a00?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#overview)
 [![Плеер и караоке](https://img.shields.io/badge/🎵%20Плеер-Караоке-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#player)
 [![YouTube Music](https://img.shields.io/badge/▶%20YouTube-−14%20LUFS-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#yt)
 [![Анимации 25x16](https://img.shields.io/badge/📟%20Матрица-25×16-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#boot)
