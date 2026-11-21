@@ -69,6 +69,29 @@ function mutePipeline(str) {
   return str;
 }
 
+function extractNormGain(url) {
+  if (!url) return null;
+  var m = /[?&]norm=([0-9]+(?:\.[0-9]+)?)/.exec(url);
+  if (!m) return null;
+  var g = parseFloat(m[1]);
+  if (!isFinite(g) || g < 0.05 || g > 3.0) return null;
+  return g;
+}
+
+function applyNormGain(str, gain) {
+  if (gain === null || gain === undefined) {
+    return str;
+  }
+  var gStr = gain.toFixed(4);
+  if (/volume\s+name=normalization\b[^!]*/.test(str)) {
+    return str.replace(/volume\s+name=normalization\b[^!]*/, 'volume name=normalization volume=' + gStr + ' ');
+  }
+  if (/volume\s+name=volume0\b/.test(str)) {
+    return str.replace(/volume\s+name=volume0\b/, 'volume name=normalization volume=' + gStr + ' ! volume name=volume0');
+  }
+  return str;
+}
+
 function invokeStopOnSdk(inst) {
   try { inst.stopTts(); } catch (e) {}
   try { inst.cancelDialog(); } catch (e) {}
@@ -151,12 +174,15 @@ function handleParseLaunch(args) {
     }
 
     var override = getOverrideUrl();
+    var normGain = extractNormGain(override);
+    var normTag = normGain !== null ? ' (norm=' + normGain.toFixed(4) + ')' : '';
     if (override && str.indexOf('yio_souphttpsrc') !== -1) {
       var modified = str;
       modified = modified.replace(/alt-locations="[^"]*"\s*/g, '');
       modified = modified.replace(/location="[^"]*"/g, 'location="' + override + '"');
       modified = modified.replace(/!\s*aesctrdec\s+key=[0-9a-fA-F]+\s*!/g, '!');
-      writeLog('[GST_PARSE_LAUNCH] External URL -> ' + override.substr(0, 120) + '\n');
+      modified = applyNormGain(modified, normGain);
+      writeLog('[GST_PARSE_LAUNCH] External URL -> ' + override.substr(0, 120) + normTag + '\n');
       this.pipePtr = Memory.allocUtf8String(modified);
       args[0] = this.pipePtr;
     } else if (override && str.indexOf('filesrc') !== -1) {
@@ -164,7 +190,8 @@ function handleParseLaunch(args) {
         /filesrc\s+location="[^"]*"(?:\s*!\s*aesctrdec\s+key=[0-9a-fA-F]+)?\s*!/g,
         'souphttpsrc location="' + override + '" name=yio_souphttpsrc !'
       );
-      writeLog('[GST_PARSE_LAUNCH] External filesrc -> ' + override.substr(0, 120) + '\n');
+      modFile = applyNormGain(modFile, normGain);
+      writeLog('[GST_PARSE_LAUNCH] External filesrc -> ' + override.substr(0, 120) + normTag + '\n');
       this.pipePtr = Memory.allocUtf8String(modFile);
       args[0] = this.pipePtr;
     } else if ((str.indexOf('yio_souphttpsrc') !== -1 || str.indexOf('filesrc') !== -1) && now < state.musicMuteUntil) {
