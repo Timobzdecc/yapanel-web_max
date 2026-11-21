@@ -750,3 +750,141 @@ def test_gstbridge_holds_progress_while_buffering_until_proxy_starts_streaming(m
     finally:
         bridge.close()
 
+
+
+
+def test_gstbridge_second_zero_range_keeps_seek_start_time_and_min_duration(tmp_path, monkeypatch):
+    import types
+    import urllib.request
+    from pathlib import Path
+    from extmusic import gstbridge
+
+    monkeypatch.setattr(gstbridge, "PROXY_PORT", 0)
+    monkeypatch.setattr(gstbridge, "OVERRIDE_PATH", str(tmp_path / "override_url.txt"))
+    monkeypatch.setattr(gstbridge, "ALICE_CANCEL_PATH", str(tmp_path / "alice_cancel.txt"))
+
+    glagol_cmds = []
+    panel = types.SimpleNamespace(
+        glagol=types.SimpleNamespace(
+            state={"playing": False, "playerState": {}},
+            send=lambda payload: glagol_cmds.append(dict(payload)),
+        )
+    )
+    bridge = gstbridge.GstBridge(panel)
+    bridge.ensure_injected = lambda: True
+    monkeypatch.setattr(gstbridge, "_should_parse_mp4_sidx", lambda url: False)
+
+    class FakeUpstream:
+        def __init__(self, start, length=1000, size=100000):
+            self._data = b"\x00" * length
+            self._pos = 0
+            end = start + length - 1
+            self.headers = {
+                "Content-Range": f"bytes {start}-{end}/{size}",
+                "Content-Length": str(length),
+                "Content-Type": "audio/mp4",
+            }
+
+        def read(self, n=-1):
+            if n is None or n < 0:
+                chunk = self._data[self._pos :]
+                self._pos = len(self._data)
+                return chunk
+            chunk = self._data[self._pos : self._pos + n]
+            self._pos += len(chunk)
+            return chunk
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        gstbridge,
+        "_open_range",
+        lambda url, start, end=None, attempts=12, timeout=2.5, max_elapsed=6.0: FakeUpstream(start),
+    )
+
+    try:
+        bridge.play("https://example.test/track1.m4a", title="T1", duration=200)
+        ov1 = Path(gstbridge.OVERRIDE_PATH).read_text(encoding="utf-8").strip()
+        assert "&gen=1" in ov1
+
+        req1 = urllib.request.Request(ov1, headers={"Range": "bytes=0-99"})
+        with urllib.request.urlopen(req1, timeout=3) as resp:
+            assert resp.status == 206
+            resp.read()
+
+        assert bridge._stream_started is True
+        anchored = time.time() - 120.0
+        bridge._seek_start_time = anchored
+
+        # Simulated second r_start == 0 (e.g. prefetch client): must NOT reset anchored _seek_start_time
+        req2 = urllib.request.Request(ov1, headers={"Range": "bytes=0-99"})
+        with urllib.request.urlopen(req2, timeout=3) as resp:
+            assert resp.status == 206
+            resp.read()
+
+        assert bridge._seek_start_time == anchored
+        assert bridge.player()["position"] >= 119000
+
+        # Effective duration prefers min(track_duration, streamer_dur) when both are positive
+        bridge.streamer = types.SimpleNamespace(snapshot=lambda: (0, 0, 0, 198.2, True))
+        assert bridge.player()["duration"] == 198200
+        bridge._track_duration = 195.0
+        assert bridge.player()["duration"] == 195000
+
+        # Second play increments gen so override string differs for hook_location.js
+        bridge.play("https://example.test/track2.m4a", title="T2", duration=180)
+        ov2 = Path(gstbridge.OVERRIDE_PATH).read_text(encoding="utf-8").strip()
+        assert "&gen=2" in ov2 and ov2 != ov1
+    finally:
+        bridge.close()
+
+
+def test_gstbridge_alice_cancel_syncs_disk_seq_and_hook_guards(tmp_path, monkeypatch):
+    import types
+    from pathlib import Path
+    from extmusic import gstbridge
+
+    cancel_path = tmp_path / "alice_cancel.txt"
+    monkeypatch.setattr(gstbridge, "PROXY_PORT", 0)
+    monkeypatch.setattr(gstbridge, "OVERRIDE_PATH", str(tmp_path / "override_url.txt"))
+    monkeypatch.setattr(gstbridge, "ALICE_CANCEL_PATH", str(cancel_path))
+
+    panel = types.SimpleNamespace(glagol=types.SimpleNamespace(state={}, send=lambda p: None))
+    bridge = gstbridge.GstBridge(panel)
+
+    try:
+        bridge.suppress_alice(tts_sec=4.5, music_sec=12.0)
+        seq1 = bridge._cancel_seq
+        future_tts = int(time.time() * 1000) + 5000
+        future_music = int(time.time() * 1000) + 12000
+
+        # Simulate assistant_max.py writing a higher seq directly on disk
+        higher_seq = seq1 + 5000
+        cancel_path.write_text(f"{higher_seq}|{future_tts}|{future_music}", encoding="utf-8")
+
+        bridge.clear_alice_music_suppression()
+        assert cancel_path.read_text(encoding="utf-8").strip() == f"{higher_seq}|{future_tts}|0"
+
+        # Expired tts window is clamped to 0 while preserving disk seq
+        seq2 = higher_seq + 100
+        expired_tts = int(time.time() * 1000) - 5000
+        cancel_path.write_text(f"{seq2}|{expired_tts}|{future_music}", encoding="utf-8")
+        bridge.clear_alice_music_suppression()
+        assert cancel_path.read_text(encoding="utf-8").strip() == f"{seq2}|0|0"
+
+        # clear_alice_tts_suppression also preserves disk seq and zeroes expired music window
+        seq3 = seq2 + 100
+        expired_music = int(time.time() * 1000) - 5000
+        cancel_path.write_text(f"{seq3}|{future_tts}|{expired_music}", encoding="utf-8")
+        bridge.clear_alice_tts_suppression()
+        assert cancel_path.read_text(encoding="utf-8").strip() == f"{seq3}|0|0"
+
+        hook_src = (
+            Path(__file__).resolve().parent.parent / "device" / "extmusic" / "hook_location.js"
+        ).read_text(encoding="utf-8")
+        assert "lastConsumedOverride" in hook_src
+        assert "seq > state.lastCancelSeq" in hook_src
+        assert "Date.now() < state.ttsMuteUntil" in hook_src
+    finally:
+        bridge.close()

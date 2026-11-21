@@ -20,12 +20,15 @@ function getHookState() {
       attachTimer: null,
       cancelTimer: null,
       lastCancelSeq: 0,
+      lastConsumedOverride: '',
       ttsMuteUntil: 0,
       musicMuteUntil: 0,
       sdkInst: null,
       onParseLaunch: null,
       onSeek: null
     };
+  } else if (root.__yapanelHookState.lastConsumedOverride === undefined) {
+    root.__yapanelHookState.lastConsumedOverride = '';
   }
   return root.__yapanelHookState;
 }
@@ -136,17 +139,17 @@ function readCancelState() {
     var musicUntil = parseInt(parts[2] || '0', 10) || 0;
     state.ttsMuteUntil = ttsUntil;
     state.musicMuteUntil = musicUntil;
-    if (seq > 0 && seq !== state.lastCancelSeq) {
+    if (seq > 0 && seq > state.lastCancelSeq) {
       state.lastCancelSeq = seq;
       writeLog('[ALICE_CANCEL] seq=' + seq + ' ttsUntil=' + ttsUntil + ' musicUntil=' + musicUntil + '\n');
       stopAliceNative();
       setTimeout(function () {
-        if (state.lastCancelSeq === seq && state.ttsMuteUntil > 0) {
+        if (state.lastCancelSeq === seq && Date.now() < state.ttsMuteUntil) {
           stopAliceNative();
         }
       }, 120);
       setTimeout(function () {
-        if (state.lastCancelSeq === seq && state.ttsMuteUntil > 0) {
+        if (state.lastCancelSeq === seq && Date.now() < state.ttsMuteUntil) {
           stopAliceNative();
         }
       }, 280);
@@ -174,27 +177,42 @@ function handleParseLaunch(args) {
     }
 
     var override = getOverrideUrl();
+    if (!override) {
+      state.lastConsumedOverride = '';
+    }
     var normGain = extractNormGain(override);
     var normTag = normGain !== null ? ' (norm=' + normGain.toFixed(4) + ')' : '';
-    if (override && str.indexOf('yio_souphttpsrc') !== -1) {
-      var modified = str;
-      modified = modified.replace(/alt-locations="[^"]*"\s*/g, '');
-      modified = modified.replace(/location="[^"]*"/g, 'location="' + override + '"');
-      modified = modified.replace(/!\s*aesctrdec\s+key=[0-9a-fA-F]+\s*!/g, '!');
-      modified = applyNormGain(modified, normGain);
-      writeLog('[GST_PARSE_LAUNCH] External URL -> ' + override.substr(0, 120) + normTag + '\n');
-      this.pipePtr = Memory.allocUtf8String(modified);
-      args[0] = this.pipePtr;
-    } else if (override && str.indexOf('filesrc') !== -1) {
-      var modFile = str.replace(
-        /filesrc\s+location="[^"]*"(?:\s*!\s*aesctrdec\s+key=[0-9a-fA-F]+)?\s*!/g,
-        'souphttpsrc location="' + override + '" name=yio_souphttpsrc !'
-      );
-      modFile = applyNormGain(modFile, normGain);
-      writeLog('[GST_PARSE_LAUNCH] External filesrc -> ' + override.substr(0, 120) + normTag + '\n');
-      this.pipePtr = Memory.allocUtf8String(modFile);
-      args[0] = this.pipePtr;
-    } else if ((str.indexOf('yio_souphttpsrc') !== -1 || str.indexOf('filesrc') !== -1) && now < state.musicMuteUntil) {
+    var isSoup = str.indexOf('yio_souphttpsrc') !== -1;
+    var isFileMusic = !isSoup && str.indexOf('filesrc') !== -1 && str.indexOf('/sounds/') === -1;
+    if (override && (isSoup || isFileMusic)) {
+      if (state.lastConsumedOverride === override) {
+        var mutedPrefetch = mutePipeline(str);
+        writeLog('[GST_PARSE_LAUNCH] Muted Yandex prefetch/auto-advance while external active\n');
+        this.pipePtr = Memory.allocUtf8String(mutedPrefetch);
+        args[0] = this.pipePtr;
+        return;
+      }
+      state.lastConsumedOverride = override;
+      if (isSoup) {
+        var modified = str;
+        modified = modified.replace(/alt-locations="[^"]*"\s*/g, '');
+        modified = modified.replace(/location="[^"]*"/g, 'location="' + override + '"');
+        modified = modified.replace(/!\s*aesctrdec\s+key=[0-9a-fA-F]+\s*!/g, '!');
+        modified = applyNormGain(modified, normGain);
+        writeLog('[GST_PARSE_LAUNCH] External URL -> ' + override.substr(0, 120) + normTag + '\n');
+        this.pipePtr = Memory.allocUtf8String(modified);
+        args[0] = this.pipePtr;
+      } else {
+        var modFile = str.replace(
+          /filesrc\s+location="[^"]*"(?:\s*!\s*aesctrdec\s+key=[0-9a-fA-F]+)?\s*!/g,
+          'souphttpsrc location="' + override + '" name=yio_souphttpsrc !'
+        );
+        modFile = applyNormGain(modFile, normGain);
+        writeLog('[GST_PARSE_LAUNCH] External filesrc -> ' + override.substr(0, 120) + normTag + '\n');
+        this.pipePtr = Memory.allocUtf8String(modFile);
+        args[0] = this.pipePtr;
+      }
+    } else if ((isSoup || isFileMusic) && now < state.musicMuteUntil) {
       var mutedMusic = mutePipeline(str);
       writeLog('[GST_PARSE_LAUNCH] Muted unwanted native music stream\n');
       this.pipePtr = Memory.allocUtf8String(mutedMusic);

@@ -539,7 +539,7 @@ class ExtMusicService:
     def _gst_player(self, current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         p = self.gst.player()
         cur = current if current is not None else self.current
-        if cur and cur.get("duration"):
+        if cur and cur.get("duration") and not p.get("duration"):
             p["duration"] = int(cur["duration"]) * 1000
         return p
 
@@ -2264,8 +2264,16 @@ class ExtMusicService:
 
     def _stop_yandex(self) -> None:
         try:
-            if getattr(getattr(self.panel, "glagol", None), "ws", None):
+            glagol = getattr(self.panel, "glagol", None)
+            if not getattr(glagol, "ws", None):
+                return
+            with self.lock:
+                has_current = self.current is not None
+                is_gst = self._is_gst_current()
+            if not has_current:
                 self.panel.music_cmd({"command": "stop"})
+            elif not is_gst and hasattr(glagol, "send"):
+                glagol.send({"command": "stop"})
         except Exception:  # noqa: BLE001 - Yandex may be offline; external music can still play
             pass
 
@@ -2546,8 +2554,18 @@ class ExtMusicService:
     @staticmethod
     def _is_yandex_auto_advance(state: Dict[str, Any], pstate: Dict[str, Any]) -> bool:
         """True when Yandex SDK auto-advanced from FALLBACK_TRACK_ID into Radio/My Wave without voice input."""
+        pid = str(pstate.get("id") or "").strip()
+        ptype = str(pstate.get("playerType") or "").strip().lower()
+        if not pid or pid == FALLBACK_TRACK_ID or pid.startswith("ext:") or ptype in ("external", "bluetooth"):
+            return False
         playlist_id = str(pstate.get("playlistId") or "").strip()
-        if playlist_id == f"track:{FALLBACK_TRACK_ID}":
+        if playlist_id in (FALLBACK_TRACK_ID, f"track:{FALLBACK_TRACK_ID}"):
+            return True
+        entity = pstate.get("entityInfo") if isinstance(pstate.get("entityInfo"), dict) else {}
+        entity_id = str(entity.get("id") or "").strip()
+        prev_info = entity.get("prev") if isinstance(entity.get("prev"), dict) else {}
+        prev_id = str(prev_info.get("id") or "").strip()
+        if entity_id in (FALLBACK_TRACK_ID, f"track:{FALLBACK_TRACK_ID}") or prev_id == FALLBACK_TRACK_ID:
             return True
         if playlist_id != "user:onyourwave":
             return False
@@ -2892,7 +2910,10 @@ class ExtMusicService:
                 )
         except Exception:  # noqa: BLE001 - best-effort native cancel
             pass
-        self._stop_yandex()
+        with self.lock:
+            gst_active = self._is_gst_current()
+        if clear_override or not gst_active:
+            self._stop_yandex()
         return {"ok": True}
 
     def alice_say(self, text: str) -> Dict[str, Any]:

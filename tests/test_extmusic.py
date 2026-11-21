@@ -1500,3 +1500,93 @@ def test_v044_synced_lyrics_clickable_album_disk_cache_failover_and_playlists(tm
     finally:
         svc.current = None
         svc.stop()
+
+
+
+def test_yandex_auto_advance_without_track_prefix_and_alice_cancel_keeps_gst_playing(tmp_path, monkeypatch):
+    import time as _time
+    import types
+    import server
+    from extmusic.service import ExtMusicService, FALLBACK_TRACK_ID
+
+    assert ExtMusicService._is_yandex_auto_advance(
+        {}, {"id": FALLBACK_TRACK_ID, "playlistId": FALLBACK_TRACK_ID, "playerType": "music"}
+    ) is False
+    assert ExtMusicService._is_yandex_auto_advance(
+        {}, {"id": "52469455", "playlistId": FALLBACK_TRACK_ID, "playerType": "music"}
+    ) is True
+    assert ExtMusicService._is_yandex_auto_advance(
+        {},
+        {
+            "id": "52469455",
+            "playlistId": "other",
+            "playerType": "music",
+            "entityInfo": {"id": "52469455", "prev": {"id": FALLBACK_TRACK_ID, "type": "Track"}},
+        },
+    ) is True
+    assert ExtMusicService._is_yandex_auto_advance(
+        {},
+        {
+            "id": "777",
+            "playlistId": "playlist:999",
+            "playerType": "music",
+            "entityInfo": {"id": "playlist:999"},
+        },
+    ) is False
+
+    glagol_sends = []
+    music_cmds = []
+
+    class StubGlagol:
+        ws = object()
+        state = {"playing": False, "playerState": {}}
+
+        def send(self, payload):
+            glagol_sends.append(dict(payload))
+
+    panel = object.__new__(server.Panel)
+    panel.glagol = StubGlagol()
+    panel.ymusic = types.SimpleNamespace(info=lambda tid: None)
+    panel._extmusic_service = None
+    panel.music_cmd = lambda payload: music_cmds.append(dict(payload)) or {"ok": True}
+
+    svc = _make_gst_test_service(tmp_path, monkeypatch, panel=panel)
+    panel._extmusic_service = svc
+
+    t1 = {
+        "source": "yt",
+        "id": "yt_1",
+        "title": "Track 1",
+        "artist": "Artist 1",
+        "duration": 200,
+    }
+    try:
+        svc.play(t1, [t1])
+        svc._ext_started_at = _time.time() - 5.0
+        assert svc._is_gst_current() is True
+
+        # Station Max Glagol auto-advance without "track:" prefix must NOT stop ExtMusicService
+        stopped = svc.maybe_auto_stop_from_glagol(
+            {
+                "state": {
+                    "playing": True,
+                    "playerState": {
+                        "id": "52469455",
+                        "playlistId": FALLBACK_TRACK_ID,
+                        "playerType": "music",
+                    },
+                }
+            }
+        )
+        assert stopped is False
+        assert svc.current is not None and svc.current["id"] == "yt_1"
+
+        # alice_cancel while GstBridge is playing must NOT bounce through panel.music_cmd({"command": "stop"})
+        music_cmds.clear()
+        res = svc.alice_cancel(tts_sec=4.5, music_sec=12.0, clear_override=False)
+        assert res["ok"] is True
+        assert music_cmds == []
+        assert svc.current is not None and svc.current["id"] == "yt_1"
+        assert svc.gst.player()["playing"] is True
+    finally:
+        svc.stop()
