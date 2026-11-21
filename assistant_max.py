@@ -831,6 +831,7 @@ class AssistantDaemon:
         self._ext_cache = None
         self._cancel_seq = 0
         self._last_cancel_at = 0.0
+        self._next_cancel_stop_media = True
         self._last_say_text = ""
         self._last_intercepted_phrase = ""
         self._last_intercepted_at = 0.0
@@ -1309,8 +1310,12 @@ class AssistantDaemon:
             pass
 
     def _alice_cancel(self):
+        stop_media = bool(getattr(self, "_next_cancel_stop_media", True))
+        self._next_cancel_stop_media = True
         self._last_cancel_at = time.time()
-        self._write_local_alice_cancel(tts_sec=4.5, music_sec=12.0)
+        self._write_local_alice_cancel(tts_sec=4.5, music_sec=12.0 if stop_media else 0.0)
+        if not stop_media:
+            return
         try:
             self.glagol.stop()
         except Exception:
@@ -1695,6 +1700,7 @@ class AssistantDaemon:
                 status = self._ext_status()
                 cur = status.get("current") if isinstance(status, dict) else None
                 if cur and (cur.get("source") or "yt") == "yt":
+                    self._next_cancel_stop_media = False
                     self._alice_cancel()
                     threading.Thread(target=self._ext_quick, args=("resume",), daemon=True).start()
                 else:
@@ -1750,6 +1756,7 @@ class AssistantDaemon:
             cur = self._ext_cache.get("current")
             if not cur:
                 return False
+            self._next_cancel_stop_media = legacy_action in ("stop", "pause")
             self._alice_cancel()
             if legacy_action == "what_playing":
                 self._say_async(f"Сейчас играет {cur.get('title') or 'без названия'} — {cur.get('artist') or 'неизвестный исполнитель'}.")
@@ -1761,11 +1768,26 @@ class AssistantDaemon:
             return True
 
         # Быстрый локальный путь (< 50 мс): один вызов /api/extmusic/voice.
+        # Для транспортных команд отменяем диалог Алисы ДО playMusic, чтобы quasar не
+        # игнорировал/не срывал запуск нового трека активным диалогом.
+        pre_cancelled = False
+        if not cache_fresh and legacy_action:
+            status_pre = self._ext_status()
+            if isinstance(status_pre, dict) and status_pre.get("current"):
+                self._ext_cache = status_pre
+                self._ext_at = time.time()
+                self._next_cancel_stop_media = legacy_action in ("stop", "pause")
+                self._alice_cancel()
+                pre_cancelled = True
+                if legacy_action in ("next", "prev", "resume"):
+                    time.sleep(0.15)
         try:
             vres = self._ext_call("/api/extmusic/voice", "POST", {"phrase": phrase}, timeout=1.5)
             if isinstance(vres, dict) and vres.get("handled"):
-                self._alice_cancel()
                 act_name = vres.get("action") or "voice"
+                if not pre_cancelled:
+                    self._next_cancel_stop_media = act_name in ("stop", "pause")
+                    self._alice_cancel()
                 print(f"внешняя музыка голосом ({act_name}, {vres.get('elapsed_ms', 0)}мс)", flush=True)
                 if act_name == "stop":
                     self._ext_cache = None
@@ -1786,6 +1808,7 @@ class AssistantDaemon:
         status = self._ext_status()
         if not status or not status.get("current") or not legacy_action:
             return False
+        self._next_cancel_stop_media = legacy_action in ("stop", "pause")
         self._alice_cancel()
         if legacy_action == "what_playing":
             current = status.get("current") or {}
