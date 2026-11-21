@@ -1641,6 +1641,32 @@ def test_yandex_music_find_track_id_and_gst_carrier_substitution(tmp_path, monke
     assert len(search_calls) == 1
     assert ym.find_track_id("Completely Different Song", "Someone Else", duration=211) is None
 
+    # Video title "Artist - 'Title' (Video)" with channel uploader fallback still matches Yandex catalog
+    def fake_req_split(path, query=None, form=None, timeout=15):
+        q_text = str((query or {}).get("text") or "")
+        if "Falling In Reverse" in q_text and "Voices In My Head" in q_text and "Epitaph" not in q_text:
+            return {
+                "tracks": {
+                    "results": [
+                        {
+                            "id": "132176657",
+                            "title": "Voices In My Head",
+                            "artists": [{"name": "Falling In Reverse"}],
+                            "available": True,
+                            "durationMs": 191440,
+                        }
+                    ]
+                }
+            }
+        return {"tracks": {"results": []}}
+
+    ym2 = glagol.YandexMusic(auth)
+    ym2._req = fake_req_split
+    assert (
+        ym2.find_track_id('Falling In Reverse - "Voices In My Head" (Video)', "Epitaph Records", duration=191)
+        == "132176657"
+    )
+
     from extmusic import fast_yt, ytdlp
     from extmusic.gstbridge import GstBridge
 
@@ -1661,13 +1687,17 @@ def test_yandex_music_find_track_id_and_gst_carrier_substitution(tmp_path, monke
     monkeypatch.setattr(GstBridge, "_init_streamer", lambda self, url: None)
     monkeypatch.setattr(GstBridge, "clear_alice_music_suppression", lambda self: None)
 
+    ym_lookups = []
     panel = object.__new__(server.Panel)
     panel.glagol = StubGlagol()
-    panel.ymusic = types.SimpleNamespace(
-        find_track_id=lambda title, artist="", duration=0, timeout=1.5: "373363"
-        if "Baby" in title
-        else None
-    )
+
+    def _stub_find(title, artist="", duration=0, timeout=1.5):
+        ym_lookups.append((title, artist))
+        if title == "Baby" and "Serj" in artist:
+            return "373363"
+        return None
+
+    panel.ymusic = types.SimpleNamespace(find_track_id=_stub_find)
     panel._extmusic_service = None
     panel.music_cmd = lambda payload: {"ok": True}
 
@@ -1678,10 +1708,16 @@ def test_yandex_music_find_track_id_and_gst_carrier_substitution(tmp_path, monke
     panel._extmusic_service = svc
     monkeypatch.setattr(svc.native, "available", lambda: False)
     monkeypatch.setattr(ytdlp, "available", lambda: True)
+    # fast_resolve returns YouTube channel uploader & raw video title — queue clean track meta must win!
     monkeypatch.setattr(
         fast_yt,
         "fast_resolve",
-        lambda video_id, cookies=None: {"url": f"https://rr.example/{video_id}.m4a", "duration": 211},
+        lambda video_id, cookies=None: {
+            "url": f"https://rr.example/{video_id}.m4a",
+            "duration": 211,
+            "title": 'Serj Tankian - "Baby" (Official Video)',
+            "artist": "serjtankianVEVO",
+        },
     )
     monkeypatch.setattr(
         ytdlp,
@@ -1692,8 +1728,8 @@ def test_yandex_music_find_track_id_and_gst_carrier_substitution(tmp_path, monke
     t1 = {
         "source": "yt",
         "id": "yt_baby",
-        "title": "Baby (Official Audio)",
-        "artist": "Serj Tankian - Topic",
+        "title": "Baby",
+        "artist": "Serj Tankian",
         "duration": 211,
     }
     t2 = {
@@ -1705,7 +1741,10 @@ def test_yandex_music_find_track_id_and_gst_carrier_substitution(tmp_path, monke
     }
     try:
         svc.play(t1, [t1, t2])
+        assert svc.current["title"] == "Baby"
+        assert svc.current["artist"] == "Serj Tankian"
         assert svc.current["ym_track_id"] == "373363"
+        assert ("Baby", "Serj Tankian") in ym_lookups
         assert {"command": "playMusic", "id": "373363", "type": "track"} in glagol_sends
 
         # Carrier state & auto-advance from "373363" must not falsely auto-stop ExtMusicService

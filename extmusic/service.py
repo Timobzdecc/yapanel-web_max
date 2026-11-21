@@ -568,17 +568,36 @@ class ExtMusicService:
         tid_s = str(tid or "").strip()
         return tid_s or None
 
+    @staticmethod
+    def _prefer_track_meta(track: Dict[str, Any], info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge resolved stream info without clobbering real YTMusic title/artist with channel uploader."""
+        inf = info if isinstance(info, dict) else {}
+        merged = {**inf, **track}
+        t_title = str(track.get("title") or "").strip()
+        i_title = str(inf.get("title") or "").strip()
+        if (not t_title or t_title in ("Без названия", "null")) and i_title:
+            merged["title"] = i_title
+        t_artist = str(track.get("artist") or "").strip()
+        i_artist = str(inf.get("artist") or "").strip()
+        if (not t_artist or t_artist.casefold() in ("youtube music", "youtube", "unknown", "без исполнителя")) and i_artist:
+            merged["artist"] = i_artist
+        if inf.get("duration"):
+            merged["duration"] = inf["duration"]
+        if inf.get("ym_track_id"):
+            merged["ym_track_id"] = inf["ym_track_id"]
+        return merged
+
     def _resolve_gst(self, track: Dict[str, Any]) -> Dict[str, Any]:
         video_id = str(track.get("id") or "")
         info = self._prefetch_get(video_id)
         ym_box: List[Optional[str]] = [None]
         ym_thread: Optional[threading.Thread] = None
-        ym_cand = {**track, **(info or {})}
+        ym_cand = self._prefer_track_meta(track, info)
         if str(ym_cand.get("ym_track_id") or "").strip():
             ym_box[0] = str(ym_cand["ym_track_id"]).strip()
         else:
             def _lookup_ym() -> None:
-                ym_box[0] = self._resolve_yandex_track_id(ym_cand, timeout=1.2)
+                ym_box[0] = self._resolve_yandex_track_id(ym_cand, timeout=1.5)
 
             ym_thread = threading.Thread(target=_lookup_ym, daemon=True, name="extmusic-ym-match")
             ym_thread.start()
@@ -589,13 +608,13 @@ class ExtMusicService:
             except Exception:
                 info = ytdlp.resolve(video_id, fast=True)
             if ym_thread is not None:
-                ym_thread.join(timeout=0.5)
+                ym_thread.join(timeout=0.9)
             if ym_box[0] and not info.get("ym_track_id"):
                 info["ym_track_id"] = ym_box[0]
             self._prefetch_put(video_id, info)
         else:
             if ym_thread is not None:
-                ym_thread.join(timeout=0.8)
+                ym_thread.join(timeout=1.0)
             if ym_box[0] and not info.get("ym_track_id"):
                 info["ym_track_id"] = ym_box[0]
                 self._prefetch_put(video_id, info)
@@ -607,7 +626,7 @@ class ExtMusicService:
             for k, v in info.items()
             if (v is not None and v != "") or k not in track
         }
-        return {**track, **clean_info, "url": url, "gst": True}
+        return {**self._prefer_track_meta(track, clean_info), "url": url, "gst": True}
 
     def _native_player(self, current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         cur = current if current is not None else (self.current or {})
@@ -1541,7 +1560,7 @@ class ExtMusicService:
             except Exception:
                 info = ytdlp.resolve(video_id, timeout=60)
             if track is not None and not info.get("ym_track_id"):
-                ym_id = self._resolve_yandex_track_id({**track, **info}, timeout=2.0)
+                ym_id = self._resolve_yandex_track_id(self._prefer_track_meta(track, info), timeout=2.0)
                 if ym_id:
                     info["ym_track_id"] = ym_id
             self._prefetch_put(video_id, info)
