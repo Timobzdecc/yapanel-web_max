@@ -734,7 +734,7 @@ class YandexMusic:
     def _norm_match_text(text):
         s = str(text or "").casefold().replace("ё", "е")
         s = re.sub(
-            r"\s*[\(\[](?:official|music\s*video|lyric\s*video|lyrics?|audio|hd|4k|hq|mv|visuali[sz]er)[^\)\]]*[\)\]]",
+            r"\s*[\(\[](?:official|music\s*video|lyric\s*video|lyrics?|audio|video|clip|hd|4k|hq|mv|visuali[sz]er|remaster(?:ed)?)[^\)\]]*[\)\]]",
             " ",
             s,
             flags=re.IGNORECASE,
@@ -748,6 +748,28 @@ class YandexMusic:
         self._sync_token()
         if not getattr(self.auth, "music_token", ""):
             return None
+        tid = self._find_track_id_once(title, artist, duration=duration, timeout=timeout)
+        if tid is not None:
+            return tid
+        raw_title = str(title or "").strip()
+        m = re.match(r"^\s*(.+?)\s+[-–—]\s+(.+?)\s*$", raw_title)
+        if m:
+            lhs_artist = m.group(1).strip(" \"'«»")
+            rhs_title = m.group(2).strip(" \"'«»")
+            if lhs_artist and rhs_title:
+                tid = self._find_track_id_once(rhs_title, lhs_artist, duration=duration, timeout=timeout)
+                if tid is not None:
+                    norm_title = self._norm_match_text(title)
+                    norm_artist = self._norm_match_text(artist)
+                    if norm_artist in ("youtube music", "youtube", "unknown", "без исполнителя"):
+                        norm_artist = ""
+                    ck = f"ym_id:{norm_artist}:{norm_title}:{int(round(float(duration or 0) / 10.0))}"
+                    lock = getattr(self, "_cache_lock", None)
+                    with (lock if lock is not None else contextlib.nullcontext()):
+                        self.cache[ck] = tid
+        return tid
+
+    def _find_track_id_once(self, title, artist="", duration=0, timeout=1.5):
         norm_title = self._norm_match_text(title)
         if not norm_title:
             return None
@@ -761,7 +783,13 @@ class YandexMusic:
             if ck in self.cache:
                 return self.cache[ck]
 
-        q_text = f"{artist} {title}".strip() if norm_artist else str(title).strip()
+        clean_q_title = re.sub(
+            r"\s*[\(\[](?:official|music\s*video|lyric\s*video|lyrics?|audio|video|clip|hd|4k|hq|mv|visuali[sz]er)[^\)\]]*[\)\]]",
+            " ",
+            str(title or ""),
+            flags=re.IGNORECASE,
+        ).strip() or str(title or "").strip()
+        q_text = f"{artist} {clean_q_title}".strip() if norm_artist else clean_q_title
         try:
             res = self._req("/search", {"text": q_text, "type": "track", "page": "0"}, timeout=timeout)
         except Exception:
