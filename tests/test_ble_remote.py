@@ -39,7 +39,7 @@ H: Handlers=kbd event2
 I: Bus=0005 Vendor=057a Product=006f Version=0000
 N: Name="Yandex Remote 2"
 S: Sysfs=/devices/virtual/misc/uhid/0005:057A:006F.0001/input/input4
-U: Uniq=54:a9:c8:97:c1:4e
+U: Uniq=00:00:5e:00:53:01
 H: Handlers=kbd event4
 
 I: Bus=0005 Vendor=057a Product=006f Version=0000

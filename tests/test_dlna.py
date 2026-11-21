@@ -156,7 +156,7 @@ class TestDlnaHelpers(unittest.TestCase):
             parse_didl_metadata(xxe)
 
     def test_device_and_scpd_xml_generation(self):
-        dev_xml = build_device_xml("http://192.168.1.144:8789", "Макс Кухня", "uuid:abc123")
+        dev_xml = build_device_xml("http://10.0.0.42:8789", "Макс Кухня", "uuid:abc123")
         self.assertIn("MediaRenderer:1", dev_xml)
         self.assertIn("AVTransport:1", dev_xml)
         self.assertIn("RenderingControl:1", dev_xml)

@@ -378,7 +378,7 @@
     multiroomEnabled: false,
     multiroomSyncVol: false,
     multiroomFollowers: [
-      { id: 'mr1', name: 'Кухня (Станция Мини 2)', url: 'http://192.168.1.148:8765', offset_ms: 0, enabled: false, last_status: 'готова', latency_ms: 4 },
+      { id: 'mr1', name: 'Кухня (Станция Мини 2)', url: 'http://10.0.0.48:8765', offset_ms: 0, enabled: false, last_status: 'готова', latency_ms: 4 },
     ],
     dspProfile: 'hifi',
     dspFilters: { subsonic: true, notch120: true, phase: true, treble: true, drc_bypass: true, loudness: true },
@@ -393,10 +393,10 @@
       fade_ms: 140,
       sensitivity: 65,
       bulbs: [
-        { id: 'b1', name: 'Люстра «Гроза соседей»', ip: '192.168.1.201', key: 'demo-key-01', role: 'ceiling', side: 'center', pos_x: 0.5, ver: '3.3', enabled: true, online: true, rgb: [255, 110, 40] },
-        { id: 'b2', name: 'Подсветка за телеком', ip: '192.168.1.202', key: 'demo-key-02', role: 'ambilight', side: 'left', pos_x: 0.15, ver: '3.4', enabled: true, online: true, rgb: [90, 170, 255] },
-        { id: 'b3', name: 'Торшер у лотка кота Бориса', ip: '192.168.1.203', key: 'demo-key-03', role: 'ambient', side: 'right', pos_x: 0.85, ver: '3.3', enabled: true, online: true, rgb: [190, 80, 255] },
-        { id: 'b4', name: 'Диско-шар в серверной', ip: '192.168.1.204', key: 'demo-key-04', role: 'accent', side: 'center', pos_x: 0.5, ver: '3.5', enabled: false, online: true, rgb: [40, 220, 140] },
+        { id: 'b1', name: 'Люстра «Гроза соседей»', ip: '10.0.0.201', key: 'demo-key-01', role: 'ceiling', side: 'center', pos_x: 0.5, ver: '3.3', enabled: true, online: true, rgb: [255, 110, 40] },
+        { id: 'b2', name: 'Подсветка за телеком', ip: '10.0.0.202', key: 'demo-key-02', role: 'ambilight', side: 'left', pos_x: 0.15, ver: '3.4', enabled: true, online: true, rgb: [90, 170, 255] },
+        { id: 'b3', name: 'Торшер у лотка кота Бориса', ip: '10.0.0.203', key: 'demo-key-03', role: 'ambient', side: 'right', pos_x: 0.85, ver: '3.3', enabled: true, online: true, rgb: [190, 80, 255] },
+        { id: 'b4', name: 'Диско-шар в серверной', ip: '10.0.0.204', key: 'demo-key-04', role: 'accent', side: 'center', pos_x: 0.5, ver: '3.5', enabled: false, online: true, rgb: [40, 220, 140] },
       ],
     },
     clockText: '',
@@ -435,7 +435,7 @@
       version: '2.4.1',
       latest: '2.4.1',
       platform: 'yandexstation_2',
-      host: '192.168.1.144',
+      host: '10.0.0.42',
       packages: [
         {
           id: 'wakeword',
@@ -922,7 +922,7 @@
         temp: '48200',
         kernel: '4.9.113',
         date: new Date().toLocaleString('ru-RU'),
-        ip_address: '192.168.1.144',
+        ip_address: '10.0.0.42',
         ssid: 'Kvartira_Без_Соседей_5G',
         freq: '5180',
         rssi: '-44',
@@ -1173,7 +1173,7 @@
       return jsonResponse({
         ok: true, enabled: state.dlnaEnabled, running: state.dlnaEnabled,
         friendly_name: 'Яндекс Станция Макс (Demo)', port: 8789,
-        device_url: 'http://192.168.1.144:8789/dlna/device.xml',
+        device_url: 'http://10.0.0.42:8789/dlna/device.xml',
         udn: 'uuid:yapanel-max-demo',
       });
     }
@@ -1333,7 +1333,7 @@
     }
     if (path === '/api/party/bulbs/scan') return jsonResponse([]);
     if (path === '/api/party/bulbs/add') {
-      state.party.bulbs.push({ id: body.id || ('b' + Date.now()), name: body.name || 'Новая лампа', ip: body.ip || '192.168.1.209', key: body.key || 'demo', role: body.role || 'ambient', side: body.side || 'center', pos_x: body.pos_x ?? 0.5, ver: body.ver || '3.3', enabled: true, online: true });
+      state.party.bulbs.push({ id: body.id || ('b' + Date.now()), name: body.name || 'Новая лампа', ip: body.ip || '10.0.0.209', key: body.key || 'demo', role: body.role || 'ambient', side: body.side || 'center', pos_x: body.pos_x ?? 0.5, ver: body.ver || '3.3', enabled: true, online: true });
       return jsonResponse({ ok: true });
     }
     if (path === '/api/party/bulbs/delete') {
@@ -1378,8 +1378,8 @@
         powered: state.btPowered, keep_off: state.btKeepOff, discoverable: false, pairable: true,
         alias: 'Яндекс Станция Макс (Demo)', pair_until: null,
         devices: [
-          { mac: '54:A9:C8:97:C1:4E', name: 'Yandex Remote 2 (Пульт)', icon: 'phone', paired: true, trusted: true, connected: true, battery: 88 },
-          { mac: 'AA:BB:CC:DD:EE:01', name: 'Наушники от соседа', icon: 'audio-headphones', paired: true, trusted: true, connected: false, battery: null },
+          { mac: '00:00:5E:00:53:01', name: 'Yandex Remote 2 (Пульт)', icon: 'phone', paired: true, trusted: true, connected: true, battery: 88 },
+          { mac: '00:00:5E:00:53:02', name: 'Наушники от соседа', icon: 'audio-headphones', paired: true, trusted: true, connected: false, battery: null },
         ],
       });
     }

@@ -29,16 +29,16 @@ class _FakePanel:
 class TestMultiroomValidationAndDiscovery(unittest.TestCase):
     def test_validate_follower_url_normalizes_lan_and_blocks_unsafe_targets(self):
         self.assertEqual(
-            validate_follower_url("192.168.1.145", self_ips={"192.168.1.144"}),
-            "http://192.168.1.145:8765",
+            validate_follower_url("10.0.0.43", self_ips={"10.0.0.42"}),
+            "http://10.0.0.43:8765",
         )
         self.assertEqual(
-            validate_follower_url("https://10.0.0.12:8766/", self_ips={"192.168.1.144"}),
+            validate_follower_url("https://10.0.0.12:8766/", self_ips={"10.0.0.42"}),
             "https://10.0.0.12:8766",
         )
         # Self IP on own port must be blocked
         with self.assertRaises(ValueError):
-            validate_follower_url("192.168.1.144:8765", self_ips={"192.168.1.144"}, self_port=8765)
+            validate_follower_url("10.0.0.42:8765", self_ips={"10.0.0.42"}, self_port=8765)
         # Loopback on different port allowed for local multi.py/testing, blocked on same port
         self.assertEqual(
             validate_follower_url("127.0.0.1:9001", self_port=8765),
@@ -49,11 +49,11 @@ class TestMultiroomValidationAndDiscovery(unittest.TestCase):
             "8.8.8.8:8765",
             "https://evil.example.com",
             "http://169.254.169.254:80",
-            "http://192.168.1.145:8765/path?x=1",
-            "http://user:pass@192.168.1.145:8765",
+            "http://10.0.0.43:8765/path?x=1",
+            "http://user:pass@10.0.0.43:8765",
         ):
             with self.assertRaises(ValueError, msg=bad):
-                validate_follower_url(bad, self_ips={"192.168.1.144"})
+                validate_follower_url(bad, self_ips={"10.0.0.42"})
 
     def test_load_speakers_json_followers(self):
         with tempfile.TemporaryDirectory() as td:
@@ -62,7 +62,7 @@ class TestMultiroomValidationAndDiscovery(unittest.TestCase):
                 json.dumps(
                     {
                         "speakers": [
-                            {"id": "hall", "name": "Зал", "device": "192.168.1.145:5555"},
+                            {"id": "hall", "name": "Зал", "device": "10.0.0.43:5555"},
                             {"id": "usb", "name": "USB", "device": "ABC123SERIAL"},
                         ]
                     }
@@ -71,7 +71,7 @@ class TestMultiroomValidationAndDiscovery(unittest.TestCase):
             )
             sugs = load_speakers_json_followers(root)
             self.assertEqual(len(sugs), 1)
-            self.assertEqual(sugs[0]["url"], "http://192.168.1.145:8765")
+            self.assertEqual(sugs[0]["url"], "http://10.0.0.43:8765")
             self.assertEqual(sugs[0]["name"], "Зал")
 
 
@@ -83,14 +83,14 @@ class TestMultiroomBroadcastAndGuard(unittest.TestCase):
         mr._http_post = lambda url, path, payload, timeout=3.5: (sent.append((url, path, payload)), {"ok": True})[1]
 
         mr.configure({"enabled": True, "sync_volume": True})
-        mr.add_follower("192.168.1.145", name="Кухня", offset_ms=120)
+        mr.add_follower("10.0.0.43", name="Кухня", offset_ms=120)
 
         track = {"source": "yt", "id": "vid12345678", "title": "Track", "artist": "Art", "url": "https://cdn/a.m4a"}
-        mr.on_master_play(track, relay_url="http://192.168.1.144:8788/stream.mp4?seek=0", blocking=True)
+        mr.on_master_play(track, relay_url="http://10.0.0.42:8788/stream.mp4?seek=0", blocking=True)
         play_calls = [c for c in sent if c[1] == "/api/extmusic/play"]
         self.assertEqual(len(play_calls), 1)
         self.assertTrue(play_calls[0][2]["multiroom_follower"])
-        self.assertEqual(play_calls[0][2]["track"]["url"], "http://192.168.1.144:8788/stream.mp4?seek=0")
+        self.assertEqual(play_calls[0][2]["track"]["url"], "http://10.0.0.42:8788/stream.mp4?seek=0")
 
         # Follower track must NEVER trigger re-broadcast (loop guard)
         sent.clear()

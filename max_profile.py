@@ -1227,7 +1227,7 @@ def install(s, profile):
 
             did_out, _, _ = self.adb.shell("getprop ro.serialno 2>/dev/null; getprop ro.boot.serialno 2>/dev/null", check=False)
             dids = [l.strip() for l in did_out.splitlines() if l.strip()]
-            did = dids[0] if dids else "X11RW6400260XK"
+            did = dids[0] if dids else "X0000000000000"
 
             self._version = {"quasar_version": ver, "device_id": did, "model": "max"}
             if getattr(self, "glagol", None):
