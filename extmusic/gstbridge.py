@@ -30,7 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import ipv4_urlopen
 from .fast_yt import VISIONOS_USER_AGENT
@@ -600,7 +600,7 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
                 return
             if r_start == 0:
                 with bridge._lock:
-                    if bridge._is_active and not bridge._is_paused:
+                    if bridge._is_active and not bridge._is_paused and not bridge._stream_started:
                         bridge._seek_start_time = time.time() + 0.35
                         bridge._stream_started = True
             if hdr_slice:
@@ -641,6 +641,8 @@ class GstBridge:
         self._last_injected_pid: Optional[int] = None
         self._is_active: bool = False
         self._is_paused: bool = False
+        self._glagol_track_id: str = FALLBACK_TRACK_ID
+        self._carrier_track_ids: List[str] = [FALLBACK_TRACK_ID]
         self._last_title: str = ""
         self._last_artist: str = ""
         self._last_url: str = ""
@@ -844,6 +846,47 @@ class GstBridge:
             q_path = shlex.quote(path)
             self._exec(f"echo -n '{b64}' | base64 -d > {q_path} && chmod 666 {q_path}")
 
+    def _read_device_file(self, path: str) -> str:
+        if os.environ.get("PANEL_LOCAL") == "1" or not hasattr(self.panel, "adb"):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read().strip()
+            except OSError:
+                pass
+        has_custom_exec = (
+            getattr(type(self), "_exec", None) is not GstBridge._exec
+            or self.__dict__.get("_exec") is not None
+        )
+        if hasattr(self.panel, "adb") or has_custom_exec:
+            q_path = shlex.quote(path)
+            return str(self._exec(f"cat {q_path} 2>/dev/null || true") or "").strip()
+        return ""
+
+    @staticmethod
+    def _parse_cancel_payload(raw: str) -> Tuple[int, int, int]:
+        parts = [p.strip() for p in str(raw or "").split("|")]
+        if len(parts) < 3:
+            return 0, 0, 0
+        try:
+            return int(parts[0] or 0), int(parts[1] or 0), int(parts[2] or 0)
+        except ValueError:
+            return 0, 0, 0
+
+    def _sync_cancel_state_from_disk(self) -> None:
+        """Merge newer ALICE_CANCEL_PATH seq written directly by assistant_max.py."""
+        raw = self._read_device_file(ALICE_CANCEL_PATH)
+        disk_seq, disk_tts, disk_music = self._parse_cancel_payload(raw)
+        if disk_seq <= 0:
+            return
+        with self._lock:
+            if disk_seq > self._cancel_seq:
+                self._cancel_seq = disk_seq
+                self._tts_mute_until_ms = disk_tts
+                self._music_mute_until_ms = disk_music
+            elif disk_seq == self._cancel_seq:
+                self._tts_mute_until_ms = max(self._tts_mute_until_ms, disk_tts)
+                self._music_mute_until_ms = max(self._music_mute_until_ms, disk_music)
+
     def _write_override(self, url: str) -> None:
         self._write_device_file(OVERRIDE_PATH, url)
 
@@ -854,6 +897,7 @@ class GstBridge:
         clear_override: bool = False,
     ) -> None:
         """Signal hook_location.js in com.yandex.io.sdk to cancel Alice dialog & mute unwanted streams."""
+        self._sync_cancel_state_from_disk()
         now_ms = int(time.time() * 1000)
         tts_ms = now_ms + int(max(0.0, float(tts_sec)) * 1000) if float(tts_sec or 0.0) > 0 else 0
         music_ms = now_ms + int(max(0.0, float(music_sec)) * 1000) if float(music_sec or 0.0) > 0 else 0
@@ -868,14 +912,22 @@ class GstBridge:
 
     def clear_alice_tts_suppression(self) -> None:
         """Allow panel's own 'Повтори за мной' speech while keeping unwanted music muted."""
+        self._sync_cancel_state_from_disk()
+        now_ms = int(time.time() * 1000)
         with self._lock:
             self._tts_mute_until_ms = 0
+            if self._music_mute_until_ms <= now_ms:
+                self._music_mute_until_ms = 0
             payload = f"{self._cancel_seq}|0|{self._music_mute_until_ms}"
         self._write_device_file(ALICE_CANCEL_PATH, payload)
 
     def clear_alice_music_suppression(self) -> None:
         """Allow new external music stream while preserving any remaining TTS suppression window."""
+        self._sync_cancel_state_from_disk()
+        now_ms = int(time.time() * 1000)
         with self._lock:
+            if self._tts_mute_until_ms <= now_ms:
+                self._tts_mute_until_ms = 0
             self._music_mute_until_ms = 0
             payload = f"{self._cancel_seq}|{self._tts_mute_until_ms}|0"
         self._write_device_file(ALICE_CANCEL_PATH, payload)
@@ -937,6 +989,7 @@ class GstBridge:
     def _proxy_url(self, seek_sec: float = 0.0, norm_gain: Optional[float] = None) -> Optional[str]:
         with self._lock:
             srv = self._server
+            gen = self._stream_gen
             active_gain = (
                 norm_gain
                 if norm_gain is not None
@@ -947,7 +1000,7 @@ class GstBridge:
         port = int(srv.server_address[1] or 0)
         if port <= 0:
             return None
-        url = f"http://127.0.0.1:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}"
+        url = f"http://127.0.0.1:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}&gen={gen}"
         if active_gain is not None:
             url += f"&norm={active_gain:.4f}"
         return url
@@ -969,14 +1022,26 @@ class GstBridge:
             return None
         return f"http://{host}:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}"
 
+    def active_carrier_track_id(self) -> str:
+        with self._lock:
+            return str(self._glagol_track_id or "").strip() or FALLBACK_TRACK_ID
+
+    def carrier_track_ids(self) -> Set[str]:
+        with self._lock:
+            ids = {str(x).strip() for x in self._carrier_track_ids if str(x).strip()}
+            ids.add(FALLBACK_TRACK_ID)
+            ids.add(str(self._glagol_track_id or "").strip() or FALLBACK_TRACK_ID)
+            return ids
+
     def _restart_glagol_playback(self, context: str) -> None:
+        carrier_id = self.active_carrier_track_id()
         try:
             self._send_glagol({"command": "stop"})
         except Exception:
             pass
         time.sleep(0.06)
         try:
-            self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
+            self._send_glagol({"command": "playMusic", "id": carrier_id, "type": "track"})
         except Exception as error:
             print(f"[GST] Glagol playMusic failed on {context}: {error}", flush=True)
 
@@ -988,6 +1053,7 @@ class GstBridge:
         duration: int = 0,
         fallback_urls: Optional[List[str]] = None,
         loudness_db: Optional[float] = None,
+        glagol_track_id: Optional[str] = None,
     ) -> int:
         if not url:
             raise GstBridgeError("Пустой адрес потока")
@@ -997,12 +1063,19 @@ class GstBridge:
             raise GstBridgeError("Не удалось подключить аудио-хук (frida-inject)")
         backups = [str(u) for u in (fallback_urls or []) if u and str(u) != url][:4]
         parse_sidx = _should_parse_mp4_sidx(url)
+        carrier_id = str(glagol_track_id or "").strip() or FALLBACK_TRACK_ID
         with self._lock:
             norm_gain = compute_norm_gain(loudness_db) if self._normalize_enabled else None
             self._last_loudness_db = loudness_db
             self._norm_gain = norm_gain
-            proxy_url = self._proxy_url(0.0, norm_gain=norm_gain)
+            self._glagol_track_id = carrier_id
+            if carrier_id not in self._carrier_track_ids:
+                self._carrier_track_ids.append(carrier_id)
+                if len(self._carrier_track_ids) > 8:
+                    tail = [x for x in self._carrier_track_ids if x != FALLBACK_TRACK_ID][-7:]
+                    self._carrier_track_ids = [FALLBACK_TRACK_ID, *tail]
             self._stream_gen += 1
+            proxy_url = self._proxy_url(0.0, norm_gain=norm_gain)
             self._last_url = url
             self._fallback_urls = backups
             self._last_title = title
@@ -1030,7 +1103,7 @@ class GstBridge:
 
         # 2. Trigger native playback via Glagol
         try:
-            self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
+            self._send_glagol({"command": "playMusic", "id": carrier_id, "type": "track"})
         except Exception as error:
             self.release()
             raise GstBridgeError(f"Ошибка запуска родного плеера: {error}") from error
@@ -1214,9 +1287,14 @@ class GstBridge:
         streamer_dur = 0.0
         if streamer is not None:
             _, _, _, streamer_dur, _ = streamer.snapshot()
-        effective_dur = track_duration if track_duration > 0 else (
-            streamer_dur if streamer_dur > 0 else dur_sec
-        )
+        if track_duration > 0 and streamer_dur > 0:
+            effective_dur = min(track_duration, streamer_dur)
+        elif track_duration > 0:
+            effective_dur = track_duration
+        elif streamer_dur > 0:
+            effective_dur = streamer_dur
+        else:
+            effective_dur = dur_sec
 
         return {
             "ok": True,

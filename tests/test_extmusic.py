@@ -1500,3 +1500,234 @@ def test_v044_synced_lyrics_clickable_album_disk_cache_failover_and_playlists(tm
     finally:
         svc.current = None
         svc.stop()
+
+
+
+def test_yandex_auto_advance_without_track_prefix_and_alice_cancel_keeps_gst_playing(tmp_path, monkeypatch):
+    import time as _time
+    import types
+    import server
+    from extmusic.service import ExtMusicService, FALLBACK_TRACK_ID
+
+    assert ExtMusicService._is_yandex_auto_advance(
+        {}, {"id": FALLBACK_TRACK_ID, "playlistId": FALLBACK_TRACK_ID, "playerType": "music"}
+    ) is False
+    assert ExtMusicService._is_yandex_auto_advance(
+        {}, {"id": "52469455", "playlistId": FALLBACK_TRACK_ID, "playerType": "music"}
+    ) is True
+    assert ExtMusicService._is_yandex_auto_advance(
+        {},
+        {
+            "id": "52469455",
+            "playlistId": "other",
+            "playerType": "music",
+            "entityInfo": {"id": "52469455", "prev": {"id": FALLBACK_TRACK_ID, "type": "Track"}},
+        },
+    ) is True
+    assert ExtMusicService._is_yandex_auto_advance(
+        {},
+        {
+            "id": "777",
+            "playlistId": "playlist:999",
+            "playerType": "music",
+            "entityInfo": {"id": "playlist:999"},
+        },
+    ) is False
+
+    glagol_sends = []
+    music_cmds = []
+
+    class StubGlagol:
+        ws = object()
+        state = {"playing": False, "playerState": {}}
+
+        def send(self, payload):
+            glagol_sends.append(dict(payload))
+
+    panel = object.__new__(server.Panel)
+    panel.glagol = StubGlagol()
+    panel.ymusic = types.SimpleNamespace(info=lambda tid: None)
+    panel._extmusic_service = None
+    panel.music_cmd = lambda payload: music_cmds.append(dict(payload)) or {"ok": True}
+
+    svc = _make_gst_test_service(tmp_path, monkeypatch, panel=panel)
+    panel._extmusic_service = svc
+
+    t1 = {
+        "source": "yt",
+        "id": "yt_1",
+        "title": "Track 1",
+        "artist": "Artist 1",
+        "duration": 200,
+    }
+    try:
+        svc.play(t1, [t1])
+        svc._ext_started_at = _time.time() - 5.0
+        assert svc._is_gst_current() is True
+
+        # Station Max Glagol auto-advance without "track:" prefix must NOT stop ExtMusicService
+        stopped = svc.maybe_auto_stop_from_glagol(
+            {
+                "state": {
+                    "playing": True,
+                    "playerState": {
+                        "id": "52469455",
+                        "playlistId": FALLBACK_TRACK_ID,
+                        "playerType": "music",
+                    },
+                }
+            }
+        )
+        assert stopped is False
+        assert svc.current is not None and svc.current["id"] == "yt_1"
+
+        # alice_cancel while GstBridge is playing must NOT bounce through panel.music_cmd({"command": "stop"})
+        music_cmds.clear()
+        res = svc.alice_cancel(tts_sec=4.5, music_sec=12.0, clear_override=False)
+        assert res["ok"] is True
+        assert music_cmds == []
+        assert svc.current is not None and svc.current["id"] == "yt_1"
+        assert svc.gst.player()["playing"] is True
+    finally:
+        svc.stop()
+
+
+
+def test_yandex_music_find_track_id_and_gst_carrier_substitution(tmp_path, monkeypatch):
+    import time as _time
+    import types
+    import glagol
+    import server
+    from extmusic.service import FALLBACK_TRACK_ID
+
+    auth = types.SimpleNamespace(music_token="tok_123")
+    ym = glagol.YandexMusic(auth)
+    search_calls = []
+
+    def fake_req(path, query=None, form=None, timeout=15):
+        search_calls.append((path, dict(query or {}), timeout))
+        return {
+            "tracks": {
+                "results": [
+                    {
+                        "id": "545447",
+                        "title": "Baby",
+                        "artists": [{"name": "Serj Tankian"}, {"name": "Auckland Philharmonia Orchestra"}],
+                        "available": True,
+                        "durationMs": 220600,
+                    },
+                    {
+                        "id": "373363",
+                        "title": "Baby",
+                        "artists": [{"name": "Serj Tankian"}],
+                        "available": True,
+                        "durationMs": 210860,
+                    },
+                    {
+                        "id": "999111",
+                        "title": "Baby",
+                        "artists": [{"name": "Serj Tankian"}],
+                        "available": False,
+                        "durationMs": 211000,
+                    },
+                ]
+            }
+        }
+
+    ym._req = fake_req
+    assert ym.find_track_id("Baby", "Serj Tankian", duration=211) == "373363"
+    # Second identical lookup must hit RAM cache without calling _req again
+    assert ym.find_track_id("Baby", "Serj Tankian", duration=211) == "373363"
+    assert len(search_calls) == 1
+    assert ym.find_track_id("Completely Different Song", "Someone Else", duration=211) is None
+
+    from extmusic import fast_yt, ytdlp
+    from extmusic.gstbridge import GstBridge
+
+    glagol_sends = []
+
+    class StubGlagol:
+        ws = object()
+        state = {"playing": False, "playerState": {}}
+
+        def send(self, payload):
+            glagol_sends.append(dict(payload))
+            return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(GstBridge, "_ensure_server", lambda self: None)
+    monkeypatch.setattr(GstBridge, "available", lambda self, max_age=8.0: True)
+    monkeypatch.setattr(GstBridge, "ensure_injected", lambda self: True)
+    monkeypatch.setattr(GstBridge, "_write_override", lambda self, url: None)
+    monkeypatch.setattr(GstBridge, "_init_streamer", lambda self, url: None)
+    monkeypatch.setattr(GstBridge, "clear_alice_music_suppression", lambda self: None)
+
+    panel = object.__new__(server.Panel)
+    panel.glagol = StubGlagol()
+    panel.ymusic = types.SimpleNamespace(
+        find_track_id=lambda title, artist="", duration=0, timeout=1.5: "373363"
+        if "Baby" in title
+        else None
+    )
+    panel._extmusic_service = None
+    panel.music_cmd = lambda payload: {"ok": True}
+
+    svc = ExtMusicService(panel)
+    svc.store = ExtMusicStore(tmp_path / "extmusic.json")
+    svc.yt_account.store = svc.store
+    svc.player = FakePlayer()
+    panel._extmusic_service = svc
+    monkeypatch.setattr(svc.native, "available", lambda: False)
+    monkeypatch.setattr(ytdlp, "available", lambda: True)
+    monkeypatch.setattr(
+        fast_yt,
+        "fast_resolve",
+        lambda video_id, cookies=None: {"url": f"https://rr.example/{video_id}.m4a", "duration": 211},
+    )
+    monkeypatch.setattr(
+        ytdlp,
+        "resolve",
+        lambda video_id, **kwargs: {"url": f"https://rr.example/{video_id}.m4a", "duration": 211},
+    )
+
+    t1 = {
+        "source": "yt",
+        "id": "yt_baby",
+        "title": "Baby (Official Audio)",
+        "artist": "Serj Tankian - Topic",
+        "duration": 211,
+    }
+    t2 = {
+        "source": "yt",
+        "id": "yt_unmatched",
+        "title": "Exclusive Demo Track",
+        "artist": "Unknown Indie",
+        "duration": 190,
+    }
+    try:
+        svc.play(t1, [t1, t2])
+        assert svc.current["ym_track_id"] == "373363"
+        assert {"command": "playMusic", "id": "373363", "type": "track"} in glagol_sends
+
+        # Carrier state & auto-advance from "373363" must not falsely auto-stop ExtMusicService
+        svc._ext_started_at = _time.time() - 5.0
+        assert (
+            svc.maybe_auto_stop_from_glagol(
+                {"state": {"playing": True, "playerState": {"id": "373363", "playlistId": "373363", "playerType": "music"}}}
+            )
+            is False
+        )
+        assert (
+            svc.maybe_auto_stop_from_glagol(
+                {"state": {"playing": True, "playerState": {"id": "52469455", "playlistId": "373363", "playerType": "music"}}}
+            )
+            is False
+        )
+        assert svc.current is not None and svc.current["id"] == "yt_baby"
+
+        # Unmatched YT track falls back to FALLBACK_TRACK_ID
+        glagol_sends.clear()
+        svc.play(t2, [t1, t2])
+        assert not svc.current.get("ym_track_id")
+        assert {"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"} in glagol_sends
+    finally:
+        svc.stop()

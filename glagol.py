@@ -731,6 +731,117 @@ class YandexMusic:
         return {**self.cache[tid], "liked": tid in self.liked()}
 
     @staticmethod
+    def _norm_match_text(text):
+        s = str(text or "").casefold().replace("ё", "е")
+        s = re.sub(
+            r"\s*[\(\[](?:official|music\s*video|lyric\s*video|lyrics?|audio|hd|4k|hq|mv|visuali[sz]er)[^\)\]]*[\)\]]",
+            " ",
+            s,
+            flags=re.IGNORECASE,
+        )
+        s = re.sub(r"\s*[-–—]\s*(?:topic|vevo)\b", " ", s, flags=re.IGNORECASE)
+        s = re.sub(r"[^\w]+", " ", s)
+        return " ".join(s.split())
+
+    def find_track_id(self, title, artist="", duration=0, timeout=1.5):
+        """Find best matching available Yandex Music track ID for external track metadata."""
+        self._sync_token()
+        if not getattr(self.auth, "music_token", ""):
+            return None
+        norm_title = self._norm_match_text(title)
+        if not norm_title:
+            return None
+        norm_artist = self._norm_match_text(artist)
+        if norm_artist in ("youtube music", "youtube", "unknown", "без исполнителя"):
+            norm_artist = ""
+        dur_sec = float(duration or 0)
+        ck = f"ym_id:{norm_artist}:{norm_title}:{int(round(dur_sec / 10.0))}"
+        lock = getattr(self, "_cache_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            if ck in self.cache:
+                return self.cache[ck]
+
+        q_text = f"{artist} {title}".strip() if norm_artist else str(title).strip()
+        try:
+            res = self._req("/search", {"text": q_text, "type": "track", "page": "0"}, timeout=timeout)
+        except Exception:
+            return None
+
+        tracks = ((res or {}).get("tracks") or {}).get("results") or []
+        norm_title_words = [w for w in norm_title.split() if len(w) >= 2] or norm_title.split()
+        norm_artist_words = [w for w in norm_artist.split() if len(w) >= 2] or norm_artist.split()
+        best_tid = None
+        best_score = -1e9
+
+        for tr in tracks[:10]:
+            if not isinstance(tr, dict) or tr.get("available", True) is False:
+                continue
+            tid = str(tr.get("id") or "").strip()
+            if not tid.isdigit():
+                continue
+            cand_base = self._norm_match_text(tr.get("title") or "")
+            if not cand_base:
+                continue
+            cand_ver = self._norm_match_text(tr.get("version") or "")
+            cand_full = f"{cand_base} {cand_ver}".strip() if cand_ver else cand_base
+            cand_words = cand_full.split()
+            cand_base_words = [w for w in cand_base.split() if len(w) >= 2] or cand_base.split()
+
+            exact_title = cand_base == norm_title or cand_full == norm_title
+            word_title = bool(norm_title_words) and (
+                all(w in cand_words for w in norm_title_words)
+                or all(w in norm_title.split() for w in cand_base_words)
+            )
+            if not (exact_title or word_title):
+                continue
+
+            cand_artists = [
+                self._norm_match_text(a.get("name") or "")
+                for a in (tr.get("artists") or [])
+                if isinstance(a, dict)
+            ]
+            cand_artists = [ca for ca in cand_artists if ca]
+            if norm_artist:
+                artist_ok = any(
+                    ca == norm_artist
+                    or ca in norm_artist
+                    or norm_artist in ca
+                    or bool(set([w for w in ca.split() if len(w) >= 2] or ca.split()) & set(norm_artist_words))
+                    for ca in cand_artists
+                )
+                if not artist_ok:
+                    continue
+
+            dur_diff = 0.0
+            has_dur = False
+            if dur_sec > 0 and tr.get("durationMs"):
+                cand_dur = float(tr["durationMs"]) / 1000.0
+                dur_diff = abs(cand_dur - dur_sec)
+                if dur_diff > max(45.0, dur_sec * 0.35):
+                    continue
+                has_dur = True
+
+            score = 40.0 if exact_title else (20.0 - min(12.0, abs(len(cand_words) - len(norm_title.split())) * 2.0))
+            if norm_artist and cand_artists:
+                if cand_artists[0] == norm_artist:
+                    score += 30.0
+                else:
+                    score += 15.0
+                score -= max(0, len(cand_artists) - 1) * 3.0
+            if cand_ver and cand_ver not in norm_title:
+                score -= 4.0
+            if has_dur:
+                score -= min(25.0, dur_diff)
+
+            if score > best_score:
+                best_score = score
+                best_tid = tid
+
+        with (lock if lock is not None else contextlib.nullcontext()):
+            self.cache[ck] = best_tid
+        return best_tid
+
+    @staticmethod
     def _parse_lrc(lrc):
         lines = []
         for ln in (lrc or "").splitlines():
