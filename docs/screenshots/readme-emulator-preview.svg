@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 340" role="img" aria-label="Интерактивный 3D-эмулятор панели управления Станцией Макс">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#12131c"/>
+      <stop offset="55%" stop-color="#171924"/>
+      <stop offset="100%" stop-color="#1d1412"/>
+    </linearGradient>
+    <linearGradient id="speakerBody" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#343742"/>
+      <stop offset="50%" stop-color="#22242c"/>
+      <stop offset="100%" stop-color="#17181f"/>
+    </linearGradient>
+    <linearGradient id="ringGlow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff6a00"/>
+      <stop offset="50%" stop-color="#ffb347"/>
+      <stop offset="100%" stop-color="#ff4d6d"/>
+    </linearGradient>
+    <linearGradient id="ctaGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ff6a00"/>
+      <stop offset="100%" stop-color="#ff8c2b"/>
+    </linearGradient>
+    <radialGradient id="ambient" cx="22%" cy="50%" r="42%">
+      <stop offset="0%" stop-color="#ff6a00" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#ff6a00" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="mesh" width="8" height="8" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#ffffff" fill-opacity="0.06"/>
+      <circle cx="6" cy="6" r="1" fill="#000000" fill-opacity="0.25"/>
+    </pattern>
+  </defs>
+
+  <rect width="920" height="340" rx="24" fill="url(#bg)" stroke="#2e3142" stroke-width="1.5"/>
+  <rect width="920" height="340" rx="24" fill="url(#ambient)"/>
+
+  <!-- 3D Station Max Illustration -->
+  <g transform="translate(88, 36)">
+    <!-- Shadow -->
+    <ellipse cx="105" cy="264" rx="88" ry="16" fill="#000000" fill-opacity="0.55"/>
+    <!-- Body -->
+    <rect x="25" y="34" width="160" height="224" rx="24" fill="url(#speakerBody)" stroke="#484d5e" stroke-width="1.5"/>
+    <rect x="25" y="34" width="160" height="224" rx="24" fill="url(#mesh)"/>
+    <!-- Top Rim & Animated 24-LED Ring -->
+    <ellipse cx="105" cy="36" rx="79" ry="18" fill="#181a22" stroke="#52586c" stroke-width="1.5"/>
+    <ellipse cx="105" cy="36" rx="64" ry="12" fill="none" stroke="url(#ringGlow)" stroke-width="4.5">
+      <animate attributeName="stroke-opacity" values="0.55;1;0.55" dur="2.2s" repeatCount="indefinite"/>
+    </ellipse>
+    <circle cx="105" cy="36" r="5" fill="#ff6a00"/>
+
+    <!-- Front 25x16 LED Matrix Window -->
+    <rect x="53" y="96" width="104" height="68" rx="8" fill="#0b0c10" stroke="#2c3040" stroke-width="1.2"/>
+    <g fill="#ff7d26">
+      <rect x="63" y="136" width="6" height="18" rx="2"><animate attributeName="height" values="10;38;18;44;10" dur="1.1s" repeatCount="indefinite"/><animate attributeName="y" values="144;116;136;110;144" dur="1.1s" repeatCount="indefinite"/></rect>
+      <rect x="73" y="122" width="6" height="32" rx="2"><animate attributeName="height" values="30;14;44;20;30" dur="0.9s" repeatCount="indefinite"/><animate attributeName="y" values="124;140;110;134;124" dur="0.9s" repeatCount="indefinite"/></rect>
+      <rect x="83" y="114" width="6" height="40" rx="2"><animate attributeName="height" values="42;22;36;12;42" dur="1.25s" repeatCount="indefinite"/><animate attributeName="y" values="112;132;118;142;112" dur="1.25s" repeatCount="indefinite"/></rect>
+      <rect x="93" y="128" width="6" height="26" rx="2"><animate attributeName="height" values="16;46;24;34;16" dur="1.0s" repeatCount="indefinite"/><animate attributeName="y" values="138;108;130;120;138" dur="1.0s" repeatCount="indefinite"/></rect>
+      <rect x="103" y="118" width="6" height="36" rx="2"><animate attributeName="height" values="36;16;44;26;36" dur="1.15s" repeatCount="indefinite"/><animate attributeName="y" values="118;138;110;128;118" dur="1.15s" repeatCount="indefinite"/></rect>
+      <rect x="113" y="126" width="6" height="28" rx="2"><animate attributeName="height" values="24;42;14;38;24" dur="0.95s" repeatCount="indefinite"/><animate attributeName="y" values="130;112;140;116;130" dur="0.95s" repeatCount="indefinite"/></rect>
+      <rect x="123" y="116" width="6" height="38" rx="2"><animate attributeName="height" values="38;20;34;46;38" dur="1.3s" repeatCount="indefinite"/><animate attributeName="y" values="116;134;120;108;116" dur="1.3s" repeatCount="indefinite"/></rect>
+      <rect x="133" y="132" width="6" height="22" rx="2"><animate attributeName="height" values="18;36;28;14;18" dur="1.05s" repeatCount="indefinite"/><animate attributeName="y" values="136;118;126;140;136" dur="1.05s" repeatCount="indefinite"/></rect>
+      <rect x="143" y="124" width="6" height="30" rx="2"><animate attributeName="height" values="28;12;40;22;28" dur="1.2s" repeatCount="indefinite"/><animate attributeName="y" values="126;142;114;132;126" dur="1.2s" repeatCount="indefinite"/></rect>
+    </g>
+    <text x="105" y="195" text-anchor="middle" fill="#a2a7bd" font-family="system-ui,sans-serif" font-size="11" font-weight="600">3D Three.js · вращение мышью</text>
+  </g>
+
+  <!-- Right Column: Emulator Info & Now Playing Card -->
+  <g transform="translate(320, 42)">
+    <rect x="0" y="0" width="212" height="26" rx="13" fill="#ff6a00" fill-opacity="0.16" stroke="#ff6a00" stroke-opacity="0.45"/>
+    <circle cx="16" cy="13" r="4.5" fill="#22c55e">
+      <animate attributeName="opacity" values="1;0.35;1" dur="1.4s" repeatCount="indefinite"/>
+    </circle>
+    <text x="29" y="17" fill="#ffb37a" font-family="system-ui,sans-serif" font-size="12" font-weight="700">LIVE DEMO · БЕЗ ЖЕЛЕЗА И ADB</text>
+
+    <text x="0" y="64" fill="#ffffff" font-family="system-ui,sans-serif" font-size="27" font-weight="800">Интерактивный 3D-эмулятор панели</text>
+    <text x="0" y="92" fill="#b4b9cc" font-family="system-ui,sans-serif" font-size="15">Покрутите Станцию Макс в 3D, покликайте все вкладки, покрутите</text>
+    <text x="0" y="113" fill="#b4b9cc" font-family="system-ui,sans-serif" font-size="15">10-полосный DSP, светомузыку Tuya, караоке и root-терминал.</text>
+
+    <!-- Comical Now Playing Mock Card -->
+    <rect x="0" y="132" width="552" height="74" rx="16" fill="#1b1d28" stroke="#313548"/>
+    <rect x="14" y="145" width="48" height="48" rx="10" fill="#ff6a00" fill-opacity="0.22" stroke="#ff6a00" stroke-opacity="0.5"/>
+    <text x="38" y="176" text-anchor="middle" fill="#ff9e59" font-family="system-ui,sans-serif" font-size="22">🔊</text>
+    <text x="76" y="164" fill="#ffffff" font-family="system-ui,sans-serif" font-size="15" font-weight="700">DJ Несущая Стена — Перфоратор соседа (10H Bass)</text>
+    <text x="76" y="185" fill="#9ca3b8" font-family="system-ui,sans-serif" font-size="12">Караоке · YouTube Music (−14 LUFS: трек +8.4 dB → ×0.38) · Синт-звук</text>
+    <rect x="76" y="194" width="458" height="4" rx="2" fill="#2d3142"/>
+    <rect x="76" y="194" width="180" height="4" rx="2" fill="#ff6a00">
+      <animate attributeName="width" values="90;390;90" dur="8s" repeatCount="indefinite"/>
+    </rect>
+
+    <!-- CTA Button -->
+    <rect x="0" y="222" width="336" height="44" rx="14" fill="url(#ctaGrad)"/>
+    <text x="168" y="249" text-anchor="middle" fill="#111116" font-family="system-ui,sans-serif" font-size="15" font-weight="800">▶ ОТКРЫТЬ ЖИВОЙ 3D-ЭМУЛЯТОР В БРАУЗЕРЕ</text>
+
+    <text x="356" y="249" fill="#9ca3b8" font-family="monospace" font-size="13">timobzdecc.github.io/yapanel-web_max</text>
+  </g>
+</svg>
