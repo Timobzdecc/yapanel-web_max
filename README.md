@@ -24,6 +24,52 @@
 > [!NOTE]
 > Проект находится в стадии **beta**: функции и установка могут меняться, возможны ошибки. Если что-то не работает — [откройте issue](https://github.com/Timobzdecc/yapanel-web_max/issues), приложив версию, модель станции и лог.
 
+## 🕹️ Интерактивный 3D-эмулятор панели (Live Demo)
+
+Можно покрутить **настоящую 3D-модель Станции Макс (Three.js)**, покликать все вкладки, послушать шуточные треки с живым караоке, покрутить DSP-эквалайзер, светомузыку Tuya и даже зайти в виртуальную root-консоль **прямо в браузере — без колонки и ADB**:
+
+<a href="https://timobzdecc.github.io/yapanel-web_max/">
+  <img src="docs/screenshots/readme-emulator-preview.svg" alt="Открыть живой 3D-эмулятор панели управления Станцией Макс">
+</a>
+
+<div align="center">
+
+[![Открыть 3D-эмулятор](https://img.shields.io/badge/▶%20Открыть%203D--эмулятор-Live%20Demo-ff6a00?style=for-the-badge)](https://timobzdecc.github.io/yapanel-web_max/)
+[![Обзор и 3D](https://img.shields.io/badge/3D%20%2B%20DSP-Обзор-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#overview)
+[![Плеер и караоке](https://img.shields.io/badge/🎵%20Плеер-Караоке-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#player)
+[![YouTube Music](https://img.shields.io/badge/▶%20YouTube-−14%20LUFS-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#yt)
+[![Анимации 25x16](https://img.shields.io/badge/📟%20Матрица-25×16-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#boot)
+[![Светомузыка](https://img.shields.io/badge/💡%20Светомузыка-Tuya-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#party)
+[![Root-консоль](https://img.shields.io/badge/>_%20Консоль-root%20uid%3D0-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#console)
+[![Файлы](https://img.shields.io/badge/📁%20Файлы-boot.img-2b2d3a?style=flat-square)](https://timobzdecc.github.io/yapanel-web_max/#files)
+
+</div>
+
+<details>
+<summary><b>🎵 Шуточный плеер и YouTube Music (−14 LUFS) — что можно покликать в эмуляторе</b></summary>
+
+- **10 шуточных треков с караоке-текстом:** от *«DJ Несущая Стена — Перфоратор соседа (10 Hours Bass Boosted)»* (`+8.4 dB` → автоматически приглушается до `×0.38`) до *«Пушистый Тыгыдык — Кот Борис уронил роутер в 4 утра»* и *«Хор Слёз и Паяльника — Песня про забытый backup boot.img»*.
+- **6 персональных YouTube-миксов:** *«Мой супермикс: Отвал ADB и басы»*, *«Микс для пайки UART в 3 часа ночи»*, *«Фитнес-микс: Бег к роутеру перезагружать DNS»*.
+- **Опциональный WebAudio синт-звук:** нажмите кнопку `🔇 Звук-синт` в правом верхнем углу эмулятора, чтобы слышать синтезаторную мелодию прямо из браузера (реагирует на громкость, mute и тумблер нормализации −14 LUFS!).
+
+</details>
+
+<details>
+<summary><b>🎛️ 3D-модель Станции Макс, живой DSP-эквалайзер и матрица 25×16</b></summary>
+
+- Вращайте 3D-модель колонки мышкой или пальцем, переключайте цвет корпуса, управляйте подсветкой **24 LED-кольца** и живой матрицей **25×16**.
+- На вкладках **Обзор** / **Анимации** запускайте пресеты экрана (`Портал`, `Плазма`, `Огонь`), а в **DSP** крутите 10-полосный эквалайзер, сабсоник 48 Гц и наблюдайте пересчёт АЧХ-графика в реальном времени.
+
+</details>
+
+<details>
+<summary><b>💻 Root-консоль, Файлы и секретные логи кота Бориса</b></summary>
+
+- Вкладка **Консоль** запускает интерактивный `xterm.js` терминал (`uid=0(root)`): попробуйте команды `help`, `boris`, `tinymix`, `ps`, `dmesg` или `rm -rf /`.
+- Вкладка **Файлы** открывает виртуальную ФС `/data/yapanel` с читаемыми и редактируемыми файлами `secret_cat_photos.txt`, `how_to_unbrick_station.md`, `who_ate_the_sausage.log` и `neighbors_complaints.json`.
+
+</details>
+
 ## 🎉 Что нового в 0.6.0
 
 **Глубокая интеграция с железом Станции Макс (пульт BLE, LED OSD, Dynamic Loudness в DSP), стриминг DLNA/UPnP, синхронный мультирум и быстрый голос.**
