@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Сборка интерактивного эмулятора для GitHub Pages
-        run: python3 tools/build_pages_demo.py _site
+        run: python3 docs/demo/build_pages_demo.py _site
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
