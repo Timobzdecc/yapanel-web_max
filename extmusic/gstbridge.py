@@ -30,7 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import ipv4_urlopen
 from .fast_yt import VISIONOS_USER_AGENT
@@ -641,6 +641,8 @@ class GstBridge:
         self._last_injected_pid: Optional[int] = None
         self._is_active: bool = False
         self._is_paused: bool = False
+        self._glagol_track_id: str = FALLBACK_TRACK_ID
+        self._carrier_track_ids: List[str] = [FALLBACK_TRACK_ID]
         self._last_title: str = ""
         self._last_artist: str = ""
         self._last_url: str = ""
@@ -1020,14 +1022,26 @@ class GstBridge:
             return None
         return f"http://{host}:{port}/stream.mp4?seek={seek_sec}&t={int(time.time() * 1000)}"
 
+    def active_carrier_track_id(self) -> str:
+        with self._lock:
+            return str(self._glagol_track_id or "").strip() or FALLBACK_TRACK_ID
+
+    def carrier_track_ids(self) -> Set[str]:
+        with self._lock:
+            ids = {str(x).strip() for x in self._carrier_track_ids if str(x).strip()}
+            ids.add(FALLBACK_TRACK_ID)
+            ids.add(str(self._glagol_track_id or "").strip() or FALLBACK_TRACK_ID)
+            return ids
+
     def _restart_glagol_playback(self, context: str) -> None:
+        carrier_id = self.active_carrier_track_id()
         try:
             self._send_glagol({"command": "stop"})
         except Exception:
             pass
         time.sleep(0.06)
         try:
-            self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
+            self._send_glagol({"command": "playMusic", "id": carrier_id, "type": "track"})
         except Exception as error:
             print(f"[GST] Glagol playMusic failed on {context}: {error}", flush=True)
 
@@ -1039,6 +1053,7 @@ class GstBridge:
         duration: int = 0,
         fallback_urls: Optional[List[str]] = None,
         loudness_db: Optional[float] = None,
+        glagol_track_id: Optional[str] = None,
     ) -> int:
         if not url:
             raise GstBridgeError("Пустой адрес потока")
@@ -1048,10 +1063,17 @@ class GstBridge:
             raise GstBridgeError("Не удалось подключить аудио-хук (frida-inject)")
         backups = [str(u) for u in (fallback_urls or []) if u and str(u) != url][:4]
         parse_sidx = _should_parse_mp4_sidx(url)
+        carrier_id = str(glagol_track_id or "").strip() or FALLBACK_TRACK_ID
         with self._lock:
             norm_gain = compute_norm_gain(loudness_db) if self._normalize_enabled else None
             self._last_loudness_db = loudness_db
             self._norm_gain = norm_gain
+            self._glagol_track_id = carrier_id
+            if carrier_id not in self._carrier_track_ids:
+                self._carrier_track_ids.append(carrier_id)
+                if len(self._carrier_track_ids) > 8:
+                    tail = [x for x in self._carrier_track_ids if x != FALLBACK_TRACK_ID][-7:]
+                    self._carrier_track_ids = [FALLBACK_TRACK_ID, *tail]
             self._stream_gen += 1
             proxy_url = self._proxy_url(0.0, norm_gain=norm_gain)
             self._last_url = url
@@ -1081,7 +1103,7 @@ class GstBridge:
 
         # 2. Trigger native playback via Glagol
         try:
-            self._send_glagol({"command": "playMusic", "id": FALLBACK_TRACK_ID, "type": "track"})
+            self._send_glagol({"command": "playMusic", "id": carrier_id, "type": "track"})
         except Exception as error:
             self.release()
             raise GstBridgeError(f"Ошибка запуска родного плеера: {error}") from error

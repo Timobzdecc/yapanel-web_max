@@ -16,7 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import fast_yt, ipv4_urlopen, ytdlp, ytmusic
 from .fast_yt import FastYTError
@@ -543,16 +543,62 @@ class ExtMusicService:
             p["duration"] = int(cur["duration"]) * 1000
         return p
 
+    def _resolve_yandex_track_id(self, track: Dict[str, Any], timeout: float = 1.5) -> Optional[str]:
+        existing = str(track.get("ym_track_id") or "").strip()
+        if existing:
+            return existing
+        ym = getattr(self.panel, "ymusic", None)
+        if ym is None or not hasattr(ym, "find_track_id"):
+            return None
+        raw_title = str(track.get("title") or "").strip()
+        raw_artist = str(track.get("artist") or "").strip()
+        clean_title, clean_artist = self.ytmusic.clean_track_meta(raw_title, raw_artist)
+        title = clean_title or raw_title
+        artist = clean_artist or raw_artist
+        if not title:
+            return None
+        try:
+            dur = float(track.get("duration") or 0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        try:
+            tid = ym.find_track_id(title, artist, duration=dur, timeout=timeout)
+        except Exception:  # noqa: BLE001 - best-effort Yandex catalog match
+            return None
+        tid_s = str(tid or "").strip()
+        return tid_s or None
+
     def _resolve_gst(self, track: Dict[str, Any]) -> Dict[str, Any]:
         video_id = str(track.get("id") or "")
         info = self._prefetch_get(video_id)
+        ym_box: List[Optional[str]] = [None]
+        ym_thread: Optional[threading.Thread] = None
+        ym_cand = {**track, **(info or {})}
+        if str(ym_cand.get("ym_track_id") or "").strip():
+            ym_box[0] = str(ym_cand["ym_track_id"]).strip()
+        else:
+            def _lookup_ym() -> None:
+                ym_box[0] = self._resolve_yandex_track_id(ym_cand, timeout=1.2)
+
+            ym_thread = threading.Thread(target=_lookup_ym, daemon=True, name="extmusic-ym-match")
+            ym_thread.start()
         if info is None:
             cookies = self.store.yt_cookies() or None
             try:
                 info = fast_yt.fast_resolve(video_id, cookies=cookies)
             except Exception:
                 info = ytdlp.resolve(video_id, fast=True)
+            if ym_thread is not None:
+                ym_thread.join(timeout=0.5)
+            if ym_box[0] and not info.get("ym_track_id"):
+                info["ym_track_id"] = ym_box[0]
             self._prefetch_put(video_id, info)
+        else:
+            if ym_thread is not None:
+                ym_thread.join(timeout=0.8)
+            if ym_box[0] and not info.get("ym_track_id"):
+                info["ym_track_id"] = ym_box[0]
+                self._prefetch_put(video_id, info)
         url = str(info.get("url") or "")
         if not url:
             raise ExtMusicError("Не удалось получить аудиопоток YouTube")
@@ -1485,7 +1531,7 @@ class ExtMusicService:
                 oldest = min(self._prefetch, key=lambda key: self._prefetch[key].get("at", 0))
                 self._prefetch.pop(oldest, None)
 
-    def _prefetch_one(self, video_id: str) -> None:
+    def _prefetch_one(self, video_id: str, track: Optional[Dict[str, Any]] = None) -> None:
         try:
             if self._prefetch_get(video_id):
                 return
@@ -1494,6 +1540,10 @@ class ExtMusicService:
                 info = fast_yt.fast_resolve(video_id, cookies=cookies)
             except Exception:
                 info = ytdlp.resolve(video_id, timeout=60)
+            if track is not None and not info.get("ym_track_id"):
+                ym_id = self._resolve_yandex_track_id({**track, **info}, timeout=2.0)
+                if ym_id:
+                    info["ym_track_id"] = ym_id
             self._prefetch_put(video_id, info)
         except Exception:  # noqa: BLE001 - prefetch is an optimization only
             pass
@@ -1511,7 +1561,7 @@ class ExtMusicService:
             if video_id in self._prefetching:
                 return
             self._prefetching.add(video_id)
-        threading.Thread(target=self._prefetch_one, args=(video_id,), daemon=True, name="extmusic-prefetch").start()
+        threading.Thread(target=self._prefetch_one, args=(video_id, track), daemon=True, name="extmusic-prefetch").start()
 
     def _prefetch_after(self, queue: Any, current: Dict[str, Any]) -> None:
         if str(current.get("source") or "") != "yt" or self.native.available() or not ytdlp.available():
@@ -1733,22 +1783,37 @@ class ExtMusicService:
                         resolved = self._resolve_gst(normalized)
                         fb_urls = list(resolved.pop("fallback_urls", None) or [])
                         dur_sec = int(resolved.get("duration") or normalized.get("duration") or 0)
+                        ym_tid = str(resolved.get("ym_track_id") or "").strip()
+                        play_kw: Dict[str, Any] = {
+                            "duration": dur_sec,
+                            "fallback_urls": fb_urls,
+                            "loudness_db": resolved.get("loudness_db"),
+                        }
+                        if ym_tid:
+                            play_kw["glagol_track_id"] = ym_tid
                         try:
                             self.gst.play(
                                 resolved["url"],
                                 str(normalized.get("title") or ""),
                                 str(normalized.get("artist") or ""),
-                                duration=dur_sec,
-                                fallback_urls=fb_urls,
-                                loudness_db=resolved.get("loudness_db"),
+                                **play_kw,
                             )
                         except TypeError:
-                            self.gst.play(
-                                resolved["url"],
-                                str(normalized.get("title") or ""),
-                                str(normalized.get("artist") or ""),
-                                duration=dur_sec,
-                            )
+                            play_kw.pop("glagol_track_id", None)
+                            try:
+                                self.gst.play(
+                                    resolved["url"],
+                                    str(normalized.get("title") or ""),
+                                    str(normalized.get("artist") or ""),
+                                    **play_kw,
+                                )
+                            except TypeError:
+                                self.gst.play(
+                                    resolved["url"],
+                                    str(normalized.get("title") or ""),
+                                    str(normalized.get("artist") or ""),
+                                    duration=dur_sec,
+                                )
                         resolved["duration"] = dur_sec
                         self._native_loading_until = 0.0
                         self._native_force_loading_until = 0.0
@@ -2551,21 +2616,47 @@ class ExtMusicService:
             return self.seek(0)
         return self.status()
 
+    def _active_carrier_track_id(self) -> str:
+        cur_id = str((self.current or {}).get("ym_track_id") or "").strip()
+        if cur_id:
+            return cur_id
+        gst_id = str(getattr(self.gst, "_glagol_track_id", "") or "").strip()
+        return gst_id or FALLBACK_TRACK_ID
+
+    def _carrier_track_ids(self) -> Set[str]:
+        ids: Set[str] = {FALLBACK_TRACK_ID, self._active_carrier_track_id()}
+        getter = getattr(self.gst, "carrier_track_ids", None)
+        if callable(getter):
+            try:
+                ids.update(str(x).strip() for x in getter() if str(x).strip())
+            except Exception:  # noqa: BLE001
+                pass
+        return ids
+
     @staticmethod
-    def _is_yandex_auto_advance(state: Dict[str, Any], pstate: Dict[str, Any]) -> bool:
-        """True when Yandex SDK auto-advanced from FALLBACK_TRACK_ID into Radio/My Wave without voice input."""
+    def _is_yandex_auto_advance(
+        state: Dict[str, Any],
+        pstate: Dict[str, Any],
+        carrier_ids: Optional[Set[str]] = None,
+        active_carrier_id: Optional[str] = None,
+    ) -> bool:
+        """True when Yandex SDK auto-advanced from a carrier track ID into Radio/My Wave without voice input."""
+        cids = {str(x).strip() for x in (carrier_ids or {FALLBACK_TRACK_ID}) if str(x).strip()} | {FALLBACK_TRACK_ID}
+        if active_carrier_id and str(active_carrier_id).strip():
+            cids.add(str(active_carrier_id).strip())
         pid = str(pstate.get("id") or "").strip()
         ptype = str(pstate.get("playerType") or "").strip().lower()
-        if not pid or pid == FALLBACK_TRACK_ID or pid.startswith("ext:") or ptype in ("external", "bluetooth"):
+        if not pid or pid in cids or pid.startswith("ext:") or ptype in ("external", "bluetooth"):
             return False
+        track_prefixed = {f"track:{cid}" for cid in cids}
         playlist_id = str(pstate.get("playlistId") or "").strip()
-        if playlist_id in (FALLBACK_TRACK_ID, f"track:{FALLBACK_TRACK_ID}"):
+        if playlist_id in cids or playlist_id in track_prefixed:
             return True
         entity = pstate.get("entityInfo") if isinstance(pstate.get("entityInfo"), dict) else {}
         entity_id = str(entity.get("id") or "").strip()
         prev_info = entity.get("prev") if isinstance(entity.get("prev"), dict) else {}
         prev_id = str(prev_info.get("id") or "").strip()
-        if entity_id in (FALLBACK_TRACK_ID, f"track:{FALLBACK_TRACK_ID}") or prev_id == FALLBACK_TRACK_ID:
+        if entity_id in cids or entity_id in track_prefixed or prev_id in cids:
             return True
         if playlist_id != "user:onyourwave":
             return False
@@ -2587,7 +2678,10 @@ class ExtMusicService:
             return False
         ptype = str(pstate.get("playerType") or "").strip().lower()
         pid = str(pstate.get("id") or "").strip()
-        if ptype == "external" or pid == FALLBACK_TRACK_ID or pid.startswith("ext:"):
+        with self.lock:
+            carrier_ids = self._carrier_track_ids()
+            active_carrier = self._active_carrier_track_id()
+        if ptype == "external" or pid in carrier_ids or pid.startswith("ext:"):
             return False
         if ptype != "bluetooth" and not pid:
             return False
@@ -2596,7 +2690,12 @@ class ExtMusicService:
                 return False
             if (time.time() - self._ext_started_at) < 3.0:
                 return False
-            if self._is_gst_current() and self._is_yandex_auto_advance(state, pstate):
+            if self._is_gst_current() and self._is_yandex_auto_advance(
+                state,
+                pstate,
+                carrier_ids=carrier_ids,
+                active_carrier_id=active_carrier,
+            ):
                 return False
         self.stop(stop_glagol=False)
         return True
@@ -2660,7 +2759,12 @@ class ExtMusicService:
                         isinstance(g_inner, dict)
                         and bool(g_inner.get("playing"))
                         and (time.time() - self._ext_started_at) >= 3.0
-                        and self._is_yandex_auto_advance(g_inner, g_pstate)
+                        and self._is_yandex_auto_advance(
+                            g_inner,
+                            g_pstate,
+                            carrier_ids=self._carrier_track_ids(),
+                            active_carrier_id=self._active_carrier_track_id(),
+                        )
                     )
                     if state == "ended" or yandex_leaked or (
                         state != "paused"
